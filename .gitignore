@@ -1,21 +1,17 @@
-# Per-machine state
-settings.json
-*.log
-*.log.1
-*.tmp
-
-# Build and release output
-*.exe
-*.pdb
-dist/
-.release-cache/
-
-# Dependencies downloaded by setup-runtime.ps1
+# Local managed runtime/state
+state/
 runtime/
-cloudflared.exe
-package-lock.json
+logs/
 
-# IDE artifacts
-.vs/
+# Build output
 bin/
 obj/
+dist/
+*.exe
+*.pdb
+
+# Local test output
+.test-output/
+
+# Upstream reference is intentionally a separate clone
+upstream/devspace/

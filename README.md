@@ -1,158 +1,102 @@
-# DevSpace Quick Tunnel Tray
+# DevSpace Control Platform
 
-Windows x64 tray wrapper for running DevSpace behind Cloudflare Tunnel and exposing a local coding workspace to ChatGPT through MCP.
+[中文](README.zh-CN.md)
 
-This project is built on top of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishnav/devspace). DevSpace provides the MCP/web-control layer that lets the ChatGPT web client access and operate a local coding workspace. This project does not replace DevSpace; it adds a lightweight Windows tray launcher, workspace selection, Cloudflare Tunnel configuration, runtime setup, and packaging so the DevSpace endpoint can be exposed to ChatGPT with much less manual configuration.
+DevSpace Control Platform is a Windows desktop control plane for running and supervising a local [DevSpace](https://github.com/Waishnav/devspace) instance behind Cloudflare Tunnel.
 
-In short: **DevSpace provides the ChatGPT-web-to-local-workspace control layer; this repository provides the Windows + Cloudflare quick configuration around it.**
+It is designed for people who want DevSpace to behave like a normal background application instead of a collection of command-line setup steps.
 
-The tray is the single process supervisor: it owns and supervises the DevSpace backend and the Cloudflare tunnel process it starts, instead of delegating either lifecycle to a separate Windows service.
+## What it provides
 
-This repository is the clean/public source tree. It intentionally excludes machine-specific configuration, logs, prebuilt runtimes, `node_modules`, Cloudflare credentials, and local tunnel identifiers.
+- Start / stop / restart DevSpace and Cloudflare independently.
+- Tray application with persistent background service supervision.
+- Version-aware DevSpace configuration for the validated 1.0.x and 1.1.x configuration families.
+- Managed Allowed Roots, tool mode, skills, logging, and effective-config diagnostics.
+- Protected Cloudflare Remote Tunnel token storage outside normal settings/history.
+- `doctor` and effective configuration inspection from the UI.
+- Per-GPT-workspace tool-call logs, separated from infrastructure/service logs.
+- Per-Git-project review history generated from DevSpace `show_changes`.
+- Multi-version rollback with safety checks instead of `git reset --hard`.
+- Independent platform-settings history.
 
-## What it does
+Subagents are intentionally disabled in the current product scope.
 
-- starts and supervises DevSpace;
-- supports Cloudflare Quick Tunnel and Named Tunnel;
-- restricts DevSpace to a user-selected workspace root;
-- defaults ChatGPT Web connections to the `minimal` DevSpace tool mode, while still supporting `full` and the experimental `codex` mode;
-- stores the DevSpace owner token outside this repository in `%USERPROFILE%\.devspace` with restricted Windows ACLs;
-- keeps DevSpace subagents disabled in this release because of the audited upstream dependency risk;
-- optionally registers Windows login autostart only when the user enables it;
-- rotates the tray log at approximately 5 MiB.
+## Code version history
 
-## Supported platform
+Each Git project gets its own review timeline:
 
-- Windows x64
-- .NET Framework 4.x runtime
-- PowerShell 5.1+ for setup/release scripts
-- internet access for the lightweight dependency setup mode
+```text
+Project A: V0 -> V1 -> V2 -> V3
+Project B: V0 -> V1
+```
 
-Git for Windows is recommended for DevSpace modes that use Bash-based tools. The tray discovers Git Bash from the Git for Windows registry entry, standard install locations, or `PATH`.
+Every observed `show_changes` creates a hidden Git snapshot and a concise review description. Earlier active versions can be selected and rolled back in one operation. Rollback first checks that the reverse patch can still be applied safely; later conflicting edits are not overwritten automatically.
 
-## Two release modes
+GPT conversations are tracked separately by DevSpace `workspaceId`, so logs from parallel conversations do not get mixed together even when they touch the same project.
 
-### 1. Lightweight release — recommended
+## Cloudflare model
 
-The normal GitHub Release stays small and does not include Node.js, `node_modules`, or cloudflared.
+The recommended setup is a remotely-managed Cloudflare Tunnel:
 
-After extracting the ZIP, run:
+```text
+ChatGPT / MCP client
+        |
+        v
+Cloudflare hostname
+        |
+        v
+cloudflared
+        |
+        v
+127.0.0.1:<DevSpace port>/mcp
+```
+
+The Tunnel token is stored in a protected local secret file and is excluded from normal settings, configuration history, and Git.
+
+## Build
+
+The desktop application is currently built with the Windows .NET Framework C# compiler available on the target machine:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+Output:
+
+```text
+bin\DevSpaceControlPlatform.exe
+```
+
+The repository intentionally does **not** commit managed runtime/state directories such as `runtime/`, `state/`, `logs/`, or `bin/`.
+
+## Install a release
+
+1. Download and extract `DevSpaceControlPlatform-vX.Y.Z-win-x64.zip` from GitHub Releases.
+2. In the extracted directory, run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup-runtime.ps1
 ```
 
-The script downloads pinned Node.js and cloudflared binaries, installs the pinned DevSpace npm package, then runs the security gate. After `Runtime ready.` appears, start:
+3. Start `DevSpaceControlPlatform.exe`.
+4. Add the project roots DevSpace may access, choose a local port, and configure a Cloudflare Remote Tunnel hostname.
+5. Paste the Tunnel token once into the protected Token field and save it.
 
-```text
-DevSpaceQuickTunnelTray.exe
-```
+The lightweight release does not include Node.js, DevSpace, cloudflared, machine settings, logs, OAuth state, or Tunnel secrets. `setup-runtime.ps1` downloads and verifies the pinned runtime components locally.
 
-### 2. Offline release
+## Upstream DevSpace
 
-Maintainers can generate a self-contained package that already contains Node.js, DevSpace dependencies, cloudflared, and third-party license texts:
+This project is built **around** DevSpace, but it is not a source fork of DevSpace itself.
 
-```powershell
-.\package-release.ps1 -Version 0.1.0 -Offline
-```
+- Upstream project: [Waishnav/devspace](https://github.com/Waishnav/devspace)
+- DevSpace owns the MCP server, workspace lifecycle, tools, review checkpoints, skills, and runtime behavior.
+- DevSpace Control Platform owns the Windows control UI, process supervision, tunnel integration, configuration adaptation, diagnostics, and local review/rollback presentation.
 
-This is substantially larger and should be used only when the target machine cannot download dependencies during setup.
+The local `upstream/devspace` checkout used during development is reference-only and is excluded from this repository.
 
-## First run
+## Current scope
 
-1. Start `DevSpaceQuickTunnelTray.exe`.
-2. Complete the settings dialog. A fresh install has no default Tunnel mode.
-3. Select an existing workspace root, keep `minimal` for normal ChatGPT Web use, and choose a valid local port. `full` is optional; `codex` is experimental and changes the exposed MCP tool schema.
-4. Explicitly select `Quick` or `Named` and satisfy every requirement for that mode.
-5. Only after the full preflight passes will the tray start DevSpace and Cloudflare connectivity.
-6. Copy the displayed MCP URL into ChatGPT.
-7. Copy the Owner password when the MCP authorization page requests it.
+This project currently targets Windows and a personal/local DevSpace workflow. It is not intended to replace DevSpace internals or become another agent harness.
 
-### Tool mode compatibility
+The main design rule is to expose DevSpace capabilities while keeping the control layer small, inspectable, and reversible.
 
-For ChatGPT Web, `minimal` is the default and recommended mode. It exposes the standard DevSpace file tools plus `bash`. `full` keeps that standard shell surface and adds dedicated inspection tools.
-
-`codex` is a different, experimental tool surface. It replaces the standard mutation/shell tools with `apply_patch`, `exec_command`, and `write_stdin`. Because MCP clients can cache the tool schema for an existing connector connection or conversation, changing between `minimal`/`full` and `codex` can leave the client trying to call a tool that the newly started backend no longer exposes. A typical symptom is ChatGPT trying to call `bash` while the backend is running in `codex` mode.
-
-This is a connection/tool-schema mismatch, not a broken installation. After changing Tool mode, restart the tray/backend, refresh or reconnect the ChatGPT MCP connection, and start a new conversation if the old conversation still exposes the previous tool list. Reinstallation is not required.
-
-### Strict startup gate
-
-Startup is fail-closed. The tray does not partially start DevSpace and then hope the remaining Cloudflare configuration works. If any global or mode-specific prerequisite is missing, the status window reports `启动已阻止` and no DevSpace/tunnel startup is attempted.
-
-Global prerequisites for every mode:
-
-- workspace root exists;
-- tool mode and local port are valid;
-- the DevSpace runtime is complete: Node.js and DevSpace CLI must both be available;
-- a Tunnel mode was explicitly selected.
-
-Mode-specific prerequisites:
-
-| Mode | Required before startup | Notes |
-| --- | --- | --- |
-| `Quick` | `cloudflared.exe` plus all global prerequisites | Temporary test mode only. It deliberately has no user-owned Tunnel UUID or fixed hostname; Cloudflare generates a `trycloudflare.com` URL that can change after restart. |
-| `Named` | fixed hostname, Tunnel UUID/name, existing credentials JSON, existing cloudflared YAML config, `cloudflared.exe`, plus all global prerequisites | Use this when the tray owns the fixed named tunnel process. Missing any field/file blocks saving or startup. |
-If you need a stable Cloudflare domain, use `Named`; do not use `Quick`.
-
-For a typical Named Tunnel, Cloudflare must provide a Tunnel UUID/name and a DNS hostname routed to that Tunnel. Enter the hostname without `https://`, select the credentials JSON file, and select a cloudflared YAML config whose ingress target points to the local DevSpace port, for example `http://127.0.0.1:7676`.
-
-## Build from source
-
-```powershell
-.\build.ps1
-```
-
-The build uses the .NET Framework 4.x C# compiler already present on supported Windows systems and produces `DevSpaceQuickTunnelTray.exe`.
-
-## Create release packages
-
-Lightweight:
-
-```powershell
-.\package-release.ps1 -Version 0.1.0
-```
-
-Offline:
-
-```powershell
-.\package-release.ps1 -Version 0.1.0 -Offline
-```
-
-Both modes include the C# source, setup/release scripts, dependency download references, example settings, third-party notices, and the security audit document.
-
-## Dependency policy
-
-The Git repository pins `@waishnav/devspace` to the exact version `1.0.8`, but does not commit Node.js, cloudflared, `node_modules`, an extracted runtime, or a large transitive lockfile. `setup-runtime.ps1` installs that exact DevSpace version into the local runtime, generates a local lockfile, and immediately runs `audit-runtime.ps1`.
-
-This keeps the repository small while retaining a fail-closed security gate: audited core dependency version drift, new advisories, or any critical finding blocks setup. Updating DevSpace requires updating the pinned version and rerunning the runtime/security checks.
-
-See [DOWNLOADS.md](DOWNLOADS.md) for direct official dependency URLs and checksums.
-
-## Security status
-
-Current status is **PASS WITH KNOWN UPSTREAM RISK**, not `npm audit = 0`.
-
-The reviewed findings are in the Pi subagent dependency path. This release forces `DEVSPACE_SUBAGENTS=0`, and `audit-runtime.ps1` blocks newly introduced advisories, critical findings, or audited-version drift.
-
-See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full decision and re-audit conditions.
-
-## Files intentionally excluded from GitHub
-
-- `settings.json`
-- `DevSpaceQuickTunnelTray.log*`
-- `*.exe` build output
-- `cloudflared.exe`
-- `runtime/`
-- `node_modules/`
-- `dist/`
-- `.release-cache/`
-- Cloudflare credentials, tokens, tunnel IDs, or private hostnames
-
-## Dependency sources
-
-Pinned dependency downloads are listed in [DOWNLOADS.md](DOWNLOADS.md). Third-party distribution notes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Project license
-
-This wrapper is released under the MIT License. See [LICENSE](LICENSE). Third-party software keeps its own upstream licenses.

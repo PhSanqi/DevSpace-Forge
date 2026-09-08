@@ -1,8 +1,8 @@
 {
   "private": true,
-  "name": "devspace-quick-tunnel-tray-runtime",
-  "version": "0.1.0",
+  "name": "devspace-control-platform-runtime",
+  "version": "0.2.0",
   "dependencies": {
-    "@waishnav/devspace": "1.0.8"
+    "@waishnav/devspace": "1.1.0-beta.1"
   }
 }
