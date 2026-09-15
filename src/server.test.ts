@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
@@ -168,6 +168,50 @@ test("Claude edit and bash tools accept snake_case runtime inputs", async (t) =>
     },
   }));
   assert.match(shell.result as string, /nested/i);
+});
+
+test("read rejects a symlink that leaves the workspace", async (t) => {
+  const context = await fixture(t, { toolMode: "claude", uiEnabled: false });
+  const outside = await mkdtemp(join(tmpdir(), "devspace-server-outside-test-"));
+  t.after(async () => rm(outside, { recursive: true, force: true }));
+  await writeFile(join(outside, "secret.txt"), "outside secret\n");
+
+  const outsideLink = join(context.project, "outside-link");
+  await symlink(outside, outsideLink, platform() === "win32" ? "junction" : "dir");
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "symlink-read"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const result = await context.client.callTool({
+    name: "read",
+    arguments: { workspace_id: workspaceId, path: "outside-link/secret.txt" },
+  });
+  assert.equal(result.isError, true);
+});
+
+test("write rejects a new file through a symlink that leaves the workspace", async (t) => {
+  const context = await fixture(t, { toolMode: "claude", uiEnabled: false });
+  const outside = await mkdtemp(join(tmpdir(), "devspace-server-outside-test-"));
+  t.after(async () => rm(outside, { recursive: true, force: true }));
+
+  const outsideLink = join(context.project, "outside-link");
+  await symlink(outside, outsideLink, platform() === "win32" ? "junction" : "dir");
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "symlink-write"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const result = await context.client.callTool({
+    name: "write",
+    arguments: {
+      workspace_id: workspaceId,
+      path: "outside-link/new.txt",
+      content: "escaped\n",
+    },
+  });
+  assert.equal(result.isError, true);
+  await assert.rejects(access(join(outside, "new.txt")));
 });
 
 test("UI metadata is limited to workspace and aggregate review", async (t) => {

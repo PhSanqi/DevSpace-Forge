@@ -589,7 +589,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         },
         startedAt,
         async () => {
-          const cwd = workspaces.resolveWorkingDirectory(
+          const cwd = await workspaces.resolveWorkingDirectory(
             workspace,
             workingDirectory,
           );

@@ -60,11 +60,8 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const workspace = await workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await writeFileTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-      });
+      const path = await workspaces.resolvePath(workspace, input.path);
+      const response = await writeFileTool({ ...input, path }, { cwd: workspace.root });
 
       if (response.isError) {
         logFailedToolResponse(
@@ -130,17 +127,15 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const workspace = await workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
+      const path = await workspaces.resolvePath(workspace, input.path);
       const response = await editFileTool({
         ...input,
+        path,
         edits: edits.map(({ old_text, new_text }) => ({
           oldText: old_text,
           newText: new_text,
         })),
-      }, {
-        cwd: workspace.root,
-        root: workspace.root,
-      });
+      }, { cwd: workspace.root });
 
       if (response.isError) {
         logFailedToolResponse(
@@ -214,13 +209,12 @@ function registerShellTool(context: ToolRegistrationContext): void {
       const workspaceId = workspace_id;
       const workingDirectory = working_directory;
       const workspace = await workspaces.getWorkspace(workspaceId);
-      const cwd = workspaces.resolveWorkingDirectory(
+      const cwd = await workspaces.resolveWorkingDirectory(
         workspace,
         workingDirectory,
       );
       const response = await runShellTool(input, {
         cwd,
-        root: workspace.root,
       });
 
       if (response.isError) {
