@@ -33,7 +33,15 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "show_changes"],
+      expected: [
+        "open_workspace",
+        "read",
+        "apply_patch",
+        "context_pack",
+        "exec_command",
+        "write_stdin",
+        "show_changes",
+      ],
     },
   ];
 
@@ -136,6 +144,33 @@ test("Codex exposes Serena semantics directly and through the cached-tool compat
   assert.equal(calls[1]?.args.name_path_pattern, "Example");
   assert.equal(calls[1]?.args.relative_path, "");
   assert.equal(calls[1]?.args.include_info, true);
+
+  const packed = structuredContent(await context.client.callTool({
+    name: "context_pack",
+    arguments: {
+      workspace_id: workspaceId,
+      path: "src.ts",
+      depth: "focused",
+      max_chars: 2_500,
+    },
+  }));
+  assert.match(packed.result as string, /semantic:get_symbols_overview/);
+  assert.equal(packed.semantic, true);
+
+  const cachedCompatibility = structuredContent(await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: "devspace-context src.ts - focused 2500",
+    },
+  }));
+  assert.match(cachedCompatibility.result as string, /semantic:get_symbols_overview/);
+  assert.deepEqual(calls.map((call) => call.tool), [
+    "get_symbols_overview",
+    "find_symbol",
+    "get_symbols_overview",
+    "get_symbols_overview",
+  ]);
 });
 
 test("Claude edit and bash tools accept snake_case runtime inputs", async (t) => {
@@ -188,6 +223,53 @@ test("read rejects a symlink that leaves the workspace", async (t) => {
     arguments: { workspace_id: workspaceId, path: "outside-link/secret.txt" },
   });
   assert.equal(result.isError, true);
+});
+
+test("read discovers nested instructions lazily once per conversation and bounds default output", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  await mkdir(join(context.project, "nested"));
+  await writeFile(join(context.project, "nested", "AGENTS.md"), "nested read rules\n");
+  await writeFile(
+    join(context.project, "nested", "large.ts"),
+    Array.from(
+      { length: 600 },
+      (_, index) => `export const value_${index + 1} = "${"x".repeat(70)}";`,
+    ).join("\n"),
+  );
+  const conversation = "lazy-read-context";
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, conversation),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const callRead = () => context.client.callTool({
+    name: "read",
+    arguments: {
+      workspace_id: workspaceId,
+      path: "nested/large.ts",
+    },
+    _meta: { "openai/session": conversation },
+  } as Parameters<Client["callTool"]>[0]);
+
+  const first = structuredContent(await callRead());
+  assert.match(first.result as string, /nested read rules/);
+  assert.match(first.result as string, /value_1/);
+  assert.doesNotMatch(first.result as string, /value_300/);
+  assert.ok((first.result as string).length <= 32_000);
+  assert.deepEqual(first.instruction_paths, ["nested/AGENTS.md"]);
+
+  const second = structuredContent(await callRead());
+  assert.doesNotMatch(second.result as string, /nested read rules/);
+  assert.deepEqual(second.instruction_paths, ["nested/AGENTS.md"]);
+
+  const tools = await context.client.listTools();
+  const readTool = tools.tools.find((tool) => tool.name === "read");
+  const limitSchema = readTool?.inputSchema?.properties?.limit as {
+    maximum?: number;
+    description?: string;
+  } | undefined;
+  assert.equal(limitSchema?.maximum, 2_000);
+  assert.match(limitSchema?.description ?? "", /Defaults to 240/);
 });
 
 test("write rejects a new file through a symlink that leaves the workspace", async (t) => {
