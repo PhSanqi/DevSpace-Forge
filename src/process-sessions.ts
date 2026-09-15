@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { ProcessRunLogger } from "./compact-runtime/process-run-store.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
@@ -41,6 +42,11 @@ export interface ProcessSnapshot {
   exitCode?: number;
   signal?: string;
   wallTimeMs: number;
+  runId?: string;
+  command?: string;
+  outputBytes?: number;
+  outputLines?: number;
+  logError?: string;
 }
 
 interface ManagedProcess {
@@ -63,11 +69,13 @@ interface ProcessSession {
   exitPromise: Promise<void>;
   resolveExit: () => void;
   cleanupTimer?: NodeJS.Timeout;
+  logger?: ProcessRunLogger;
 }
 
 interface ProcessSessionManagerOptions {
   maxBufferCharacters?: number;
   completedSessionTtlMs?: number;
+  runRoot?: string;
 }
 
 function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
@@ -215,14 +223,24 @@ export class ProcessSessionManager {
   private readonly maxBufferCharacters: number;
   private readonly completedSessionTtlMs: number;
   private nextSessionId = 1;
+  readonly runRoot?: string;
 
   constructor(options: ProcessSessionManagerOptions = {}) {
     this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
     this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
+    this.runRoot = options.runRoot;
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
-    const session = this.createSession(input);
+    const logger = this.runRoot
+      ? await ProcessRunLogger.create({
+          command: input.command,
+          cwd: input.cwd,
+          workspaceRoot: input.workspaceRoot ?? input.cwd,
+          root: this.runRoot,
+        })
+      : undefined;
+    const session = this.createSession(input, logger);
     this.sessions.set(session.id, session);
 
     try {
@@ -230,6 +248,7 @@ export class ProcessSessionManager {
       else this.startPipe(session, input);
     } catch (error) {
       this.sessions.delete(session.id);
+      if (logger) void logger.finish({ exitCode: 1 });
       throw error;
     }
 
@@ -301,7 +320,10 @@ export class ProcessSessionManager {
     }
   }
 
-  private createSession(input: StartCommandInput): ProcessSession {
+  private createSession(
+    input: StartCommandInput,
+    logger?: ProcessRunLogger,
+  ): ProcessSession {
     let resolveExit = (): void => undefined;
     const exitPromise = new Promise<void>((resolve) => {
       resolveExit = resolve;
@@ -317,6 +339,7 @@ export class ProcessSessionManager {
       running: true,
       exitPromise,
       resolveExit,
+      logger,
     };
   }
 
@@ -388,6 +411,9 @@ export class ProcessSessionManager {
     session.exitCode = exitCode;
     session.signal = signal;
     session.resolveExit();
+    if (session.logger) {
+      void session.logger.finish({ exitCode, signal });
+    }
     session.cleanupTimer = setTimeout(
       () => this.sessions.delete(session.id),
       this.completedSessionTtlMs,
@@ -396,6 +422,7 @@ export class ProcessSessionManager {
   }
 
   private append(session: ProcessSession, output: string): void {
+    session.logger?.append(output);
     session.buffer.append(output);
   }
 
@@ -403,6 +430,7 @@ export class ProcessSessionManager {
     const limit = boundedInteger(maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
     const maxCharacters = Math.max(256, limit * 4);
     const buffered = session.buffer.drain(maxCharacters);
+    const log = session.logger?.snapshot();
 
     return {
       sessionId: session.running ? session.id : undefined,
@@ -412,6 +440,11 @@ export class ProcessSessionManager {
       exitCode: session.exitCode,
       signal: session.signal,
       wallTimeMs: Date.now() - session.startedAt,
+      runId: log?.runId,
+      command: log?.command,
+      outputBytes: log?.outputBytes,
+      outputLines: log?.outputLines,
+      logError: log?.logError,
     };
   }
 
