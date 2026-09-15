@@ -13,6 +13,7 @@ import type { LocalAgentProviderAvailability } from "./local-agent-availability.
 import { buildLocalAgentProviderStatuses } from "./local-agent-catalog.js";
 import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import { SerenaSemanticManager } from "./serena-semantic.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
@@ -82,6 +83,59 @@ test("Codex process tools bound model-facing yield windows to 12 seconds", async
     assert.equal(yieldSchema?.maximum, 12_000);
     assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
   }
+});
+
+test("Codex exposes Serena semantics directly and through the cached-tool compatibility command", async (t) => {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const semantic = new SerenaSemanticManager({
+    available: true,
+    createClient: async () => ({
+      callTool: async ({ name, arguments: args }) => {
+        calls.push({ tool: name, args: args ?? {} });
+        return { structuredContent: { result: `semantic:${name}` } };
+      },
+      close: async () => undefined,
+    }),
+  });
+  t.after(async () => semantic.close());
+  const context = await fixture(t, {
+    toolMode: "codex",
+    uiEnabled: false,
+    semantic,
+  });
+  const tools = await context.client.listTools();
+  assert.ok(tools.tools.some((tool) => tool.name === "semantic_code"));
+
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "semantic-compat"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const direct = structuredContent(await context.client.callTool({
+    name: "semantic_code",
+    arguments: {
+      workspace_id: workspaceId,
+      action: "overview",
+      path: "src.ts",
+    },
+  }));
+  assert.equal(direct.result, "semantic:get_symbols_overview");
+
+  const compatibility = structuredContent(await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: "devspace-semantic find Example - info",
+    },
+  }));
+  assert.equal(compatibility.result, "semantic:find_symbol");
+  assert.deepEqual(calls.map((call) => call.tool), [
+    "get_symbols_overview",
+    "find_symbol",
+  ]);
+  assert.equal(calls[1]?.args.name_path_pattern, "Example");
+  assert.equal(calls[1]?.args.relative_path, "");
+  assert.equal(calls[1]?.args.include_info, true);
 });
 
 test("Claude edit and bash tools accept snake_case runtime inputs", async (t) => {
@@ -722,6 +776,7 @@ async function fixture(
     subagents?: SubagentsConfig;
     toolMode?: ToolMode;
     uiEnabled?: boolean;
+    semantic?: SerenaSemanticManager;
   } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
@@ -799,6 +854,8 @@ async function fixture(
     new ProcessSessionManager(),
     resolveLocalAgentProviders,
     [],
+    undefined,
+    options.semantic,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-test-client", version: "1.0.0" });
