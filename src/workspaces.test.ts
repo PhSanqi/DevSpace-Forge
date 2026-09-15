@@ -17,7 +17,7 @@ import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
 const execFileAsync = promisify(execFile);
 
-test("a checkout exposes initial and nested instruction context", async (t) => {
+test("a checkout keeps bootstrap instructions small and discovers nested instructions lazily", async (t) => {
   const context = await fixture(t);
   const opened = await context.registry.openWorkspace(context.root);
 
@@ -27,9 +27,17 @@ test("a checkout exposes initial and nested instruction context", async (t) => {
     opened.agentsFiles.map((file) => file.content),
     ["global instructions\n", "root instructions\n"],
   );
+  assert.deepEqual(opened.availableAgentsFiles, []);
+  const nested = await context.registry.loadApplicableAgentsFiles(
+    opened.workspace,
+    "nested/file.txt",
+  );
   assert.deepEqual(
-    opened.availableAgentsFiles.map((file) => file.path),
-    [join(context.root, "nested", "AGENTS.md")],
+    nested.map((file) => ({ path: file.path, content: file.content })),
+    [{
+      path: join(context.root, "nested", "AGENTS.md"),
+      content: "nested instructions\n",
+    }],
   );
   assert.deepEqual(
     opened.workspace.agentProfiles.map((profile) => ({
@@ -46,6 +54,50 @@ test("a checkout exposes initial and nested instruction context", async (t) => {
     }],
   );
 
+});
+
+test("lazy nested instruction discovery follows path ancestry without scanning siblings", async (t) => {
+  const context = await fixture(t);
+  await mkdir(join(context.root, "nested", "deep"));
+  await writeFile(
+    join(context.root, "nested", "deep", "CLAUDE.md"),
+    "deep instructions\n",
+  );
+  await writeFile(join(context.root, "nested", "deep", "target.ts"), "export const x = 1;\n");
+  await mkdir(join(context.root, "unrelated"));
+  await writeFile(join(context.root, "unrelated", "AGENTS.md"), "unrelated instructions\n");
+
+  const opened = await context.registry.openWorkspace(context.root);
+  const files = await context.registry.loadApplicableAgentsFiles(
+    opened.workspace,
+    "nested/deep/target.ts",
+  );
+
+  assert.deepEqual(
+    files.map((file) => [file.path, file.content]),
+    [
+      [join(context.root, "nested", "AGENTS.md"), "nested instructions\n"],
+      [join(context.root, "nested", "deep", "CLAUDE.md"), "deep instructions\n"],
+    ],
+  );
+});
+
+test("lazy nested instruction discovery rejects symlink escapes", {
+  skip: platform() === "win32",
+}, async (t) => {
+  const context = await fixture(t);
+  const escaped = join(context.outsideRoot, "escaped-agents.md");
+  await writeFile(escaped, "outside nested instructions\n");
+  await rm(join(context.root, "nested", "AGENTS.md"));
+  await symlink(escaped, join(context.root, "nested", "AGENTS.md"));
+
+  const opened = await context.registry.openWorkspace(context.root);
+  const files = await context.registry.loadApplicableAgentsFiles(
+    opened.workspace,
+    "nested/file.txt",
+  );
+
+  assert.deepEqual(files, []);
 });
 
 test("global instruction symlinks may target user-managed files outside agentDir", {

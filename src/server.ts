@@ -47,7 +47,11 @@ import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
-import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import {
+  formatAgentsPath,
+  WorkspaceRegistry,
+  type LoadedAgentsFile,
+} from "./workspaces.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
@@ -195,6 +199,63 @@ const workspaceLocalAgentProviderOutputSchema = z.object({
 const workspaceAvailableAgentsFileOutputSchema = z.object({
   path: z.string(),
 });
+
+const DEFAULT_READ_LINES = 240;
+const MAX_READ_LINES = 2_000;
+const MAX_READ_TEXT_CHARS = 24_000;
+const MAX_LAZY_INSTRUCTION_CHARS = 8_000;
+
+function clipSequentialText(value: string, maxChars: number): {
+  text: string;
+  truncated: boolean;
+} {
+  if (value.length <= maxChars) return { text: value, truncated: false };
+  const marker = "\n… [read output clipped; use offset/limit, context_pack, or semantic_code for the next focused slice]";
+  const head = Math.max(0, maxChars - marker.length);
+  return {
+    text: `${value.slice(0, head)}${marker}`,
+    truncated: true,
+  };
+}
+
+function boundReadContent(
+  content: ToolContent[],
+  maxChars = MAX_READ_TEXT_CHARS,
+): { content: ToolContent[]; truncated: boolean } {
+  let remaining = maxChars;
+  let truncated = false;
+  const bounded: ToolContent[] = [];
+  for (const item of content) {
+    if (item.type !== "text") {
+      bounded.push(item);
+      continue;
+    }
+    if (remaining <= 0) {
+      truncated = true;
+      continue;
+    }
+    const clipped = clipSequentialText(item.text, remaining);
+    bounded.push({ type: "text", text: clipped.text });
+    remaining -= clipped.text.length;
+    truncated ||= clipped.truncated;
+  }
+  return { content: bounded, truncated };
+}
+
+function formatLazyInstructions(
+  files: LoadedAgentsFile[],
+  workspaceRoot: string,
+): { text: string; truncated: boolean } {
+  if (files.length === 0) return { text: "", truncated: false };
+  const raw = [
+    "Applicable nested instructions discovered for this path:",
+    ...files.flatMap((file) => [
+      `--- ${formatAgentsPath(file.path, workspaceRoot)} ---`,
+      file.content.trim(),
+    ]),
+  ].join("\n");
+  return clipSequentialText(raw, MAX_LAZY_INSTRUCTION_CHARS);
+}
 
 function sendJsonRpcError(
   res: Response,
@@ -446,6 +507,7 @@ function registerMcpSurface(
     async ({ path, mode, base_ref }, { _meta }) => {
       const startedAt = performance.now();
       const baseRef = base_ref;
+      const conversationScopeId = conversationScopeIdFromRequestMeta(_meta);
       const {
         workspace,
         agentsFiles,
@@ -454,7 +516,7 @@ function registerMcpSurface(
         includeBootstrapContext,
       } = await workspaces.openWorkspace(
         { path, mode, baseRef },
-        { conversationScopeId: conversationScopeIdFromRequestMeta(_meta) },
+        { conversationScopeId },
       );
       const review = await reviewCheckpoints.initializeWorkspace({
         workspaceId: workspace.id,
@@ -488,7 +550,16 @@ function registerMcpSurface(
           note: provider.note,
         }));
       const cardAgents = agentCatalog.profiles;
+      const dedupedAgentsFiles = workspaces.dedupeConversationAgentsFiles(
+        conversationScopeId,
+        workspace.root,
+        agentsFiles,
+      );
       const cardAgentsFiles = agentsFiles.map((file) => ({
+        path: formatAgentsPath(file.path, workspace.root),
+        content: file.content,
+      }));
+      const freshAgentsFiles = dedupedAgentsFiles.files.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
         content: file.content,
       }));
@@ -498,11 +569,11 @@ function registerMcpSurface(
       const visibleSkills = includeBootstrapContext ? cardSkills : [];
       const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
       const visibleAgents = includeBootstrapContext ? cardAgents : [];
-      const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
+      const loadedAgentsFiles = includeBootstrapContext ? freshAgentsFiles : [];
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
       const cardInstruction = config.skillsEnabled
-        ? "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Before working under a path listed in available_agents_files, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-        : "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Before working under a path listed in available_agents_files, read that instruction file.";
+        ? "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Nested AGENTS.md/CLAUDE.md files are discovered automatically when a path is read or packed; do not recursively search for them. When a task matches an available skill in skills, read its path before proceeding."
+        : "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Nested AGENTS.md/CLAUDE.md files are discovered automatically when a path is read or packed; do not recursively search for them.";
       const workspaceInstruction = workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
@@ -532,6 +603,9 @@ function registerMcpSurface(
             `Mode: ${workspace.mode}`,
             loadedAgentsFiles.length > 0
               ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+              : undefined,
+            dedupedAgentsFiles.reusedPaths.length > 0
+              ? `Reused instruction context already present in this conversation: ${dedupedAgentsFiles.reusedPaths.join(", ")}`
               : undefined,
             availableAgentsFileOutputs.length > 0
               ? `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
@@ -624,8 +698,9 @@ function registerMcpSurface(
       title: "Read file",
       description:
         [
-          "Read all or part of a file in a workspace.",
-          "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+          `Read a focused slice of a file in a workspace. Without an explicit limit, DevSpace returns at most ${DEFAULT_READ_LINES} lines and bounds model-visible text.`,
+          "Nested AGENTS.md/CLAUDE.md instructions applicable to the requested path are discovered automatically and surfaced once per conversation when possible.",
+          "For source code, prefer context_pack first and semantic_code for symbol relations instead of escalating to broad whole-file reads.",
           config.skillsEnabled
             ? "If available skills were returned and a task matches one, read the returned skill path before proceeding."
             : "",
@@ -653,19 +728,29 @@ function registerMcpSurface(
           .number()
           .int()
           .positive()
+          .max(MAX_READ_LINES)
           .optional()
-          .describe("Maximum number of lines to read."),
+          .describe(
+            `Maximum number of lines to read. Defaults to ${DEFAULT_READ_LINES}; maximum ${MAX_READ_LINES}.`,
+          ),
       },
-      outputSchema: resultOutputSchema(),
+      outputSchema: resultOutputSchema({
+        truncated: z.boolean(),
+        instruction_paths: z.array(z.string()),
+      }),
       annotations: { readOnlyHint: true },
     },
-    async ({ workspace_id, ...input }) => {
+    async ({ workspace_id, ...input }, { _meta }) => {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const workspace = await workspaces.getWorkspace(workspaceId);
       const readPath = await workspaces.resolveReadPath(workspace, input.path);
       const response = await readFileTool(
-        { ...input, path: readPath.absolutePath },
+        {
+          ...input,
+          path: readPath.absolutePath,
+          limit: input.limit ?? DEFAULT_READ_LINES,
+        },
         { cwd: workspace.root },
       );
 
@@ -678,6 +763,26 @@ function registerMcpSurface(
         return response;
       }
 
+      const conversationScopeId = conversationScopeIdFromRequestMeta(_meta);
+      const applicableInstructions = readPath.skillRead
+        ? []
+        : await workspaces.loadApplicableAgentsFiles(workspace, input.path);
+      const dedupedInstructions = workspaces.dedupeConversationAgentsFiles(
+        conversationScopeId,
+        workspace.root,
+        applicableInstructions,
+      );
+      const instructionContext = formatLazyInstructions(
+        dedupedInstructions.files,
+        workspace.root,
+      );
+      const instructionPaths = applicableInstructions.map((file) =>
+        formatAgentsPath(file.path, workspace.root));
+      const bounded = boundReadContent(response.content as ToolContent[]);
+      const content: ToolContent[] = instructionContext.text
+        ? [textBlock(instructionContext.text), ...bounded.content]
+        : bounded.content;
+
       logToolCall(config, {
         tool: toolNames.read,
         workspaceId,
@@ -688,8 +793,11 @@ function registerMcpSurface(
 
       return {
         ...response,
+        content,
         structuredContent: {
-          result: contentText(response.content),
+          result: contentText(content),
+          truncated: bounded.truncated || instructionContext.truncated,
+          instruction_paths: instructionPaths,
         },
       };
     },

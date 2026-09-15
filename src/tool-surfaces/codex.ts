@@ -3,9 +3,15 @@ import { applyPatch } from "../apply-patch.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
 import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import {
+  buildContextPack,
+  type ContextPackDepth,
+  type ContextPackInput,
+} from "../context-intelligence.js";
+import {
   MAX_PROCESS_YIELD_MS,
   type ProcessSnapshot,
 } from "../process-sessions.js";
+import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
   SHELL_TOOL_ANNOTATIONS,
@@ -24,7 +30,7 @@ import {
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. Use semantic_code when available for targeted symbol structure, definitions, references, implementations, and diagnostics instead of broad file reads. If a host has cached an older tool list and semantic_code is not visible, exec_command accepts the internal compatibility forms devspace-semantic overview|find|references|implementations|declaration|diagnostics; these are handled by DevSpace and are not passed to the shell. Command output may be compacted; retrieve saved full output with devspace-log meta/read/tail/grep using the returned run_id.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered lazily for the path being read or packed, so do not recursively scan the repository for instruction files. Prefer context_pack for task-focused source context, then semantic_code for a specific symbol relation, and use read only for a concrete line range that is still needed. If a host cached an older tool list, exec_command accepts the internal read-only compatibility forms devspace-context and devspace-semantic; these are handled by DevSpace and are not passed to the shell. Command output may be compacted; retrieve saved full output with devspace-log meta/read/tail/grep using the returned run_id.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -39,6 +45,7 @@ export function registerCodexTools(context: ToolRegistrationContext): void {
 const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerApplyPatchTool,
   registerSemanticTools,
+  registerContextPackTool,
   registerCodexProcessTools,
 ];
 
@@ -242,6 +249,46 @@ function semanticCompatibilityRequest(command: string): SemanticRequest | null {
   };
 }
 
+interface ContextCompatibilityRequest extends ContextPackInput {
+  path: string;
+}
+
+function contextCompatibilityRequest(command: string): ContextCompatibilityRequest | null {
+  if (!command.trimStart().startsWith("devspace-context")) return null;
+  const parts = internalCommandParts(command);
+  if (parts[0] !== "devspace-context") return null;
+  if (!parts[1] || parts.length > 5) {
+    throw new Error(
+      "usage: devspace-context <path> [symbol|-] [focused|standard|deep] [max_chars]",
+    );
+  }
+
+  const depth = parts[3] as ContextPackDepth | undefined;
+  if (
+    depth !== undefined
+    && depth !== "focused"
+    && depth !== "standard"
+    && depth !== "deep"
+  ) {
+    throw new Error(`invalid context depth: ${depth}`);
+  }
+
+  let maxChars: number | undefined;
+  if (parts[4] !== undefined) {
+    maxChars = Number.parseInt(parts[4], 10);
+    if (!Number.isFinite(maxChars)) {
+      throw new Error(`invalid max_chars: ${parts[4]}`);
+    }
+  }
+
+  return {
+    path: parts[1],
+    symbol: parts[2] && parts[2] !== "-" ? parts[2] : undefined,
+    depth,
+    maxChars,
+  };
+}
+
 function registerSemanticTools(context: ToolRegistrationContext): void {
   const { server, config, workspaces, semantic } = context;
   if (!semantic?.available) return;
@@ -284,7 +331,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const workspace = await workspaces.getWorkspace(workspaceId);
-      if (relativePath) workspaces.resolveReadPath(workspace, relativePath);
+      if (relativePath) await workspaces.resolveReadPath(workspace, relativePath);
 
       const { tool, args } = semanticBackendRequest({
         action,
@@ -310,6 +357,95 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
           action,
           truncated: response.truncated,
           backend_age_ms: response.backendAgeMs,
+        },
+      };
+    },
+  );
+}
+
+const contextPackDepthSchema = z.enum(["focused", "standard", "deep"]);
+
+function registerContextPackTool(context: ToolRegistrationContext): void {
+  const { server, config, workspaces, semantic } = context;
+  server.registerTool(
+    "context_pack",
+    {
+      title: "Build focused code context",
+      description:
+        "Build a bounded, path-aware context bundle before broad source reading. It lazily loads applicable nested AGENTS.md/CLAUDE.md instructions, uses Serena semantics when available for outlines/definitions/references, and includes only a small source header as fallback context. Prefer this before reading a whole code file.",
+      inputSchema: {
+        workspace_id: z.string().describe(workspaceIdDescription),
+        path: z
+          .string()
+          .describe("Workspace-relative source file or directory to investigate."),
+        symbol: z
+          .string()
+          .optional()
+          .describe("Optional symbol/name-path to focus the pack on."),
+        intent: z
+          .string()
+          .max(1_000)
+          .optional()
+          .describe(
+            "Short task intent, used to decide whether implementations or diagnostics are useful.",
+          ),
+        depth: contextPackDepthSchema
+          .optional()
+          .describe("focused, standard (default), or deep."),
+        max_chars: z
+          .number()
+          .int()
+          .min(2_000)
+          .max(20_000)
+          .optional()
+          .describe("Maximum model-visible characters. Defaults to 9000."),
+      },
+      outputSchema: resultOutputSchema({
+        path: z.string(),
+        symbol_path: z.string().optional(),
+        truncated: z.boolean(),
+        semantic: z.boolean(),
+        backend_age_ms: z.number().nonnegative().optional(),
+        instruction_paths: z.array(z.string()),
+        sections: z.array(z.string()),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspace_id, path, symbol, intent, depth, max_chars }, { _meta }) => {
+      const startedAt = performance.now();
+      const workspaceId = workspace_id;
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      const packed = await buildContextPack({
+        workspace,
+        workspaces,
+        semantic,
+        request: {
+          path,
+          symbol,
+          intent,
+          depth,
+          maxChars: max_chars,
+        },
+        conversationScopeId: conversationScopeIdFromRequestMeta(_meta),
+      });
+      logToolCall(config, {
+        tool: "context_pack",
+        workspaceId,
+        path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(packed.result)],
+        structuredContent: {
+          result: packed.result,
+          path: packed.resolvedPath,
+          symbol_path: packed.resolvedSymbolPath,
+          truncated: packed.truncated,
+          semantic: packed.semantic,
+          backend_age_ms: packed.backendAgeMs,
+          instruction_paths: packed.instructionPaths,
+          sections: packed.sections,
         },
       };
     },
@@ -524,13 +660,39 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const yieldTimeMs = yield_time_ms;
       const maxOutputTokens = max_output_tokens;
       const workspace = await workspaces.getWorkspace(workspaceId);
+      const contextRequest = contextCompatibilityRequest(cmd);
+      if (contextRequest) {
+        const packed = await buildContextPack({
+          workspace,
+          workspaces,
+          semantic,
+          request: contextRequest,
+        });
+        logToolCall(config, {
+          tool: "context_pack",
+          workspaceId,
+          path: contextRequest.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = [textBlock(packed.result)];
+        return {
+          content,
+          structuredContent: {
+            result: packed.result,
+            running: false,
+            wall_time_ms: Math.round(performance.now() - startedAt),
+            output_truncated: packed.truncated,
+          },
+        };
+      }
       const semanticRequest = semanticCompatibilityRequest(cmd);
       if (semanticRequest) {
         if (!semantic?.available) {
           throw new Error("Serena semantic backend is not installed.");
         }
         if (semanticRequest.relativePath) {
-          workspaces.resolveReadPath(workspace, semanticRequest.relativePath);
+          await workspaces.resolveReadPath(workspace, semanticRequest.relativePath);
         }
         const { tool, args } = semanticBackendRequest(semanticRequest);
         const response = await semantic.call(workspace.root, tool, args);
