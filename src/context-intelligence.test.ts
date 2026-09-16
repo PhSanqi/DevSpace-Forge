@@ -47,7 +47,7 @@ test("context_pack combines lazy instructions, symbol definition, references, an
             ? JSON.stringify([{
                 name_path: "Service/run",
                 relative_path: "src/feature/service.ts",
-                body: "run() { return helper(); }",
+                body_location: { start_line: 1, end_line: 3 },
               }])
             : name === "find_referencing_symbols"
               ? JSON.stringify([{
@@ -83,6 +83,9 @@ test("context_pack combines lazy instructions, symbol definition, references, an
   assert.match(packed.result, /src rules/);
   assert.match(packed.result, /feature rules/);
   assert.match(packed.result, /Service\/run/);
+  assert.match(packed.result, /export class Service/);
+  assert.match(packed.result, /run\(\) \{ return helper\(\); \}/);
+  assert.doesNotMatch(packed.result, /import \{ helper \}/);
   assert.match(packed.result, /ServiceTest\/calls run/);
   assert.deepEqual(packed.instructionPaths, [
     "src/AGENTS.md",
