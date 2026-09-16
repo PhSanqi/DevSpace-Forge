@@ -11,10 +11,10 @@ rebased from upstream with minimal drift.
 
 ## Platform split
 
-| Platform | Branch | Role |
-| --- | --- | --- |
-| Windows | `main` | WinForms control UI, runtime supervision, Cloudflare integration, configuration/history/review presentation |
-| Linux | `linux/context-intelligence` | systemd-managed DevSpace runtime/control integration plus a small context-intelligence overlay |
+| Platform | Branch | Current version | Role |
+| --- | --- | --- | --- |
+| Windows | `main` | `v0.2.0` | WinForms control UI, runtime supervision, Cloudflare integration, configuration/history/review presentation |
+| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | systemd-managed DevSpace runtime/control integration plus a small context-intelligence overlay |
 
 Both lines keep the same operating principles: explicit Allowed Roots,
 observable runtime state, reversible upgrades, protected tunnel credentials,

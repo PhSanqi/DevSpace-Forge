@@ -10,10 +10,10 @@
 
 ## Windows / Linux 分工
 
-| 平台 | 分支 | 主要职责 |
-| --- | --- | --- |
-| Windows | `main` | WinForms 控制界面、运行时监督、Cloudflare、配置历史、Review / 回滚展示 |
-| Linux | `linux/context-intelligence` | systemd 管理的 DevSpace Runtime / 控制层，以及上下文与语义查询增强 |
+| 平台 | 分支 | 当前版本 | 主要职责 |
+| --- | --- | --- | --- |
+| Windows | `main` | `v0.2.0` | WinForms 控制界面、运行时监督、Cloudflare、配置历史、Review / 回滚展示 |
+| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | systemd 管理的 DevSpace Runtime / 控制层，以及上下文与语义查询增强 |
 
 两条实现线保持相同原则：Allowed Roots 明确限制、运行状态可观察、升级可回滚、
 Tunnel 凭据独立保护，并且当前个人控制范围内保持 Subagents 关闭。
