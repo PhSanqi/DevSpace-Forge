@@ -55,6 +55,66 @@ interface ManagedProcess {
   resize?(columns: number, rows: number): void;
 }
 
+interface PtyHandle {
+  write(data: string): void;
+  kill(signal?: string): void;
+  resize(columns: number, rows: number): void;
+  onData(listener: (data: string) => void): unknown;
+  onExit(listener: (event: { exitCode: number; signal: number }) => void): unknown;
+}
+
+interface PtyModule {
+  spawn(
+    file: string,
+    args: string[],
+    options: {
+      cwd: string;
+      env: Record<string, string>;
+      name: string;
+      cols: number;
+      rows: number;
+    },
+  ): PtyHandle;
+}
+
+const PTY_MODULE_CANDIDATES = [
+  "node-pty",
+  "@homebridge/node-pty-prebuilt-multiarch",
+] as const;
+
+function normalizePtyModule(value: unknown): PtyModule | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const direct = value as { spawn?: unknown; default?: unknown };
+  if (typeof direct.spawn === "function") return direct as unknown as PtyModule;
+  if (!direct.default || typeof direct.default !== "object") return undefined;
+  const fallback = direct.default as { spawn?: unknown };
+  return typeof fallback.spawn === "function"
+    ? fallback as unknown as PtyModule
+    : undefined;
+}
+
+async function loadPtyModule(): Promise<PtyModule> {
+  const failures: string[] = [];
+  for (const specifier of PTY_MODULE_CANDIDATES) {
+    try {
+      // Keep this import dynamic. The fallback is an optional Linux runtime
+      // dependency and should not become a hard type/build dependency.
+      const imported: unknown = await import(specifier);
+      const pty = normalizePtyModule(imported);
+      if (pty) return pty;
+      failures.push(`${specifier}: module does not expose spawn()`);
+    } catch (error) {
+      failures.push(
+        `${specifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  throw new Error(
+    `PTY support is unavailable. Tried ${PTY_MODULE_CANDIDATES.join(", ")}. ${failures.join(" | ")}`,
+  );
+}
+
 interface ProcessSession {
   id: number;
   workspaceId: string;
@@ -370,29 +430,19 @@ export class ProcessSessionManager {
   }
 
   private async startPty(session: ProcessSession, input: StartCommandInput): Promise<void> {
-    let nodePty: typeof import("node-pty");
-    try {
-      nodePty = await import("node-pty");
-    } catch {
-      throw new Error("PTY support requires the optional node-pty dependency.");
-    }
+    const nodePty = await loadPtyModule();
 
     const shell = resolveShellCommand(input.command);
-    let pty: import("node-pty").IPty;
-    try {
-      pty = nodePty.spawn(shell.executable, shell.args, {
-        cwd: input.cwd,
-        env: processEnvironment({
-          workspaceId: input.workspaceId,
-          workspaceRoot: input.workspaceRoot,
-        }),
-        name: "xterm-256color",
-        cols: session.columns,
-        rows: session.rows,
-      });
-    } catch (error) {
-      throw error;
-    }
+    const pty = nodePty.spawn(shell.executable, shell.args, {
+      cwd: input.cwd,
+      env: processEnvironment({
+        workspaceId: input.workspaceId,
+        workspaceRoot: input.workspaceRoot,
+      }),
+      name: "xterm-256color",
+      cols: session.columns,
+      rows: session.rows,
+    });
 
     session.process = {
       write: (data) => pty.write(data),

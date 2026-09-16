@@ -1,6 +1,6 @@
 {
   "name": "@waishnav/devspace",
-  "version": "1.1.0-beta.3+local.4",
+  "version": "1.1.0-beta.3+local.5",
   "description": "Expose a secure local coding workspace through an MCP server.",
   "repository": {
     "type": "git",
@@ -92,6 +92,7 @@
     "undici": "8.5.0"
   },
   "optionalDependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "0.14.1",
     "node-pty": "^1.1.0"
   }
 }

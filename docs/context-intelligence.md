@@ -37,6 +37,11 @@ unrelated product surfaces unless an upstream contract requires it.
    to the shell.
 7. **Edits remain explicit.** Semantic querying is read-only in the local
    overlay. Normal patch/edit tools retain change-review semantics.
+8. **Interactive execution remains portable.** Prefer upstream `node-pty`, but
+   when its native module is unavailable on Linux, fall back to the pinned
+   prebuilt multi-architecture PTY package. The fallback is optional, version
+   locked, and must pass real spawn/write/resize/exit tests on the runtime Node
+   ABI before deployment.
 
 ## Context flow
 
@@ -78,6 +83,13 @@ When upstream publishes a new version:
    Git, semantic queries, and compact run-log retrieval before switching the
    production runtime;
 7. retain the previous runtime as an immediate rollback point.
+
+For Linux hosts without a compiler toolchain, keep both PTY packages in
+`optionalDependencies`. Runtime loading tries upstream `node-pty` first and
+only uses `@homebridge/node-pty-prebuilt-multiarch` when the upstream native
+module cannot load. Do not copy an unrelated `.node` binary into `node-pty`;
+native APIs and helper binaries can differ even when the Node ABI number
+matches.
 
 Do not directly edit the installed production `dist` as the development
 workflow. Build from this branch and deploy the resulting runtime atomically.
