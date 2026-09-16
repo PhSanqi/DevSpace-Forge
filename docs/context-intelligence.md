@@ -99,6 +99,23 @@ matches.
 Do not directly edit the installed production `dist` as the development
 workflow. Build from this branch and deploy the resulting runtime atomically.
 
+### Current upstream sync point
+
+The `local.7` line is based on official `v1.1.0-beta.3` and additionally
+contains the Linux-relevant upstream fixes that landed on `main` immediately
+after that tag:
+
+- `a8e5ee4` — canonical workspace/path containment and symlink escape blocking;
+- `2147c23` — change reviews work for new Git repositories that do not yet have
+  a `HEAD` commit;
+- `8e4669c` — non-zero process exits are represented as failed tool-log events
+  with exit/signal metadata.
+
+Platform-only native artifact-download changes for Windows and macOS are left
+upstream because they do not affect this Linux control runtime. Re-evaluate
+them when the local branch is rebased onto the next official beta/release
+rather than cherry-picking unrelated platform surface area now.
+
 ## Cached-host argument compatibility
 
 DevSpace 1.1 changed model-facing MCP argument names to snake_case. Long-lived
