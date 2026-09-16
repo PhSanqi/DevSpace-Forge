@@ -69,6 +69,90 @@ test("modern registration adapter preserves tools and request metadata", async (
   assert.equal(callBody.result?.content?.[0]?.text, "ok:modern-chat");
 });
 
+test("modern adapter accepts cached camelCase arguments without exposing them in tool schemas", async (t) => {
+  const handler = createMcpHandler(() => {
+    const adapter = createModernMcpServerAdapter({
+      name: "devspace-modern-test",
+      version: "1.0.0",
+    });
+    adapter.registrationTarget.registerTool(
+      "legacy_alias_echo",
+      {
+        inputSchema: {
+          workspace_id: z.string(),
+          working_directory: z.string().optional(),
+          edits: z.array(z.object({
+            old_text: z.string(),
+            new_text: z.string(),
+          })),
+        },
+      },
+      async (input) => ({
+        content: [{
+          type: "text",
+          text: JSON.stringify(input),
+        }],
+      }),
+    );
+    return adapter.server;
+  }, { legacy: "reject" });
+  t.after(async () => handler.close());
+
+  const listed = await handler.fetch(modernRequest("tools/list", {}));
+  assert.equal(listed.status, 200, await listed.clone().text());
+  const listBody = await listed.json() as {
+    result?: { tools?: Array<{ name?: string; inputSchema?: unknown }> };
+  };
+  const tool = listBody.result?.tools?.find(({ name }) => name === "legacy_alias_echo");
+  assert.ok(tool?.inputSchema);
+  const serializedSchema = JSON.stringify(tool.inputSchema);
+  assert.match(serializedSchema, /workspace_id/);
+  assert.match(serializedSchema, /working_directory/);
+  assert.match(serializedSchema, /old_text/);
+  assert.doesNotMatch(serializedSchema, /workspaceId|workingDirectory|oldText|newText/);
+
+  const called = await handler.fetch(modernRequest("tools/call", {
+    name: "legacy_alias_echo",
+    arguments: {
+      workspaceId: "cached-workspace",
+      workingDirectory: "src",
+      edits: [{ oldText: "before", newText: "after" }],
+    },
+  }));
+  assert.equal(called.status, 200, await called.clone().text());
+  const callBody = await called.json() as {
+    result?: { content?: Array<{ text?: string }> };
+  };
+  assert.deepEqual(
+    JSON.parse(callBody.result?.content?.[0]?.text ?? "{}"),
+    {
+      workspace_id: "cached-workspace",
+      working_directory: "src",
+      edits: [{ old_text: "before", new_text: "after" }],
+    },
+  );
+
+  const canonicalWins = await handler.fetch(modernRequest("tools/call", {
+    name: "legacy_alias_echo",
+    arguments: {
+      workspaceId: "stale",
+      workspace_id: "canonical",
+      edits: [{ oldText: "old", old_text: "canonical-old", newText: "new" }],
+    },
+  }));
+  assert.equal(canonicalWins.status, 200, await canonicalWins.clone().text());
+  const canonicalBody = await canonicalWins.json() as {
+    result?: { content?: Array<{ text?: string }> };
+  };
+  assert.deepEqual(
+    JSON.parse(canonicalBody.result?.content?.[0]?.text ?? "{}"),
+    {
+      workspace_id: "canonical",
+      edits: [{ old_text: "canonical-old", new_text: "new" }],
+    },
+  );
+});
+
 test("modern registration adapter preserves progress notifications", async (t) => {
   const handler = createMcpHandler(() => {
     const adapter = createModernMcpServerAdapter({

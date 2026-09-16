@@ -1,5 +1,6 @@
 allowBuilds:
   '@google/genai': false
+  '@homebridge/node-pty-prebuilt-multiarch': false
   better-sqlite3: true
   esbuild: true
   koffi: true
