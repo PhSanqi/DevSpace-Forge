@@ -2,7 +2,14 @@
 
 [中文](README.zh-CN.md)
 
-DevSpace Control Platform is a Windows desktop control plane for running and supervising a local [DevSpace](https://github.com/Waishnav/devspace) instance behind Cloudflare Tunnel.
+DevSpace Control Platform is a cross-platform control project for running and supervising a local [DevSpace](https://github.com/Waishnav/devspace) instance behind Cloudflare Tunnel.
+
+The repository currently has two implementation lines:
+
+- **Windows:** this `main` branch, current release `v0.2.0`, a WinForms desktop control application.
+- **Linux:** [`linux/context-intelligence`](https://github.com/PhSanqi/DevSpaceControlPlatform/tree/linux/context-intelligence), current runtime `1.1.0-beta.3+local.7`, a DevSpace-runtime-oriented branch with systemd control integration, compact context/output handling, and Serena-backed semantic queries.
+
+See [PLATFORMS.md](PLATFORMS.md) for the platform split, shared invariants, and source attribution.
 
 It is designed for people who want DevSpace to behave like a normal background application instead of a collection of command-line setup steps.
 
@@ -84,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File .\setup-runtime.ps1
 
 The lightweight release does not include Node.js, DevSpace, cloudflared, machine settings, logs, OAuth state, or Tunnel secrets. `setup-runtime.ps1` downloads and verifies the pinned runtime components locally.
 
-## Upstream DevSpace
+## Upstream DevSpace and Linux context work
 
 This project is built **around** DevSpace, but it is not a source fork of DevSpace itself.
 
@@ -92,11 +99,13 @@ This project is built **around** DevSpace, but it is not a source fork of DevSpa
 - DevSpace owns the MCP server, workspace lifecycle, tools, review checkpoints, skills, and runtime behavior.
 - DevSpace Control Platform owns the Windows control UI, process supervision, tunnel integration, configuration adaptation, diagnostics, and local review/rollback presentation.
 
+The Linux branch is intentionally different: it tracks the DevSpace runtime closely and carries a small, rebaseable overlay for long-running AI coding sessions. Its compact-runtime and semantic-query direction also references [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge), especially the ideas of bounded model-visible command output and a workspace-scoped Serena semantic backend. Official DevSpace remains the source of truth for security, MCP behavior, workspace lifecycle, and releases.
+
 The local `upstream/devspace` checkout used during development is reference-only and is excluded from this repository.
 
 ## Current scope
 
-This project currently targets Windows and a personal/local DevSpace workflow. It is not intended to replace DevSpace internals or become another agent harness.
+The `main` branch targets Windows. The Linux implementation is maintained separately on `linux/context-intelligence` so the runtime overlay can follow upstream DevSpace without mixing C# desktop-controller code into the same source tree. Neither line is intended to become a second agent harness.
 
 The main design rule is to expose DevSpace capabilities while keeping the control layer small, inspectable, and reversible.
 
