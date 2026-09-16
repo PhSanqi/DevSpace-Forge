@@ -229,7 +229,7 @@ export async function buildContextPack(input: {
     // search rooted at an existing parent directory.
   }
 
-  const overview = await semanticCall(
+  const overviewPromise = semanticCall(
     semantic,
     workspace.root,
     "get_symbols_overview",
@@ -239,77 +239,86 @@ export async function buildContextPack(input: {
     },
     warnings,
   );
-  if (overview) semanticResults.push(overview);
+  const definitionPromise = request.symbol
+    ? semanticCall(
+        semantic,
+        workspace.root,
+        "find_symbol",
+        {
+          name_path_pattern: request.symbol,
+          relative_path: pathForSemantic === "." ? "" : pathForSemantic,
+          include_body: true,
+          include_info: true,
+          max_answer_chars: depth === "focused" ? 3_500 : 5_500,
+        },
+        warnings,
+      )
+    : Promise.resolve(undefined);
+  const diagnosticsPromise = isFile && wantsDiagnostics(request.intent, depth)
+    ? semanticCall(
+        semantic,
+        workspace.root,
+        "get_diagnostics_for_file",
+        { relative_path: pathForSemantic, max_answer_chars: 2_500 },
+        warnings,
+      )
+    : Promise.resolve(undefined);
 
-  let definition: SemanticResult | undefined;
+  const [overview, definition, diagnostics] = await Promise.all([
+    overviewPromise,
+    definitionPromise,
+    diagnosticsPromise,
+  ]);
+  for (const result of [overview, definition, diagnostics]) {
+    if (result) semanticResults.push(result);
+  }
+
   let references: SemanticResult | undefined;
   let implementations: SemanticResult | undefined;
-  let diagnostics: SemanticResult | undefined;
   let resolvedSymbolPath: string | undefined;
 
-  if (request.symbol) {
-    definition = await semanticCall(
-      semantic,
-      workspace.root,
-      "find_symbol",
-      {
-        name_path_pattern: request.symbol,
-        relative_path: pathForSemantic === "." ? "" : pathForSemantic,
-        include_body: true,
-        include_info: true,
-        max_answer_chars: depth === "focused" ? 3_500 : 5_500,
-      },
-      warnings,
-    );
-    if (definition) {
-      semanticResults.push(definition);
+  if (request.symbol && definition) {
       const location = firstSemanticLocation(
         definition.result,
         pathForSemantic === "." ? "" : pathForSemantic,
         request.symbol,
       );
       resolvedSymbolPath = location.relativePath || undefined;
-      if (depth !== "focused" && location.relativePath) {
-        references = await semanticCall(
-          semantic,
-          workspace.root,
-          "find_referencing_symbols",
-          {
-            name_path: location.namePath,
-            relative_path: location.relativePath,
-            max_answer_chars: depth === "deep" ? 4_000 : 2_800,
-          },
-          warnings,
-        );
-        if (references) semanticResults.push(references);
+      const referencesPromise = depth !== "focused" && location.relativePath
+        ? semanticCall(
+            semantic,
+            workspace.root,
+            "find_referencing_symbols",
+            {
+              name_path: location.namePath,
+              relative_path: location.relativePath,
+              max_answer_chars: depth === "deep" ? 4_000 : 2_800,
+            },
+            warnings,
+          )
+        : Promise.resolve(undefined);
+      const implementationsPromise =
+        wantsImplementations(request.intent, depth) && location.relativePath
+          ? semanticCall(
+              semantic,
+              workspace.root,
+              "find_implementations",
+              {
+                name_path: location.namePath,
+                relative_path: location.relativePath,
+                include_info: true,
+                max_answer_chars: 2_500,
+              },
+              warnings,
+            )
+          : Promise.resolve(undefined);
+      [references, implementations] = await Promise.all([
+        referencesPromise,
+        implementationsPromise,
+      ]);
+      for (const result of [references, implementations]) {
+        if (result) semanticResults.push(result);
       }
-      if (wantsImplementations(request.intent, depth) && location.relativePath) {
-        implementations = await semanticCall(
-          semantic,
-          workspace.root,
-          "find_implementations",
-          {
-            name_path: location.namePath,
-            relative_path: location.relativePath,
-            include_info: true,
-            max_answer_chars: 2_500,
-          },
-          warnings,
-        );
-        if (implementations) semanticResults.push(implementations);
-      }
-    }
-  }
-
-  if (isFile && wantsDiagnostics(request.intent, depth)) {
-    diagnostics = await semanticCall(
-      semantic,
-      workspace.root,
-      "get_diagnostics_for_file",
-      { relative_path: pathForSemantic, max_answer_chars: 2_500 },
-      warnings,
-    );
-    if (diagnostics) semanticResults.push(diagnostics);
   }
 
   let header: string | undefined;
