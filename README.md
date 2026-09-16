@@ -16,6 +16,10 @@
 > local overlay, upstream sync policy, and attribution. The Windows control
 > application remains on the repository's `main` branch.
 
+> **Windows runtime variant:** the sibling `windows/context-intelligence`
+> branch carries the same `local.7` context-intelligence baseline plus official
+> Windows native artifact support. See `DEVCONTROL-WINDOWS-RUNTIME.md`.
+
 <p align="center">
   <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
   <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>
