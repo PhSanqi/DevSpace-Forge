@@ -37,6 +37,11 @@ unrelated product surfaces unless an upstream contract requires it.
    to the shell.
 7. **Edits remain explicit.** Semantic querying is read-only in the local
    overlay. Normal patch/edit tools retain change-review semantics.
+8. **Protocol upgrades do not strand old chats.** The modern MCP adapter
+   accepts the pre-1.1 camelCase argument names from already-open host
+   sessions and normalizes them before schema validation. Newly advertised
+   schemas remain snake_case-only, and canonical snake_case values win if a
+   request contains both forms.
 8. **Interactive execution remains portable.** Prefer upstream `node-pty`, but
    when its native module is unavailable on Linux, fall back to the pinned
    prebuilt multi-architecture PTY package. The fallback is optional, version
@@ -93,4 +98,16 @@ matches.
 
 Do not directly edit the installed production `dist` as the development
 workflow. Build from this branch and deploy the resulting runtime atomically.
+
+## Cached-host argument compatibility
+
+DevSpace 1.1 changed model-facing MCP argument names to snake_case. Long-lived
+ChatGPT or other MCP host sessions can retain the older camelCase tool schema
+until the host refreshes discovery. The local modern-MCP adapter therefore
+normalizes the known pre-1.1 aliases (for example `workspaceId`, `baseRef`,
+`workingDirectory`, `sessionId`, `yieldTimeMs`, `maxOutputTokens`, `oldText`,
+and `newText`) recursively before Zod validation. The normalization uses a
+Zod preprocess wrapper, so `tools/list` continues to publish only the official
+snake_case schema and new model sessions are not encouraged to use legacy
+names.
 
