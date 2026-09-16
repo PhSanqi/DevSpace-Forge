@@ -89,11 +89,15 @@ test("context_pack combines lazy instructions, symbol definition, references, an
     "src/feature/CLAUDE.md",
   ]);
   assert.equal(packed.semantic, true);
-  assert.deepEqual(calls.slice(0, 3), [
-    "get_symbols_overview",
-    "find_symbol",
-    "find_referencing_symbols",
-  ]);
+  assert.deepEqual(
+    new Set(calls.slice(0, 3)),
+    new Set([
+      "get_symbols_overview",
+      "find_symbol",
+      "get_diagnostics_for_file",
+    ]),
+  );
+  assert.equal(calls[3], "find_referencing_symbols");
 
   const repeated = await buildContextPack({
     workspace: opened.workspace,
