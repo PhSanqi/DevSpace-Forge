@@ -154,14 +154,55 @@ function firstSemanticLocation(
   result: string,
   fallbackPath: string,
   fallbackSymbol: string,
-): { relativePath: string; namePath: string } {
+): {
+  relativePath: string;
+  namePath: string;
+  bodyStartLine?: number;
+  bodyEndLine?: number;
+} {
   const first = semanticRecords(result)[0];
+  const bodyLocation = first?.body_location;
+  const body = bodyLocation && typeof bodyLocation === "object"
+    ? bodyLocation as Record<string, unknown>
+    : undefined;
   return {
     relativePath:
       typeof first?.relative_path === "string" ? first.relative_path : fallbackPath,
     namePath:
       typeof first?.name_path === "string" ? first.name_path : fallbackSymbol,
+    bodyStartLine:
+      typeof body?.start_line === "number" ? body.start_line : undefined,
+    bodyEndLine:
+      typeof body?.end_line === "number" ? body.end_line : undefined,
   };
+}
+
+async function readRange(
+  filePath: string,
+  startLine: number,
+  endLine: number,
+  maxLines: number,
+  maxChars: number,
+): Promise<string> {
+  const lines: string[] = [];
+  let chars = 0;
+  let lineNumber = 0;
+  const input = createReadStream(filePath, { encoding: "utf8" });
+  const reader = readline.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of reader) {
+      lineNumber += 1;
+      if (lineNumber < startLine) continue;
+      if (lineNumber > endLine || lines.length >= maxLines || chars >= maxChars) break;
+      const remaining = maxChars - chars;
+      lines.push(line.length > remaining ? `${line.slice(0, Math.max(0, remaining - 1))}…` : line);
+      chars += Math.min(line.length, remaining) + 1;
+    }
+  } finally {
+    reader.close();
+    input.destroy();
+  }
+  return lines.join("\n");
 }
 
 function wantsDiagnostics(intent: string | undefined, depth: ContextPackDepth): boolean {
@@ -247,9 +288,9 @@ export async function buildContextPack(input: {
         {
           name_path_pattern: request.symbol,
           relative_path: pathForSemantic === "." ? "" : pathForSemantic,
-          include_body: true,
+          include_body: false,
           include_info: true,
-          max_answer_chars: depth === "focused" ? 3_500 : 5_500,
+          max_answer_chars: depth === "focused" ? 2_000 : 3_000,
         },
         warnings,
       )
@@ -275,6 +316,7 @@ export async function buildContextPack(input: {
 
   let references: SemanticResult | undefined;
   let implementations: SemanticResult | undefined;
+  let symbolSource: string | undefined;
   let resolvedSymbolPath: string | undefined;
 
   if (request.symbol && definition) {
@@ -284,6 +326,34 @@ export async function buildContextPack(input: {
         request.symbol,
       );
       resolvedSymbolPath = location.relativePath || undefined;
+      if (
+        location.relativePath
+        && location.bodyStartLine !== undefined
+        && location.bodyEndLine !== undefined
+      ) {
+        try {
+          const sourcePath = await workspaces.resolvePath(
+            workspace,
+            location.relativePath,
+          );
+          const startLine = location.bodyStartLine + 1;
+          const endLine = location.bodyEndLine + 1;
+          const source = await readRange(
+            sourcePath,
+            startLine,
+            endLine,
+            depth === "deep" ? 140 : depth === "focused" ? 45 : 80,
+            depth === "deep" ? 6_000 : depth === "focused" ? 2_200 : 3_600,
+          );
+          if (source) {
+            symbolSource = `${location.relativePath}:${startLine}-${endLine}\n${source}`;
+          }
+        } catch (error) {
+          warnings.push(
+            `symbol source: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       const referencesPromise = depth !== "focused" && location.relativePath
         ? semanticCall(
             semantic,
@@ -322,7 +392,7 @@ export async function buildContextPack(input: {
   }
 
   let header: string | undefined;
-  if (isFile && (depth !== "focused" || !request.symbol)) {
+  if (isFile && (!request.symbol || depth === "deep")) {
     try {
       header = await readHead(
         resolved,
@@ -354,7 +424,12 @@ export async function buildContextPack(input: {
     writer.add(
       "Symbol definition",
       definition?.result,
-      Math.min(5_000, Math.floor(maxChars * 0.5)),
+      Math.min(2_000, Math.floor(maxChars * 0.22)),
+    );
+    writer.add(
+      "Symbol source",
+      symbolSource,
+      Math.min(4_000, Math.floor(maxChars * 0.42)),
     );
     writer.add(
       "References",

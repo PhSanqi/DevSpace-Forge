@@ -54,11 +54,12 @@ For source investigation, use the following progression:
 
 - newly applicable nested instruction files;
 - Serena/LSP symbol outline;
-- a focused symbol body when requested;
+- Serena symbol identity/location plus a bounded source slice read directly
+  from the symbol's `body_location`, avoiding oversized semantic bodies;
 - references in standard/deep mode;
 - implementations and diagnostics when the task intent or deep mode calls for
   them;
-- a small file header as fallback context.
+- a small file header as fallback context (or as additional deep context).
 
 The tool degrades to path instructions plus a bounded file header when Serena
 is unavailable.
