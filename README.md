@@ -8,6 +8,14 @@
 
 <p align="center">Bring a Codex-style coding workflow to ChatGPT.</p>
 
+> **DevSpaceControlPlatform Linux branch.** This branch is a Linux runtime/control
+> integration maintained for the
+> [DevSpaceControlPlatform](https://github.com/PhSanqi/DevSpaceControlPlatform)
+> project. It is based on official DevSpace and is **not** an upstream DevSpace
+> release. See [DEVCONTROL-LINUX.md](DEVCONTROL-LINUX.md) for the platform split,
+> local overlay, upstream sync policy, and attribution. The Windows control
+> application remains on the repository's `main` branch.
+
 <p align="center">
   <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
   <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>

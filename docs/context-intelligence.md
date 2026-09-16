@@ -3,6 +3,20 @@
 This branch keeps upstream DevSpace as the source of truth while adding a small,
 rebaseable local overlay for long-running remote coding sessions.
 
+## Reference implementation and attribution
+
+The compact-runtime and semantic-query direction was developed with
+[yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)
+as an important reference. In particular, its compact model-visible command
+output and workspace-scoped Serena semantic backend informed the Linux control
+overlay maintained here.
+
+This branch does not wholesale replace official DevSpace with `devspace-verge`.
+Official DevSpace remains the source of truth for security, MCP behavior,
+workspace lifecycle, provider contracts, and release updates. The local branch
+keeps only the context/semantic ideas required by DevSpaceControlPlatform and
+revalidates them against the pinned upstream baseline.
+
 ## Long-term goal
 
 Make DevSpace a context-intelligent execution layer: secure filesystem
