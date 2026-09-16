@@ -8,10 +8,10 @@ different upgrade mechanics.
 
 ## Platform map
 
-| Platform | Branch | Implementation | Primary responsibility |
-| --- | --- | --- | --- |
-| Windows | `main` | C# / WinForms control application | Desktop UI, tray, runtime/tunnel supervision, config/history/review presentation |
-| Linux | `linux/context-intelligence` | DevSpace runtime branch plus Linux control integration | systemd supervision, upstream-aligned runtime, compact context/output, semantic code navigation |
+| Platform | Branch | Current version | Implementation | Primary responsibility |
+| --- | --- | --- | --- | --- |
+| Windows | `main` | `v0.2.0` | C# / WinForms control application | Desktop UI, tray, runtime/tunnel supervision, config/history/review presentation |
+| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | DevSpace runtime branch plus Linux control integration | systemd supervision, upstream-aligned runtime, compact context/output, semantic code navigation |
 
 The branches share product invariants rather than source layout:
 
@@ -78,10 +78,10 @@ overlay so upstream DevSpace remains rebaseable and auditable.
 这个仓库故意把 Windows 和 Linux 分成不同实现线，因为两种环境需要不同的
 控制界面、运行方式和升级机制。
 
-| 平台 | 分支 | 实现方式 | 主要职责 |
-| --- | --- | --- | --- |
-| Windows | `main` | C# / WinForms | 桌面 UI、托盘、Runtime/Tunnel 监督、配置/历史/Review 展示 |
-| Linux | `linux/context-intelligence` | DevSpace Runtime 分支 + Linux 控制层 | systemd、紧跟上游 Runtime、上下文压缩、符号化查询 |
+| 平台 | 分支 | 当前版本 | 实现方式 | 主要职责 |
+| --- | --- | --- | --- | --- |
+| Windows | `main` | `v0.2.0` | C# / WinForms | 桌面 UI、托盘、Runtime/Tunnel 监督、配置/历史/Review 展示 |
+| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | DevSpace Runtime 分支 + Linux 控制层 | systemd、紧跟上游 Runtime、上下文压缩、符号化查询 |
 
 两条分支共享的是产品约束，而不是目录结构：Allowed Roots 明确限制、当前范围
 保持 Subagents 关闭、Tunnel secret 独立保护、本地和公网 MCP 状态可观察、

@@ -6,8 +6,8 @@ DevSpace Control Platform 是一个跨平台的 DevSpace 控制项目，用于�
 
 当前仓库明确分成两条实现线：
 
-- **Windows：** 当前 `main` 分支，WinForms 桌面控制程序。
-- **Linux：** [`linux/context-intelligence`](https://github.com/PhSanqi/DevSpaceControlPlatform/tree/linux/context-intelligence) 分支，直接围绕 DevSpace Runtime、systemd 控制、上下文压缩以及 Serena 符号化查询维护。
+- **Windows：** 当前 `main` 分支，正式版本 `v0.2.0`，WinForms 桌面控制程序。
+- **Linux：** [`linux/context-intelligence`](https://github.com/PhSanqi/DevSpaceControlPlatform/tree/linux/context-intelligence) 分支，当前 Runtime `1.1.0-beta.3+local.7`，直接围绕 DevSpace Runtime、systemd 控制、上下文压缩以及 Serena 符号化查询维护。
 
 两条实现线的职责、共同约束和引用来源见 [PLATFORMS.md](PLATFORMS.md)。
 

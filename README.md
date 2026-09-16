@@ -6,8 +6,8 @@ DevSpace Control Platform is a cross-platform control project for running and su
 
 The repository currently has two implementation lines:
 
-- **Windows:** this `main` branch, a WinForms desktop control application.
-- **Linux:** [`linux/context-intelligence`](https://github.com/PhSanqi/DevSpaceControlPlatform/tree/linux/context-intelligence), a DevSpace-runtime-oriented branch with systemd control integration, compact context/output handling, and Serena-backed semantic queries.
+- **Windows:** this `main` branch, current release `v0.2.0`, a WinForms desktop control application.
+- **Linux:** [`linux/context-intelligence`](https://github.com/PhSanqi/DevSpaceControlPlatform/tree/linux/context-intelligence), current runtime `1.1.0-beta.3+local.7`, a DevSpace-runtime-oriented branch with systemd control integration, compact context/output handling, and Serena-backed semantic queries.
 
 See [PLATFORMS.md](PLATFORMS.md) for the platform split, shared invariants, and source attribution.
 
