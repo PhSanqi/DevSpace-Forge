@@ -2,7 +2,14 @@
 
 [English](README.md)
 
-DevSpace Control Platform 是一个 Windows 桌面控制平台，用于管理本地 [DevSpace](https://github.com/Waishnav/devspace) 实例以及对应的 Cloudflare Tunnel。
+DevSpace Control Platform 是一个跨平台的 DevSpace 控制项目，用于管理本地 [DevSpace](https://github.com/Waishnav/devspace) 实例以及对应的 Cloudflare Tunnel。
+
+当前仓库明确分成两条实现线：
+
+- **Windows：** 当前 `main` 分支，WinForms 桌面控制程序。
+- **Linux：** [`linux/context-intelligence`](https://github.com/PhSanqi/DevSpaceControlPlatform/tree/linux/context-intelligence) 分支，直接围绕 DevSpace Runtime、systemd 控制、上下文压缩以及 Serena 符号化查询维护。
+
+两条实现线的职责、共同约束和引用来源见 [PLATFORMS.md](PLATFORMS.md)。
 
 目标是把 DevSpace 从一组命令行配置和后台进程，整理成一个可以长期常驻、可观察、可回滚的普通桌面程序。
 
@@ -93,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File .\setup-runtime.ps1
 
 轻量 Release 不内置 Node.js、DevSpace、cloudflared，也不包含机器配置、日志、OAuth 状态或 Tunnel secret。`setup-runtime.ps1` 会在本机下载并校验固定版本的运行时组件。
 
-## 与上游 DevSpace 的关系
+## 与上游 DevSpace / Linux 上下文增强的关系
 
 本项目是建立在 DevSpace 之上的控制层，但**不是 DevSpace 源码本身的 Fork**。
 
@@ -101,11 +108,13 @@ powershell -ExecutionPolicy Bypass -File .\setup-runtime.ps1
 - DevSpace 负责 MCP Server、Workspace 生命周期、工具、Review checkpoint、Skills 和运行时行为。
 - DevSpace Control Platform 负责 Windows 控制界面、进程监督、Tunnel 集成、版本配置适配、诊断以及本地 Review / 回滚展示。
 
+Linux 分支的实现方式不同：它需要紧跟 DevSpace Runtime，因此在官方 DevSpace 基线上维护小范围、可重放的增强层。上下文与语义查询方向同时明确参考了 [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)，特别是“模型只看到有界命令输出、完整证据保留在本地”以及“workspace-scoped Serena semantic backend”两类思路。安全、MCP、Workspace 生命周期和正式版本仍以官方 DevSpace 为 source of truth。
+
 开发时使用的 `upstream/devspace` 只是只读参考源码，并且明确排除在本仓库之外。
 
 ## 当前范围
 
-当前主要面向 Windows 和个人 / 本地 DevSpace 工作流，不尝试重新实现 DevSpace 内部能力，也不打算成为第二套 Agent Harness。
+`main` 分支面向 Windows；Linux 实现独立维护在 `linux/context-intelligence`，这样可以在不把 C# 桌面控制器和 Runtime 源码混在同一目录树的前提下持续跟进上游。两条实现线都不尝试重新实现整套 DevSpace，也不打算成为第二套 Agent Harness。
 
 核心原则是：在尽量少增加额外复杂度的前提下，把 DevSpace 的能力变得更容易配置、更透明、更容易恢复。
 
