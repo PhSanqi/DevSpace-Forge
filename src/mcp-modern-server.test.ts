@@ -69,6 +69,45 @@ test("modern registration adapter preserves tools and request metadata", async (
   assert.equal(callBody.result?.content?.[0]?.text, "ok:modern-chat");
 });
 
+test("modern registration adapter preserves MCP image content", async (t) => {
+  const imageData = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+  const handler = createMcpHandler(() => {
+    const adapter = createModernMcpServerAdapter({
+      name: "devspace-modern-test",
+      version: "1.0.0",
+    });
+    adapter.registrationTarget.registerTool(
+      "image_echo",
+      { inputSchema: {} },
+      async () => ({
+        content: [
+          { type: "text", text: "image metadata" },
+          { type: "image", data: imageData, mimeType: "image/png" },
+        ],
+        structuredContent: { result: "image metadata" },
+      }),
+    );
+    return adapter.server;
+  }, { legacy: "reject" });
+  t.after(async () => handler.close());
+
+  const called = await handler.fetch(modernRequest("tools/call", {
+    name: "image_echo",
+    arguments: {},
+  }));
+  assert.equal(called.status, 200, await called.clone().text());
+  const body = await called.json() as {
+    result?: {
+      content?: Array<{ type?: string; data?: string; mimeType?: string }>;
+      structuredContent?: Record<string, unknown>;
+    };
+  };
+  assert.equal(body.result?.content?.[1]?.type, "image");
+  assert.equal(body.result?.content?.[1]?.data, imageData);
+  assert.equal(body.result?.content?.[1]?.mimeType, "image/png");
+  assert.doesNotMatch(JSON.stringify(body.result?.structuredContent), /iVBOR/);
+});
+
 test("modern adapter accepts cached camelCase arguments without exposing them in tool schemas", async (t) => {
   const handler = createMcpHandler(() => {
     const adapter = createModernMcpServerAdapter({

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -29,13 +29,14 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }> = [
     {
       mode: "claude",
-      expected: ["open_workspace", "read", "write", "edit", "bash", "show_changes"],
+      expected: ["open_workspace", "read", "read_image", "write", "edit", "bash", "show_changes"],
     },
     {
       mode: "codex",
       expected: [
         "open_workspace",
         "read",
+        "read_image",
         "apply_patch",
         "context_pack",
         "exec_command",
@@ -223,6 +224,79 @@ test("read rejects a symlink that leaves the workspace", async (t) => {
     arguments: { workspace_id: workspaceId, path: "outside-link/secret.txt" },
   });
   assert.equal(result.isError, true);
+});
+
+test("read_image returns bounded MCP ImageContent without duplicating base64 in structured content", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const image = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  ]);
+  await writeFile(join(context.project, "photo.png"), image);
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "read-image"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const result = await context.client.callTool({
+    name: "read_image",
+    arguments: { workspace_id: workspaceId, path: "photo.png" },
+  });
+  assert.equal(result.isError, undefined);
+  const content = result.content as Array<Record<string, unknown>>;
+  assert.equal(content.length, 2);
+  assert.equal(content[0]?.type, "text");
+  assert.equal(content[1]?.type, "image");
+  assert.equal(content[1]?.mimeType, "image/png");
+  assert.equal(content[1]?.data, image.toString("base64"));
+
+  const structured = structuredContent(result);
+  assert.equal(structured.path, "photo.png");
+  assert.equal(structured.mime_type, "image/png");
+  assert.equal(structured.size_bytes, image.byteLength);
+  assert.doesNotMatch(JSON.stringify(structured), new RegExp(image.toString("base64")));
+
+  const tools = await context.client.listTools();
+  const tool = tools.tools.find((item) => item.name === "read_image");
+  assert.equal(tool?.annotations?.readOnlyHint, true);
+  assert.equal((tool?._meta as { ui?: unknown } | undefined)?.ui, undefined);
+});
+
+test("read_image rejects unsupported, oversized, and symlink-escaped files", async (t) => {
+  const context = await fixture(t, { toolMode: "claude", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "read-image-safety"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  await writeFile(join(context.project, "photo.gif"), "not an allowed image");
+  const unsupported = await context.client.callTool({
+    name: "read_image",
+    arguments: { workspace_id: workspaceId, path: "photo.gif" },
+  });
+  assert.equal(unsupported.isError, true);
+
+  const oversizedPath = join(context.project, "oversized.png");
+  await writeFile(oversizedPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  await truncate(oversizedPath, 20 * 1024 * 1024 + 1);
+  const oversized = await context.client.callTool({
+    name: "read_image",
+    arguments: { workspace_id: workspaceId, path: "oversized.png" },
+  });
+  assert.equal(oversized.isError, true);
+
+  const outside = await mkdtemp(join(tmpdir(), "devspace-image-outside-test-"));
+  t.after(async () => rm(outside, { recursive: true, force: true }));
+  await writeFile(
+    join(outside, "outside.png"),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  );
+  await symlink(outside, join(context.project, "outside-images"), platform() === "win32" ? "junction" : "dir");
+  const escaped = await context.client.callTool({
+    name: "read_image",
+    arguments: { workspace_id: workspaceId, path: "outside-images/outside.png" },
+  });
+  assert.equal(escaped.isError, true);
 });
 
 test("read discovers nested instructions lazily once per conversation and bounds default output", async (t) => {

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -22,8 +23,24 @@ export interface SerenaSemanticManagerOptions {
   maxBackends?: number;
 }
 
+// Keep Serena stderr attached to the DevSpace service rather than an unread pipe.
+// An unread child-process pipe can fill and deadlock the semantic backend.
+export const SERENA_STDERR_MODE = "inherit" as const;
+
+function serenaCommand(): string {
+  const configured = process.env.DEVSPACE_SERENA_BIN?.trim();
+  if (configured) return configured;
+  const userLocal = path.join(
+    homedir(),
+    ".local",
+    "bin",
+    process.platform === "win32" ? "serena.exe" : "serena",
+  );
+  return existsSync(userLocal) ? userLocal : "serena";
+}
+
 function installed(): boolean {
-  const result = spawnSync("serena", ["--version"], {
+  const result = spawnSync(serenaCommand(), ["--version"], {
     stdio: "ignore",
     windowsHide: true,
     timeout: 2_000,
@@ -73,7 +90,7 @@ async function managedSerenaHome(root: string): Promise<string> {
 async function createClient(root: string): Promise<SerenaClientLike> {
   const serenaHome = await managedSerenaHome(root);
   const transport = new StdioClientTransport({
-    command: "serena",
+    command: serenaCommand(),
     args: [
       "start-mcp-server",
       "--project",
@@ -96,7 +113,7 @@ async function createClient(root: string): Promise<SerenaClientLike> {
       Object.entries({ ...process.env, SERENA_HOME: serenaHome })
         .filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
-    stderr: "pipe",
+    stderr: SERENA_STDERR_MODE,
   });
   const client = new Client({ name: "devspace-serena-backend", version: "1" });
   let timer: NodeJS.Timeout | undefined;

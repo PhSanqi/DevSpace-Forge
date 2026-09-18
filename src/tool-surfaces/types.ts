@@ -9,6 +9,7 @@ export const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 export const toolNames = {
   openWorkspace: "open_workspace",
   read: "read",
+  readImage: "read_image",
   write: "write",
   edit: "edit",
   shell: "bash",
@@ -52,6 +53,8 @@ export interface ToolLogFields {
   sessionId?: number;
   running?: boolean;
   exitCode?: number;
+  sizeBytes?: number;
+  mimeType?: string;
   success: boolean;
   durationMs: number;
   error?: string;

@@ -3,6 +3,18 @@
 This branch keeps upstream DevSpace as the source of truth while adding a small,
 rebaseable local overlay for long-running remote coding sessions.
 
+## Visual context
+
+`read_image(workspace_id, path)` reads one `.jpg`, `.jpeg`, or `.png` from the
+active workspace and returns the image bytes as MCP `ImageContent`. It reuses
+DevSpace's canonical workspace path containment, rejects symlink escapes,
+validates the file signature, and caps a single image at 20 MiB. Base64 image
+payloads are never copied into `structuredContent` or tool-call logs.
+
+Use `read_image` when visual inspection is required. Keep source and text reads
+on `read`, `context_pack`, and `semantic_code` so binary data does not pollute
+the text context.
+
 ## Long-term goal
 
 Make DevSpace a context-intelligent execution layer: secure filesystem

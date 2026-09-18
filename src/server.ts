@@ -27,6 +27,7 @@ import {
   createOpenAIIncomingArtifactAdapter,
   type IncomingArtifactAdapter,
 } from "./incoming-artifacts.js";
+import { readImageFile } from "./image-read.js";
 import {
   logEvent,
   requestIp,
@@ -141,8 +142,9 @@ function serverInstructions(
     : "";
   const agents = `Follow root/global instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered automatically when a concrete path is read or packed, so do not recursively scan the repository for instruction files. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
+  const imageInstruction = ` Use ${toolNames.readImage} when the model needs to inspect a local JPG/PNG image; it returns image pixels directly and must not be replaced by reading binary files as text.`;
 
-  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
+  return `${common}${imageInstruction} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -800,6 +802,81 @@ function registerMcpSurface(
           instruction_paths: instructionPaths,
         },
       };
+    },
+  );
+
+  registrationTarget.registerTool(
+    toolNames.readImage,
+    {
+      title: "Read image",
+      description:
+        "Read one local JPG/PNG image from the current workspace and return its pixels directly to the model as MCP ImageContent. The path must remain inside the workspace; symlink escapes are rejected. Maximum file size is 20 MiB.",
+      inputSchema: {
+        workspace_id: z
+          .string()
+          .describe(workspaceIdDescription),
+        path: z
+          .string()
+          .describe("Image path relative to the workspace root. Supports .jpg, .jpeg, and .png."),
+      },
+      outputSchema: resultOutputSchema({
+        path: z.string(),
+        mime_type: z.enum(["image/jpeg", "image/png"]),
+        size_bytes: z.number().int().nonnegative(),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspace_id, path: inputPath }) => {
+      const startedAt = performance.now();
+      const workspaceId = workspace_id;
+      try {
+        const workspace = await workspaces.getWorkspace(workspaceId);
+        const absolutePath = await workspaces.resolvePath(workspace, inputPath);
+        const image = await readImageFile(absolutePath);
+        const metadata = JSON.stringify({
+          path: inputPath,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+        });
+
+        logToolCall(config, {
+          tool: toolNames.readImage,
+          workspaceId,
+          path: inputPath,
+          sizeBytes: image.sizeBytes,
+          mimeType: image.mimeType,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        const content: ToolContent[] = [
+          textBlock(metadata),
+          { type: "image", data: image.data, mimeType: image.mimeType },
+        ];
+        return {
+          content,
+          structuredContent: {
+            result: metadata,
+            path: inputPath,
+            mime_type: image.mimeType,
+            size_bytes: image.sizeBytes,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: toolNames.readImage,
+          workspaceId,
+          path: inputPath,
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        return {
+          content: [textBlock(message)],
+          isError: true,
+        };
+      }
     },
   );
 
