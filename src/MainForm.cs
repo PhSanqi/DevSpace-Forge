@@ -8,6 +8,15 @@ using System.Windows.Forms;
 
 namespace DevSpaceControlPlatform
 {
+    internal sealed class StableDataGridView : DataGridView
+    {
+        public StableDataGridView()
+        {
+            DoubleBuffered = true;
+            ResizeRedraw = false;
+        }
+    }
+
     internal sealed class ReviewWorkspaceChoice
     {
         public string Path { get; set; }
@@ -63,9 +72,11 @@ namespace DevSpaceControlPlatform
         private readonly TextBox conversationLogBox = new TextBox();
         private readonly ComboBox conversationLogSelector = new ComboBox();
         private readonly Label latestToolCallLabel = new Label();
-        private readonly DataGridView reviewHistoryGrid = new DataGridView();
+        private readonly DataGridView reviewHistoryGrid = new StableDataGridView();
+        private readonly DataGridView gitHistoryGrid = new StableDataGridView();
         private readonly ComboBox reviewWorkspaceBox = new ComboBox();
         private readonly Label reviewWorkspaceLabel = new Label();
+        private readonly Label gitRepositoryStatusLabel = new Label();
         private readonly Label reviewHistoryStatusLabel = new Label();
         private readonly Button rollbackSelectedReviewButton = new Button();
         private readonly List<DevSpaceReviewVersion> reviewVersions = new List<DevSpaceReviewVersion>();
@@ -96,16 +107,33 @@ namespace DevSpaceControlPlatform
             Text = "DevSpace Control Platform";
             Icon = AppVisuals.CreateApplicationIcon();
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(880, 650);
-            ClientSize = new Size(980, 720);
+            MinimumSize = new Size(1000, 760);
+            ClientSize = new Size(1000, 760);
             Font = new Font("Microsoft YaHei UI", 9F);
 
             BuildLayout();
             LoadState();
+            tabs.SelectedIndexChanged += delegate
+            {
+                if (tabs.SelectedTab != null && string.Equals(tabs.SelectedTab.Text, "项目 / Git", StringComparison.Ordinal))
+                    RefreshReviewHistory();
+            };
         }
 
         private void BuildLayout()
         {
+            var shell = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F));
+
             tabs.Dock = DockStyle.Fill;
             tabs.TabPages.Add(BuildServicesTab());
             tabs.TabPages.Add(BuildConnectionTab());
@@ -114,24 +142,22 @@ namespace DevSpaceControlPlatform
             tabs.TabPages.Add(BuildReviewHistoryTab());
             tabs.TabPages.Add(BuildHistoryTab());
 
-            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 54, Padding = new Padding(12, 8, 12, 8) };
+            var bottom = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(12, 8, 12, 8) };
             statusLabel.AutoEllipsis = true;
             statusLabel.Location = new Point(12, 15);
             statusLabel.Size = new Size(720, 26);
             statusLabel.ForeColor = Color.DimGray;
-            statusLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             bottom.Controls.Add(statusLabel);
 
             saveButton.Text = "保存配置";
             saveButton.Size = new Size(110, 32);
-            saveButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            saveButton.Location = new Point(ClientSize.Width - 122, 8);
+            saveButton.Location = new Point(858, 8);
             saveButton.Click += delegate { SaveCurrentSettings(); };
             bottom.Controls.Add(saveButton);
-            bottom.Resize += delegate { saveButton.Left = bottom.ClientSize.Width - saveButton.Width - 12; };
 
-            Controls.Add(tabs);
-            Controls.Add(bottom);
+            shell.Controls.Add(tabs, 0, 0);
+            shell.Controls.Add(bottom, 0, 1);
+            Controls.Add(shell);
         }
 
         private TabPage BuildServicesTab()
@@ -142,12 +168,10 @@ namespace DevSpaceControlPlatform
             {
                 Text = "DevSpace",
                 Location = new Point(18, 18),
-                Size = new Size(900, 145),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+                Size = new Size(900, 145)
             };
             devSpaceServiceLabel.SetBounds(18, 28, 850, 45);
             devSpaceServiceLabel.Font = new Font(Font, FontStyle.Bold);
-            devSpaceServiceLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             devGroup.Controls.Add(devSpaceServiceLabel);
             var startDev = AddButton(devGroup, "启动", 18, 86, 90);
             startDev.Click += delegate { RunServiceAction(supervisor.StartDevSpace); };
@@ -161,12 +185,10 @@ namespace DevSpaceControlPlatform
             {
                 Text = "Cloudflare Tunnel",
                 Location = new Point(18, 180),
-                Size = new Size(900, 145),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+                Size = new Size(900, 145)
             };
             cloudflareServiceLabel.SetBounds(18, 28, 850, 45);
             cloudflareServiceLabel.Font = new Font(Font, FontStyle.Bold);
-            cloudflareServiceLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             cfGroup.Controls.Add(cloudflareServiceLabel);
             var startCf = AddButton(cfGroup, "启动", 18, 86, 90);
             startCf.Click += delegate { RunServiceAction(supervisor.StartCloudflare); };
@@ -180,8 +202,7 @@ namespace DevSpaceControlPlatform
             {
                 Text = "全部服务",
                 Location = new Point(18, 342),
-                Size = new Size(900, 115),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+                Size = new Size(900, 115)
             };
             var startAll = AddButton(allGroup, "启动全部", 18, 40, 110);
             startAll.Click += delegate { RunServiceAction(supervisor.StartAll); };
@@ -196,8 +217,7 @@ namespace DevSpaceControlPlatform
                 Text = "关闭此窗口只会隐藏到托盘；只有托盘菜单“退出并停止服务”才会结束后台服务。",
                 Location = new Point(550, 45),
                 Size = new Size(325, 42),
-                ForeColor = Color.DimGray,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                ForeColor = Color.DimGray
             };
             allGroup.Controls.Add(trayNote);
             page.Controls.Add(allGroup);
@@ -206,16 +226,13 @@ namespace DevSpaceControlPlatform
             managedMcpUrlBox.SetBounds(18, 505, 700, 25);
             managedMcpUrlBox.ReadOnly = true;
             managedMcpUrlBox.BackColor = Color.White;
-            managedMcpUrlBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(managedMcpUrlBox);
             var copyMcp = AddButton(page, "复制 MCP 地址", 730, 503, 120);
-            copyMcp.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             copyMcp.Click += delegate
             {
                 if (!string.IsNullOrWhiteSpace(managedMcpUrlBox.Text)) Clipboard.SetText(managedMcpUrlBox.Text);
             };
             var copyOwner = AddButton(page, "复制 Owner password", 730, 545, 150);
-            copyOwner.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             copyOwner.Click += delegate
             {
                 var value = supervisor.OwnerPassword;
@@ -233,20 +250,16 @@ namespace DevSpaceControlPlatform
             AddLabel(page, "Allowed Roots（只开放真正需要的项目目录）", 18, 18, 500);
             rootsList.Location = new Point(18, 44);
             rootsList.Size = new Size(700, 150);
-            rootsList.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(rootsList);
 
             var addRoot = AddButton(page, "添加目录", 730, 44, 100);
-            addRoot.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             addRoot.Click += delegate { AddAllowedRoot(); };
             var removeRoot = AddButton(page, "移除", 730, 82, 100);
-            removeRoot.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             removeRoot.Click += delegate
             {
                 if (rootsList.SelectedIndex >= 0) rootsList.Items.RemoveAt(rootsList.SelectedIndex);
             };
             var importLegacy = AddButton(page, "迁移旧配置", 730, 120, 100);
-            importLegacy.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             importLegacy.Click += delegate { ImportLegacyQuickConfig(); };
 
             AddLabel(page, "本地端口", 215, 18, 120);
@@ -270,20 +283,16 @@ namespace DevSpaceControlPlatform
             page.Controls.Add(autoStartBox);
 
             hostnameBox.SetBounds(18, 315, 700, 25);
-            hostnameBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             AddLabeledText(page, "公网 hostname（例如 devspacev1.example.com，不含 https://）", hostnameBox, 288);
 
             AddLabel(page, "Cloudflare Tunnel Token（Remote 模式；只保存在受保护 secrets 文件）", 355, 18, 760);
             cloudflareTokenBox.SetBounds(18, 382, 700, 25);
             cloudflareTokenBox.UseSystemPasswordChar = true;
-            cloudflareTokenBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(cloudflareTokenBox);
             var saveToken = AddButton(page, "保存 Token", 730, 379, 100);
-            saveToken.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             saveToken.Click += delegate { SaveCloudflareToken(); };
             cloudflareTokenStatusLabel.SetBounds(18, 416, 880, 44);
             cloudflareTokenStatusLabel.ForeColor = Color.DimGray;
-            cloudflareTokenStatusLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(cloudflareTokenStatusLabel);
 
             var compatibilityNote = AddLabel(page,
@@ -291,7 +300,6 @@ namespace DevSpaceControlPlatform
                 478, 18, 880);
             compatibilityNote.Size = new Size(880, 46);
             compatibilityNote.ForeColor = Color.DimGray;
-            compatibilityNote.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             return page;
         }
@@ -303,7 +311,6 @@ namespace DevSpaceControlPlatform
             AddLabel(page, "运行时", 18, 18, 160);
             versionLabel.SetBounds(18, 44, 900, 45);
             versionLabel.Font = new Font(Font, FontStyle.Bold);
-            versionLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(versionLabel);
 
             AddLabel(page, "Tool mode", 105, 18, 160);
@@ -324,19 +331,16 @@ namespace DevSpaceControlPlatform
             skillPathsBox.SetBounds(18, 257, 700, 100);
             skillPathsBox.Multiline = true;
             skillPathsBox.ScrollBars = ScrollBars.Vertical;
-            skillPathsBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(skillPathsBox);
 
             subagentLabel.SetBounds(18, 395, 900, 58);
             subagentLabel.BorderStyle = BorderStyle.FixedSingle;
             subagentLabel.Padding = new Padding(8);
-            subagentLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             subagentLabel.Text = "Subagents：关闭（当前长期目标明确不启用本地 harness delegation）。\r\n控制平台会在 1.0.x 和 1.1.x 的实际有效配置中同时验证它保持关闭。";
             page.Controls.Add(subagentLabel);
 
             managedConfigLabel.SetBounds(18, 475, 900, 60);
             managedConfigLabel.ForeColor = Color.DimGray;
-            managedConfigLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             managedConfigLabel.Text = "Managed config：" + configDirectory +
                 "\r\n开发/验证期间不会写入 %USERPROFILE%\\.devspace，也不会复用旧 QuickConfig runtime/state。";
             page.Controls.Add(managedConfigLabel);
@@ -386,13 +390,11 @@ namespace DevSpaceControlPlatform
             diagnosticsBox.ReadOnly = true;
             diagnosticsBox.Font = new Font("Microsoft YaHei UI", 9F);
             diagnosticsBox.WordWrap = true;
-            diagnosticsBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(diagnosticsBox);
 
             AddLabel(page, "GPT 会话日志（按 workspaceId 隔离）", 350, 18, 300);
             conversationLogSelector.SetBounds(18, 375, 420, 28);
             conversationLogSelector.DropDownStyle = ComboBoxStyle.DropDownList;
-            conversationLogSelector.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             conversationLogSelector.SelectedIndexChanged += delegate
             {
                 if (!updatingConversationLogSelector) RefreshConversationLogView();
@@ -402,7 +404,6 @@ namespace DevSpaceControlPlatform
             latestToolCallLabel.SetBounds(455, 377, 463, 24);
             latestToolCallLabel.ForeColor = Color.DimGray;
             latestToolCallLabel.AutoEllipsis = true;
-            latestToolCallLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(latestToolCallLabel);
 
             conversationLogBox.SetBounds(18, 410, 900, 150);
@@ -411,7 +412,6 @@ namespace DevSpaceControlPlatform
             conversationLogBox.ReadOnly = true;
             conversationLogBox.Font = new Font("Microsoft YaHei UI", 9F);
             conversationLogBox.WordWrap = true;
-            conversationLogBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             ForwardMouseWheelToPage(conversationLogBox, page);
             page.Controls.Add(conversationLogBox);
 
@@ -422,7 +422,6 @@ namespace DevSpaceControlPlatform
             liveLogBox.ReadOnly = true;
             liveLogBox.Font = new Font("Microsoft YaHei UI", 9F);
             liveLogBox.WordWrap = true;
-            liveLogBox.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             ForwardMouseWheelToPage(liveLogBox, page);
             page.Controls.Add(liveLogBox);
 
@@ -433,29 +432,13 @@ namespace DevSpaceControlPlatform
 
         private TabPage BuildReviewHistoryTab()
         {
-            var page = NewPage("代码版本");
-            page.AutoScroll = false;
-
-            var layout = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                Padding = new Padding(18, 10, 18, 10)
-            };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72F));
-            page.Controls.Add(layout);
-
-            var header = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            var page = NewPage("项目 / Git");
+            var header = new Panel { Location = new Point(18, 10), Size = new Size(900, 108) };
             AddLabel(header, "项目", 8, 0, 45);
             reviewWorkspaceBox.SetBounds(52, 4, 520, 28);
             reviewWorkspaceBox.DropDownStyle = ComboBoxStyle.DropDownList;
             reviewWorkspaceBox.DropDownWidth = 520;
             reviewWorkspaceBox.MaxDropDownItems = 10;
-            reviewWorkspaceBox.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             reviewWorkspaceBox.SelectedIndexChanged += delegate
             {
                 if (!updatingReviewWorkspaceBox) RefreshReviewHistory();
@@ -465,21 +448,43 @@ namespace DevSpaceControlPlatform
             reviewWorkspaceLabel.SetBounds(0, 38, 900, 24);
             reviewWorkspaceLabel.ForeColor = Color.DimGray;
             reviewWorkspaceLabel.AutoEllipsis = true;
-            reviewWorkspaceLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             header.Controls.Add(reviewWorkspaceLabel);
+
+            gitRepositoryStatusLabel.SetBounds(0, 60, 900, 24);
+            gitRepositoryStatusLabel.ForeColor = Color.DimGray;
+            gitRepositoryStatusLabel.AutoEllipsis = true;
+            header.Controls.Add(gitRepositoryStatusLabel);
 
             var note = AddLabel(
                 header,
-                "每个 Git 项目维护独立版本链。每次 show_changes 形成一个 Review 版本；切换上方项目不会混用版本。",
-                64,
+                "项目归属由模型按真实仓库边界判断；无 Git 时由模型在正确项目根目录初始化。下方同时显示真实本地 Git 提交与 DevSpace Review 版本。",
+                82,
                 0,
                 900);
             note.ForeColor = Color.DimGray;
-            note.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            layout.Controls.Add(header, 0, 0);
+            page.Controls.Add(header);
 
-            reviewHistoryGrid.Dock = DockStyle.Fill;
-            reviewHistoryGrid.Margin = new Padding(0, 6, 0, 6);
+            AddLabel(page, "本地 Git 提交", 18, 122, 180);
+            gitHistoryGrid.SetBounds(18, 144, 900, 150);
+            gitHistoryGrid.BorderStyle = BorderStyle.Fixed3D;
+            gitHistoryGrid.ReadOnly = true;
+            gitHistoryGrid.AllowUserToAddRows = false;
+            gitHistoryGrid.AllowUserToDeleteRows = false;
+            gitHistoryGrid.AllowUserToResizeRows = false;
+            gitHistoryGrid.MultiSelect = false;
+            gitHistoryGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            gitHistoryGrid.RowHeadersVisible = false;
+            gitHistoryGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            gitHistoryGrid.ScrollBars = ScrollBars.Vertical;
+            gitHistoryGrid.BackgroundColor = SystemColors.Window;
+            gitHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Commit", HeaderText = "Commit", FillWeight = 16 });
+            gitHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "GitTime", HeaderText = "时间", FillWeight = 24 });
+            gitHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "GitSummary", HeaderText = "说明", FillWeight = 60 });
+            page.Controls.Add(gitHistoryGrid);
+
+            AddLabel(page, "DevSpace Review 版本", 18, 302, 220);
+            reviewHistoryGrid.SetBounds(18, 324, 900, 250);
+            reviewHistoryGrid.BorderStyle = BorderStyle.Fixed3D;
             reviewHistoryGrid.ReadOnly = true;
             reviewHistoryGrid.AllowUserToAddRows = false;
             reviewHistoryGrid.AllowUserToDeleteRows = false;
@@ -490,20 +495,22 @@ namespace DevSpaceControlPlatform
             reviewHistoryGrid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
             reviewHistoryGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
             reviewHistoryGrid.ScrollBars = ScrollBars.Vertical;
-            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "状态", FillWeight = 12 });
-            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Version", HeaderText = "版本", FillWeight = 10 });
-            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Time", HeaderText = "时间", FillWeight = 22 });
+            reviewHistoryGrid.BackgroundColor = SystemColors.Window;
+            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "状态", FillWeight = 10 });
+            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Version", HeaderText = "版本", FillWeight = 8 });
+            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Time", HeaderText = "时间", FillWeight = 20 });
+            reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Conversation", HeaderText = "来源会话", FillWeight = 22 });
             reviewHistoryGrid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 Name = "Summary",
                 HeaderText = "原因 / 处理",
-                FillWeight = 56,
+                FillWeight = 40,
                 DefaultCellStyle = new DataGridViewCellStyle { WrapMode = DataGridViewTriState.True }
             });
             reviewHistoryGrid.SelectionChanged += delegate { UpdateReviewRollbackSelection(); };
-            layout.Controls.Add(reviewHistoryGrid, 0, 1);
+            page.Controls.Add(reviewHistoryGrid);
 
-            var footer = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            var footer = new Panel { Location = new Point(18, 582), Size = new Size(900, 72) };
             var refresh = AddButton(footer, "刷新版本", 0, 12, 110);
             refresh.Click += delegate { RefreshReviewHistory(); };
 
@@ -513,10 +520,9 @@ namespace DevSpaceControlPlatform
             footer.Controls.Add(rollbackSelectedReviewButton);
 
             reviewHistoryStatusLabel.SetBounds(292, 8, 608, 52);
-            reviewHistoryStatusLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             reviewHistoryStatusLabel.ForeColor = Color.DimGray;
             footer.Controls.Add(reviewHistoryStatusLabel);
-            layout.Controls.Add(footer, 0, 2);
+            page.Controls.Add(footer);
 
             return page;
         }
@@ -525,7 +531,6 @@ namespace DevSpaceControlPlatform
         {
             var page = NewPage("平台配置历史");
             historyList.SetBounds(18, 44, 330, 490);
-            historyList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
             historyList.SelectedIndexChanged += delegate { PreviewSelectedHistory(); };
             page.Controls.Add(historyList);
             AddLabel(page, "最近配置快照", 18, 18, 200);
@@ -536,14 +541,11 @@ namespace DevSpaceControlPlatform
             historyPreviewBox.ReadOnly = true;
             historyPreviewBox.Font = new Font("Consolas", 9F);
             historyPreviewBox.WordWrap = false;
-            historyPreviewBox.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             page.Controls.Add(historyPreviewBox);
 
             var refresh = AddButton(page, "刷新", 18, 550, 90);
-            refresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             refresh.Click += delegate { RefreshHistory(); };
             var load = AddButton(page, "载入到表单", 365, 550, 120);
-            load.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             load.Click += delegate { LoadSelectedHistoryIntoForm(); };
             var note = AddLabel(page,
                 "这里只保存 ControlPlatform settings，不包含项目代码。载入历史只填充页面；再次点击“保存配置”才会应用。",
@@ -658,9 +660,6 @@ namespace DevSpaceControlPlatform
             cloudflareServiceLabel.Text = "状态：" + supervisor.CloudflareStatus;
             managedMcpUrlBox.Text = supervisor.McpUrl;
             RefreshLiveDiagnostics();
-            if (tabs.SelectedTab != null && string.Equals(tabs.SelectedTab.Text, "代码版本", StringComparison.Ordinal) &&
-                (DateTime.UtcNow - lastReviewHistoryRefreshUtc).TotalSeconds >= 2)
-                RefreshReviewHistory();
         }
 
         private void RefreshLiveDiagnostics()
@@ -742,18 +741,39 @@ namespace DevSpaceControlPlatform
             var workspacePath = SelectedReviewWorkspacePath();
             reviewVersions.Clear();
             reviewHistoryGrid.Rows.Clear();
+            gitHistoryGrid.Rows.Clear();
             rollbackSelectedReviewButton.Enabled = false;
             if (string.IsNullOrWhiteSpace(workspacePath))
             {
                 reviewWorkspaceLabel.Text = "Workspace：尚未观察到 DevSpace workspace";
-                reviewHistoryStatusLabel.Text = "先在 GPT 中打开一个 Git workspace；ControlPlatform 会在 show_changes 后自动记录版本。";
+                gitRepositoryStatusLabel.Text = "Git：尚无项目";
+                reviewHistoryStatusLabel.Text = "先在 GPT 中打开 workspace；模型会判断项目归属，无 Git 时在正确项目根目录初始化。";
                 return;
             }
 
             try
             {
-                var history = DevSpaceReviewRollback.ListVersions(workspacePath);
-                reviewWorkspaceLabel.Text = "Workspace：" + workspacePath;
+                var repository = DevSpaceReviewRollback.DescribeRepository(workspacePath);
+                reviewWorkspaceLabel.Text = (repository.IsRepository ? "项目根目录：" : "Workspace：") + repository.Root;
+                if (!repository.IsRepository)
+                {
+                    gitRepositoryStatusLabel.Text = "Git：未初始化；等待模型确认项目边界后执行 git init。";
+                    reviewHistoryStatusLabel.Text = "当前没有 Git repository，因此不会创建 Review 版本。";
+                    return;
+                }
+
+                gitRepositoryStatusLabel.Text = "Git：" + repository.Branch + " @ " + repository.Head +
+                    " · " + repository.CommitCount + " commits · " + (repository.IsDirty ? "有未提交修改" : "clean") +
+                    (string.IsNullOrWhiteSpace(repository.HeadSummary) ? string.Empty : " · " + repository.HeadSummary);
+                foreach (var commit in DevSpaceReviewRollback.ListRecentCommits(repository.Root, 12))
+                {
+                    gitHistoryGrid.Rows.Add(
+                        commit.ShortCommit,
+                        commit.CreatedAt == DateTimeOffset.MinValue ? "-" : commit.CreatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                        commit.Summary);
+                }
+
+                var history = DevSpaceReviewRollback.ListVersions(repository.Root);
                 foreach (var version in history.Versions.OrderByDescending(v => v.CreatedAt))
                 {
                     reviewVersions.Add(version);
@@ -761,6 +781,7 @@ namespace DevSpaceControlPlatform
                         version.Status,
                         version.Version,
                         version.CreatedAt == DateTimeOffset.MinValue ? "-" : version.CreatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                        supervisor.ConversationDisplayName(version.WorkspaceId),
                         version.Summary);
                     var row = reviewHistoryGrid.Rows[rowIndex];
                     row.Tag = version;
@@ -835,13 +856,13 @@ namespace DevSpaceControlPlatform
 
         private static string ReviewWorkspaceDisplayName(string path)
         {
-            var normalized = (path ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var repository = DevSpaceReviewRollback.DescribeRepository(path);
+            var normalized = (repository.Root ?? path ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var name = Path.GetFileName(normalized);
             if (string.IsNullOrWhiteSpace(name)) return normalized;
-            var parent = Directory.GetParent(normalized);
-            if (parent == null) return name;
-            var parentName = Path.GetFileName(parent.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            var display = string.IsNullOrWhiteSpace(parentName) ? name : name + "  —  " + parentName;
+            var display = repository.IsRepository
+                ? name + "  —  " + repository.Branch + " @ " + repository.Head + (repository.IsDirty ? " *" : string.Empty)
+                : name + "  —  未初始化 Git";
             return display.Length <= 46 ? display : display.Substring(0, 43) + "...";
         }
 
@@ -962,6 +983,7 @@ namespace DevSpaceControlPlatform
             }
             var managed = candidate.ToManagedDevSpaceSettings(platformRoot, PublicBaseUrlFor(candidate));
             var plan = DevSpaceConfiguration.BuildPlan(detectedVersion, managed, configDirectory);
+            RuntimeResolver.AddRuntimeToolPaths(plan.EnvironmentVariables, platformRoot);
             var report = DevSpaceEffectiveStateVerifier.Verify(plan, platformRoot);
             if (!report.IsSafe) throw new InvalidDataException(string.Join("\r\n", report.Errors.ToArray()));
             if (report.Warnings.Count > 0) diagnosticsBox.Text = "Warnings:\r\n" + string.Join("\r\n", report.Warnings.ToArray());
@@ -973,10 +995,12 @@ namespace DevSpaceControlPlatform
             try
             {
                 var plan = ValidateCandidate(ReadForm());
+                var serenaExe = Path.Combine(RuntimeResolver.ResolveSerenaBinDirectory(platformRoot), "serena.exe");
                 diagnosticsBox.Text = "PASS\r\n" +
-                    "DevSpace " + plan.Version + "\r\n" +
+                    "DevSpace " + plan.Version.Raw + "\r\n" +
                     "Config family: " + plan.Version.Family + "\r\n" +
                     "Managed config: " + plan.ConfigPath + "\r\n" +
+                    "Serena semantic backend: " + (File.Exists(serenaExe) ? "available" : "not installed") + "\r\n" +
                     "Subagents: disabled\r\n" +
                     "Allowed roots: " + rootsList.Items.Count;
                 if (showSuccess) statusLabel.Text = "配置验证通过。";
@@ -1045,7 +1069,7 @@ namespace DevSpaceControlPlatform
                 var packageJson = Path.Combine(root, "package.json");
                 detectedVersion = DevSpaceVersion.FromPackageJson(packageJson);
                 detectedPackageRoot = Path.GetFullPath(root);
-                versionLabel.Text = "检测到 DevSpace " + detectedVersion + "    配置族：" + detectedVersion.Family;
+                versionLabel.Text = "检测到 DevSpace " + detectedVersion.Raw + "    配置族：" + detectedVersion.Family;
                 ConfigureToolModes();
                 statusLabel.Text = "DevSpace 版本检测完成。";
             }
@@ -1317,7 +1341,12 @@ namespace DevSpaceControlPlatform
 
         private static TabPage NewPage(string title)
         {
-            return new TabPage(title) { AutoScroll = true, Padding = new Padding(0) };
+            return new TabPage(title)
+            {
+                AutoScroll = true,
+                AutoScrollMinSize = new Size(936, 660),
+                Padding = new Padding(0)
+            };
         }
 
         private static Label AddLabel(Control parent, string text, int top, int left, int width)

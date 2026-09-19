@@ -54,9 +54,10 @@ namespace DevSpaceControlPlatform
             statusTimer = new Timer { Interval = 1000 };
             statusTimer.Tick += delegate
             {
+                supervisor.MaintainConnectivity();
                 mainForm.RefreshServiceStatus();
-                var dev = supervisor.IsDevSpaceRunning ? "DevSpace:ON" : "DevSpace:OFF";
-                var cf = supervisor.IsCloudflareRunning ? "CF:ON" : "CF:OFF";
+                var dev = supervisor.IsDevSpaceHealthy ? "DevSpace:OK" : "DevSpace:DOWN";
+                var cf = supervisor.IsCloudflareHealthy ? "CF:OK" : "CF:DOWN";
                 trayIcon.Text = Truncate("DevSpace Control Platform - " + dev + " " + cf, 63);
             };
             statusTimer.Start();

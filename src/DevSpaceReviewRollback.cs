@@ -14,6 +14,7 @@ namespace DevSpaceControlPlatform
         public string ParentRef { get; set; }
         public DateTimeOffset CreatedAt { get; set; }
         public string Summary { get; set; }
+        public string WorkspaceId { get; set; }
         public bool IsCurrent { get; set; }
         public bool IsActive { get; set; }
         public bool IsBaseline { get; set; }
@@ -38,6 +39,27 @@ namespace DevSpaceControlPlatform
         public string Message { get; set; }
     }
 
+    internal sealed class DevSpaceRepositoryInfo
+    {
+        public bool IsRepository { get; set; }
+        public string Root { get; set; }
+        public string Name { get; set; }
+        public string Branch { get; set; }
+        public string Head { get; set; }
+        public string HeadSummary { get; set; }
+        public DateTimeOffset HeadTime { get; set; }
+        public int CommitCount { get; set; }
+        public bool IsDirty { get; set; }
+    }
+
+    internal sealed class DevSpaceGitCommit
+    {
+        public string Commit { get; set; }
+        public string ShortCommit { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
+        public string Summary { get; set; }
+    }
+
     internal static class DevSpaceReviewRollback
     {
         private const string BaseRef = "refs/devspace/control-platform/history/base";
@@ -50,6 +72,132 @@ namespace DevSpaceControlPlatform
                 throw new DirectoryNotFoundException("DevSpace workspace 不存在：" + workspacePath);
             var root = RequireGit(workspacePath, "rev-parse --show-toplevel", null, null).StandardOutput.Trim();
             return Path.GetFullPath(root);
+        }
+
+        public static bool TryRepositoryRoot(string workspacePath, out string repositoryRoot)
+        {
+            repositoryRoot = string.Empty;
+            if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath)) return false;
+            try
+            {
+                var result = RunGit(Path.GetFullPath(workspacePath), "rev-parse --show-toplevel", null, null);
+                if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StandardOutput)) return false;
+                repositoryRoot = Path.GetFullPath(result.StandardOutput.Trim());
+                return Directory.Exists(repositoryRoot);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static DevSpaceRepositoryInfo DescribeRepository(string workspacePath)
+        {
+            var fullPath = string.IsNullOrWhiteSpace(workspacePath)
+                ? string.Empty
+                : Path.GetFullPath(workspacePath);
+            string root;
+            if (!TryRepositoryRoot(fullPath, out root))
+            {
+                return new DevSpaceRepositoryInfo
+                {
+                    IsRepository = false,
+                    Root = fullPath,
+                    Name = string.IsNullOrWhiteSpace(fullPath)
+                        ? string.Empty
+                        : Path.GetFileName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                };
+            }
+
+            var branchResult = RunGit(root, "symbolic-ref --quiet --short HEAD", null, null);
+            var headResult = RunGit(root, "rev-parse --short=10 HEAD", null, null);
+            var subjectResult = RunGit(root, "log -1 --format=%s", null, null);
+            var timeResult = RunGit(root, "log -1 --format=%cI", null, null);
+            var countResult = RunGit(root, "rev-list --count HEAD", null, null);
+            var statusResult = RunGit(root, "status --porcelain", null, null);
+            DateTimeOffset headTime;
+            int commitCount;
+            DateTimeOffset.TryParse(timeResult.StandardOutput.Trim(), out headTime);
+            int.TryParse(countResult.StandardOutput.Trim(), out commitCount);
+
+            return new DevSpaceRepositoryInfo
+            {
+                IsRepository = true,
+                Root = root,
+                Name = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
+                Branch = branchResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(branchResult.StandardOutput)
+                    ? branchResult.StandardOutput.Trim()
+                    : "detached",
+                Head = headResult.ExitCode == 0 ? headResult.StandardOutput.Trim() : string.Empty,
+                HeadSummary = subjectResult.ExitCode == 0 ? CompactSummary(subjectResult.StandardOutput) : string.Empty,
+                HeadTime = headTime,
+                CommitCount = commitCount,
+                IsDirty = statusResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(statusResult.StandardOutput)
+            };
+        }
+
+        public static List<DevSpaceGitCommit> ListRecentCommits(string workspacePath, int limit)
+        {
+            string root;
+            if (!TryRepositoryRoot(workspacePath, out root)) return new List<DevSpaceGitCommit>();
+            limit = Math.Max(1, Math.Min(50, limit));
+            var result = RunGit(root, "log -n " + limit + " --format=%H%x09%cI%x09%s", null, null);
+            if (result.ExitCode != 0) return new List<DevSpaceGitCommit>();
+            var commits = new List<DevSpaceGitCommit>();
+            foreach (var line in SplitLines(result.StandardOutput))
+            {
+                var parts = line.Split(new[] { '\t' }, 3);
+                if (parts.Length < 3) continue;
+                DateTimeOffset createdAt;
+                DateTimeOffset.TryParse(parts[1], out createdAt);
+                commits.Add(new DevSpaceGitCommit
+                {
+                    Commit = parts[0],
+                    ShortCommit = parts[0].Length > 10 ? parts[0].Substring(0, 10) : parts[0],
+                    CreatedAt = createdAt,
+                    Summary = CompactSummary(parts[2])
+                });
+            }
+            return commits;
+        }
+
+        public static string EnsureRepository(string workspacePath)
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
+                throw new DirectoryNotFoundException("DevSpace workspace 不存在：" + workspacePath);
+            var fullPath = Path.GetFullPath(workspacePath);
+            var existing = RunGit(fullPath, "rev-parse --show-toplevel", null, null);
+            if (existing.ExitCode == 0) return Path.GetFullPath(existing.StandardOutput.Trim());
+
+            RequireGit(fullPath, "init", null, null);
+            var headRefResult = RunGit(fullPath, "symbolic-ref HEAD", null, null);
+            var headRef = headRefResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(headRefResult.StandardOutput)
+                ? headRefResult.StandardOutput.Trim()
+                : "refs/heads/master";
+            var temporaryDirectory = Path.Combine(Path.GetTempPath(), "devspace-control-git-init-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temporaryDirectory);
+            try
+            {
+                var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "GIT_INDEX_FILE", Path.Combine(temporaryDirectory, "index") }
+                };
+                RequireGit(fullPath, "read-tree --empty", null, environment);
+                var tree = RequireGit(fullPath, "write-tree", null, environment).StandardOutput.Trim();
+                var commit = RequireGit(
+                    fullPath,
+                    "-c user.name=DevSpaceControlPlatform -c user.email=control@local.invalid commit-tree " +
+                    tree + " -m \"Initialize local DevSpace version management\"",
+                    null,
+                    null).StandardOutput.Trim();
+                UpdateRef(fullPath, headRef, commit, null);
+            }
+            finally
+            {
+                try { Directory.Delete(temporaryDirectory, true); }
+                catch { }
+            }
+            return fullPath;
         }
 
         public static void ObserveWorkspaceOpen(string workspacePath)
@@ -89,6 +237,7 @@ namespace DevSpaceControlPlatform
             if (!HasDiff(workspacePath, head, snapshot)) return false;
             UpdateRef(workspacePath, HeadRef, snapshot, head);
             CreateVersionRef(workspacePath, snapshot, NextVersionNumber(workspacePath));
+            WriteConversationNote(workspacePath, snapshot, workspaceId);
             if (!string.IsNullOrWhiteSpace(workspaceId))
             {
                 var sourceReview = ResolveCommit(workspacePath, "refs/devspace/review/" + workspaceId + "/baseline");
@@ -132,6 +281,7 @@ namespace DevSpaceControlPlatform
                     ParentRef = parent,
                     CreatedAt = CommitTime(workspacePath, commit),
                     Summary = isBase ? "Workspace 初始基线" : ReviewSummary(workspacePath, parent, commit),
+                    WorkspaceId = ReviewWorkspaceId(workspacePath, commit),
                     IsCurrent = string.Equals(commit, currentCommit, StringComparison.OrdinalIgnoreCase),
                     IsActive = active,
                     IsBaseline = isBase,
@@ -207,13 +357,17 @@ namespace DevSpaceControlPlatform
             };
             try
             {
-                RequireGit(workspacePath, "read-tree HEAD", null, environment);
+                if (string.IsNullOrWhiteSpace(parent))
+                    RequireGit(workspacePath, "read-tree --empty", null, environment);
+                else
+                    RequireGit(workspacePath, "read-tree \"" + parent + "\"", null, environment);
                 RequireGit(workspacePath, "add -A -- .", null, environment);
                 var tree = RequireGit(workspacePath, "write-tree", null, environment).StandardOutput.Trim();
                 return RequireGit(
                     workspacePath,
                     "-c user.name=DevSpaceControlPlatform -c user.email=control@local.invalid commit-tree " +
-                    tree + " -p " + parent + " -m \"" + message.Replace("\"", string.Empty) + "\"",
+                    tree + (string.IsNullOrWhiteSpace(parent) ? string.Empty : " -p " + parent) +
+                    " -m \"" + message.Replace("\"", string.Empty) + "\"",
                     null,
                     null).StandardOutput.Trim();
             }
@@ -227,12 +381,11 @@ namespace DevSpaceControlPlatform
         private static void ValidateRepository(string workspacePath)
         {
             RepositoryRoot(workspacePath);
-            RequireGit(workspacePath, "rev-parse --verify HEAD^{commit}", null, null);
         }
 
         private static string ResolveHead(string workspacePath)
         {
-            return RequireGit(workspacePath, "rev-parse --verify HEAD^{commit}", null, null).StandardOutput.Trim();
+            return ResolveCommit(workspacePath, "HEAD");
         }
 
         private static bool HasDiff(string workspacePath, string before, string after)
@@ -267,6 +420,36 @@ namespace DevSpaceControlPlatform
                 try { File.Delete(temporaryPath); }
                 catch { }
             }
+        }
+
+        private static void WriteConversationNote(string workspacePath, string commit, string workspaceId)
+        {
+            if (string.IsNullOrWhiteSpace(workspaceId)) return;
+            var temporaryPath = Path.Combine(Path.GetTempPath(), "devspace-control-conversation-" + Guid.NewGuid().ToString("N") + ".txt");
+            try
+            {
+                File.WriteAllText(temporaryPath, workspaceId.Trim() + Environment.NewLine, new UTF8Encoding(false));
+                RunGit(
+                    workspacePath,
+                    "notes --ref=devspace-control-platform-conversation add -f -F \"" + temporaryPath + "\" " + commit,
+                    null,
+                    null);
+            }
+            finally
+            {
+                try { File.Delete(temporaryPath); }
+                catch { }
+            }
+        }
+
+        private static string ReviewWorkspaceId(string workspacePath, string commit)
+        {
+            var note = RunGit(
+                workspacePath,
+                "notes --ref=devspace-control-platform-conversation show " + commit,
+                null,
+                null);
+            return note.ExitCode == 0 ? note.StandardOutput.Trim() : string.Empty;
         }
 
         private static int NextVersionNumber(string workspacePath)
@@ -406,6 +589,7 @@ namespace DevSpaceControlPlatform
             string standardInput,
             IDictionary<string, string> environment)
         {
+            DevSpaceCliRunner.NormalizeCurrentProcessEnvironment();
             var startInfo = new ProcessStartInfo
             {
                 FileName = "git",

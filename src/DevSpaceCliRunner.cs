@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -132,6 +133,7 @@ namespace DevSpaceControlPlatform
             ProcessStartInfo startInfo,
             IDictionary<string, string> managedEnvironment)
         {
+            NormalizeCurrentProcessEnvironment();
             var devSpaceKeys = new List<string>();
             foreach (DictionaryEntry entry in startInfo.EnvironmentVariables)
             {
@@ -140,6 +142,20 @@ namespace DevSpaceControlPlatform
             }
             foreach (var key in devSpaceKeys) startInfo.EnvironmentVariables.Remove(key);
             foreach (var pair in managedEnvironment) startInfo.EnvironmentVariables[pair.Key] = pair.Value;
+        }
+
+        internal static void NormalizeCurrentProcessEnvironment()
+        {
+            var variables = Environment.GetEnvironmentVariables();
+            var pathKeys = variables.Keys.Cast<object>()
+                .Select(Convert.ToString)
+                .Where(key => string.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (pathKeys.Length <= 1) return;
+
+            var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            foreach (var key in pathKeys) Environment.SetEnvironmentVariable(key, null);
+            Environment.SetEnvironmentVariable("PATH", path);
         }
 
         private static string Quote(string value)

@@ -4,10 +4,12 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
@@ -17,15 +19,26 @@ namespace DevSpaceControlPlatform
     {
         public string WorkspaceId { get; set; }
         public string WorkspacePath { get; set; }
+        public string ProjectName { get; set; }
+        public string ConversationName { get; set; }
         public DateTime LastActivityUtc { get; set; }
 
         public override string ToString()
         {
-            var project = string.IsNullOrWhiteSpace(WorkspacePath)
+            var project = string.IsNullOrWhiteSpace(ProjectName) && string.IsNullOrWhiteSpace(WorkspacePath)
                 ? "未知项目"
-                : Path.GetFileName(WorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            return project + " · " + WorkspaceId;
+                : string.IsNullOrWhiteSpace(ProjectName)
+                    ? Path.GetFileName(WorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                    : ProjectName;
+            var conversation = string.IsNullOrWhiteSpace(ConversationName) ? "GPT 标题待同步" : ConversationName;
+            return project + " · " + conversation;
         }
+    }
+
+    internal sealed class ConversationDisplayMetadata
+    {
+        public string ProjectName { get; set; }
+        public string ConversationName { get; set; }
     }
 
     internal sealed class ServiceSupervisor : IDisposable
@@ -41,6 +54,7 @@ namespace DevSpaceControlPlatform
         private readonly string logsDirectory;
         private readonly string knownWorkspacesPath;
         private readonly string knownConversationsPath;
+        private readonly string conversationMetadataPath;
         private readonly HashSet<string> knownWorkspacePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly ConversationLogStore conversationLogs;
         private Process devSpaceProcess;
@@ -56,6 +70,17 @@ namespace DevSpaceControlPlatform
         private string latestReviewedWorkspaceId = string.Empty;
         private readonly Dictionary<string, string> workspacePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> conversationLatestTools = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ConversationDisplayMetadata> conversationMetadata = new Dictionary<string, ConversationDisplayMetadata>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<int> cloudflareConnections = new HashSet<int>();
+        private bool devSpaceDesired;
+        private bool cloudflareDesired;
+        private bool devSpaceOriginHealthy;
+        private DateTime devSpaceStartedUtc = DateTime.MinValue;
+        private DateTime cloudflareStartedUtc = DateTime.MinValue;
+        private DateTime lastRecoveryAttemptUtc = DateTime.MinValue;
+        private DateTime lastDevSpaceHealthProbeUtc = DateTime.MinValue;
+        private int consecutiveDevSpaceHealthFailures;
+        private int connectivityCheckRunning;
         private bool disposing;
 
         public ServiceSupervisor(string platformRoot)
@@ -66,20 +91,36 @@ namespace DevSpaceControlPlatform
             logsDirectory = Path.Combine(this.platformRoot, "logs");
             knownWorkspacesPath = Path.Combine(this.platformRoot, "state", "known-workspaces.txt");
             knownConversationsPath = Path.Combine(this.platformRoot, "state", "known-conversations.json");
+            conversationMetadataPath = Path.Combine(this.platformRoot, "state", "conversation-metadata.json");
             conversationLogs = new ConversationLogStore(logsDirectory, 250);
             LoadKnownWorkspaces();
             LoadKnownConversations();
+            LoadConversationMetadata();
             RecoverDevSpaceWorkspaceCatalog();
         }
 
         public string DevSpaceStatus
         {
-            get { lock (sync) return IsAlive(devSpaceProcess) ? "运行中 - " + devSpaceMessage : devSpaceMessage; }
+            get
+            {
+                lock (sync)
+                {
+                    if (!IsAlive(devSpaceProcess)) return devSpaceMessage;
+                    return (devSpaceOriginHealthy ? "本地端点健康 - " : "本地端点未就绪 - ") + devSpaceMessage;
+                }
+            }
         }
 
         public string CloudflareStatus
         {
-            get { lock (sync) return IsAlive(cloudflareProcess) ? "运行中 - " + cloudflareMessage : cloudflareMessage; }
+            get
+            {
+                lock (sync)
+                {
+                    if (!IsAlive(cloudflareProcess)) return cloudflareMessage;
+                    return (cloudflareConnections.Count > 0 ? "链路健康 - " : "正在连接 - ") + cloudflareMessage;
+                }
+            }
         }
 
         public bool IsDevSpaceRunning
@@ -90,6 +131,16 @@ namespace DevSpaceControlPlatform
         public bool IsCloudflareRunning
         {
             get { lock (sync) return IsAlive(cloudflareProcess); }
+        }
+
+        public bool IsDevSpaceHealthy
+        {
+            get { lock (sync) return IsAlive(devSpaceProcess) && devSpaceOriginHealthy; }
+        }
+
+        public bool IsCloudflareHealthy
+        {
+            get { lock (sync) return IsAlive(cloudflareProcess) && cloudflareConnections.Count > 0; }
         }
 
         public string McpUrl
@@ -144,10 +195,14 @@ namespace DevSpaceControlPlatform
                         {
                             string path;
                             workspacePaths.TryGetValue(id, out path);
+                            ConversationDisplayMetadata metadata;
+                            conversationMetadata.TryGetValue(id, out metadata);
                             return new DevSpaceConversationInfo
                             {
                                 WorkspaceId = id,
                                 WorkspacePath = path ?? string.Empty,
+                                ProjectName = metadata == null ? string.Empty : metadata.ProjectName,
+                                ConversationName = metadata == null ? string.Empty : metadata.ConversationName,
                                 LastActivityUtc = conversationLogs.LastActivityUtc(id)
                             };
                         })
@@ -171,6 +226,18 @@ namespace DevSpaceControlPlatform
                 return !string.IsNullOrWhiteSpace(workspaceId) && conversationLatestTools.TryGetValue(workspaceId, out tool)
                     ? tool
                     : "尚无工具调用";
+            }
+        }
+
+        public string ConversationDisplayName(string workspaceId)
+        {
+            if (string.IsNullOrWhiteSpace(workspaceId)) return "历史会话（标题不可用）";
+            lock (sync)
+            {
+                ConversationDisplayMetadata metadata;
+                return conversationMetadata.TryGetValue(workspaceId, out metadata) && !string.IsNullOrWhiteSpace(metadata.ConversationName)
+                    ? metadata.ConversationName
+                    : "GPT 标题待同步";
             }
         }
 
@@ -213,7 +280,17 @@ namespace DevSpaceControlPlatform
             get
             {
                 lock (sync)
-                    return knownWorkspacePaths.Where(Directory.Exists).OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToArray();
+                {
+                    var resolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var path in knownWorkspacePaths.Where(Directory.Exists))
+                    {
+                        string repositoryRoot;
+                        resolved.Add(DevSpaceReviewRollback.TryRepositoryRoot(path, out repositoryRoot)
+                            ? repositoryRoot
+                            : Path.GetFullPath(path));
+                    }
+                    return resolved.OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToArray();
+                }
             }
         }
 
@@ -264,6 +341,7 @@ namespace DevSpaceControlPlatform
             var version = DevSpaceVersion.FromPackageJson(Path.Combine(packageRoot, "package.json"));
             var managed = settings.ToManagedDevSpaceSettings(platformRoot, publicBaseUrl);
             var plan = DevSpaceConfiguration.BuildPlan(version, managed, configDirectory);
+            RuntimeResolver.AddRuntimeToolPaths(plan.EnvironmentVariables, platformRoot);
             var report = DevSpaceEffectiveStateVerifier.Verify(plan, platformRoot);
             if (!report.IsSafe) throw new InvalidDataException(string.Join(Environment.NewLine, report.Errors.ToArray()));
             DevSpaceConfiguration.WritePlan(plan);
@@ -296,6 +374,11 @@ namespace DevSpaceControlPlatform
             {
                 devSpaceProcess = process;
                 devSpaceMessage = "PID " + process.Id;
+                devSpaceDesired = true;
+                devSpaceOriginHealthy = false;
+                devSpaceStartedUtc = DateTime.UtcNow;
+                lastDevSpaceHealthProbeUtc = DateTime.MinValue;
+                consecutiveDevSpaceHealthFailures = 0;
             }
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
@@ -309,6 +392,9 @@ namespace DevSpaceControlPlatform
                 process = devSpaceProcess;
                 devSpaceProcess = null;
                 devSpaceMessage = "已停止";
+                devSpaceDesired = false;
+                devSpaceOriginHealthy = false;
+                consecutiveDevSpaceHealthFailures = 0;
             }
             StopProcess(process);
         }
@@ -331,12 +417,12 @@ namespace DevSpaceControlPlatform
                 var secretFile = CloudflareTunnelSecretStore.TokenPath(platformRoot);
                 if (!CloudflareTunnelSecretStore.HasToken(platformRoot))
                     throw new InvalidOperationException("Remote Tunnel 凭据尚未配置。");
-                arguments = "tunnel run --token-file " + Quote(secretFile);
+                arguments = "tunnel --protocol http2 run --token-file " + Quote(secretFile);
             }
             else if (string.Equals(settings.TunnelMode, "Named", StringComparison.OrdinalIgnoreCase))
             {
                 if (!IsDevSpaceRunning) throw new InvalidOperationException("请先启动 DevSpace，再连接 Named Tunnel。");
-                arguments = "tunnel --config " + Quote(settings.CloudflaredConfigPath) +
+                arguments = "tunnel --protocol http2 --config " + Quote(settings.CloudflaredConfigPath) +
                     " --credentials-file " + Quote(settings.CredentialsFilePath) +
                     " --no-autoupdate run " + Quote(settings.NamedTunnelIdOrName);
             }
@@ -372,6 +458,9 @@ namespace DevSpaceControlPlatform
             {
                 cloudflareProcess = process;
                 cloudflareMessage = "PID " + process.Id;
+                cloudflareDesired = true;
+                cloudflareConnections.Clear();
+                cloudflareStartedUtc = DateTime.UtcNow;
             }
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
@@ -385,6 +474,8 @@ namespace DevSpaceControlPlatform
                 process = cloudflareProcess;
                 cloudflareProcess = null;
                 cloudflareMessage = "已停止";
+                cloudflareDesired = false;
+                cloudflareConnections.Clear();
                 dynamicPublicBaseUrl = null;
             }
             StopProcess(process);
@@ -439,7 +530,11 @@ namespace DevSpaceControlPlatform
             {
                 var url = match.Value.TrimEnd('/');
                 dynamicPublicBaseUrl = url;
-                lock (sync) cloudflareMessage = "Quick Tunnel: " + url;
+                lock (sync)
+                {
+                    cloudflareMessage = "Quick Tunnel: " + url;
+                    cloudflareConnections.Add(-1);
+                }
                 if (!IsDevSpaceRunning)
                 {
                     try { StartDevSpaceWithPublicBaseUrl(url); }
@@ -451,11 +546,131 @@ namespace DevSpaceControlPlatform
             {
                 if (line.IndexOf("registered tunnel connection", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     line.IndexOf("connection registered", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
                     cloudflareMessage = "Tunnel 已连接";
+                    var index = ConnectionIndex(line);
+                    if (index >= 0) cloudflareConnections.Add(index);
+                }
+                else if (line.IndexOf("connection terminated", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var index = ConnectionIndex(line);
+                    if (index >= 0) cloudflareConnections.Remove(index);
+                    if (cloudflareConnections.Count == 0) cloudflareMessage = "Tunnel 连接已中断，等待自动恢复";
+                }
                 else if (line.IndexOf("ERR", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     line.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
                     cloudflareMessage = line;
             }
+        }
+
+        public void MaintainConnectivity()
+        {
+            if (disposing) return;
+            if (Interlocked.Exchange(ref connectivityCheckRunning, 1) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try { MaintainConnectivityCore(); }
+                finally { Interlocked.Exchange(ref connectivityCheckRunning, 0); }
+            });
+        }
+
+        private void MaintainConnectivityCore()
+        {
+            if (disposing) return;
+            var now = DateTime.UtcNow;
+            var settings = LoadSettings();
+            bool recoverDevSpace;
+            bool recoverCloudflare;
+            bool devAlive;
+            bool probeDevSpace;
+            lock (sync)
+            {
+                devAlive = IsAlive(devSpaceProcess);
+                probeDevSpace = devAlive && (now - lastDevSpaceHealthProbeUtc).TotalSeconds >= 5;
+            }
+
+            bool? probeResult = probeDevSpace
+                ? (bool?)ProbeLocalHttp(settings.LocalPort, 1200)
+                : null;
+
+            lock (sync)
+            {
+                if (!devAlive)
+                {
+                    devSpaceOriginHealthy = false;
+                    consecutiveDevSpaceHealthFailures = 3;
+                }
+                else if (probeResult.HasValue)
+                {
+                    lastDevSpaceHealthProbeUtc = now;
+                    devSpaceOriginHealthy = probeResult.Value;
+                    consecutiveDevSpaceHealthFailures = probeResult.Value
+                        ? 0
+                        : consecutiveDevSpaceHealthFailures + 1;
+                }
+                recoverDevSpace = devSpaceDesired &&
+                    (!devAlive || (consecutiveDevSpaceHealthFailures >= 3 &&
+                                   (now - devSpaceStartedUtc).TotalSeconds >= 15));
+
+                var cloudflareAlive = IsAlive(cloudflareProcess);
+                recoverCloudflare = cloudflareDesired &&
+                    (!cloudflareAlive || (cloudflareConnections.Count == 0 && (now - cloudflareStartedUtc).TotalSeconds >= 30));
+                if ((recoverDevSpace || recoverCloudflare) && (now - lastRecoveryAttemptUtc).TotalSeconds < 8) return;
+                if (recoverDevSpace || recoverCloudflare) lastRecoveryAttemptUtc = now;
+            }
+
+            if (recoverDevSpace) RecoverService("DevSpace", RestartDevSpace);
+            if (recoverCloudflare) RecoverService("Cloudflare", RestartCloudflare);
+        }
+
+        private void RecoverService(string name, Action recovery)
+        {
+            try
+            {
+                AddServiceLog("ControlPlatform", name + " 健康检查失败，正在自动重启。");
+                recovery();
+            }
+            catch (Exception exception)
+            {
+                lock (sync)
+                {
+                    if (string.Equals(name, "DevSpace", StringComparison.Ordinal)) devSpaceDesired = true;
+                    if (string.Equals(name, "Cloudflare", StringComparison.Ordinal)) cloudflareDesired = true;
+                }
+                AddServiceLog("ControlPlatform", name + " 自动重启失败：" + exception.Message);
+            }
+        }
+
+        internal static bool ProbeLocalHttp(int port, int timeoutMilliseconds)
+        {
+            try
+            {
+                var request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + "/");
+                request.Method = "GET";
+                request.KeepAlive = false;
+                request.ProtocolVersion = HttpVersion.Version10;
+                request.Timeout = timeoutMilliseconds;
+                request.ReadWriteTimeout = timeoutMilliseconds;
+                request.Proxy = null;
+                try
+                {
+                    using (request.GetResponse()) return true;
+                }
+                catch (WebException exception)
+                {
+                    if (exception.Response == null) return false;
+                    exception.Response.Dispose();
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
+        private static int ConnectionIndex(string line)
+        {
+            var match = Regex.Match(line ?? string.Empty, @"connIndex=(\d+)", RegexOptions.IgnoreCase);
+            int value;
+            return match.Success && int.TryParse(match.Groups[1].Value, out value) ? value : -1;
         }
 
         private PlatformSettings LoadSettings()
@@ -601,7 +816,9 @@ namespace DevSpaceControlPlatform
             {
                 try
                 {
-                    var projectRoot = DevSpaceReviewRollback.RepositoryRoot(openedWorkspacePath);
+                    string projectRoot;
+                    var hasRepository = DevSpaceReviewRollback.TryRepositoryRoot(openedWorkspacePath, out projectRoot);
+                    if (!hasRepository) projectRoot = Path.GetFullPath(openedWorkspacePath);
                     lock (sync)
                     {
                         latestWorkspacePath = projectRoot;
@@ -609,7 +826,14 @@ namespace DevSpaceControlPlatform
                     }
                     RememberWorkspace(projectRoot);
                     RememberConversation(workspaceId, projectRoot);
-                    DevSpaceReviewRollback.ObserveWorkspaceOpen(projectRoot);
+                    if (hasRepository)
+                    {
+                        DevSpaceReviewRollback.ObserveWorkspaceOpen(projectRoot);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(workspaceId))
+                    {
+                        conversationLogs.Add(workspaceId, "ControlPlatform", "该 workspace 尚未属于 Git repository；等待模型按项目边界判断并初始化本地 Git。");
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -624,6 +848,14 @@ namespace DevSpaceControlPlatform
             {
                 try
                 {
+                    string repositoryRoot;
+                    if (DevSpaceReviewRollback.TryRepositoryRoot(reviewedWorkspacePath, out repositoryRoot))
+                    {
+                        reviewedWorkspacePath = repositoryRoot;
+                        lock (sync) workspacePaths[workspaceId] = repositoryRoot;
+                        RememberWorkspace(repositoryRoot);
+                        RememberConversation(workspaceId, repositoryRoot);
+                    }
                     if (DevSpaceReviewRollback.RecordReview(reviewedWorkspacePath, workspaceId))
                         conversationLogs.Add(workspaceId, "ControlPlatform", "已记录新的代码 Review 版本。");
                 }
@@ -669,6 +901,25 @@ namespace DevSpaceControlPlatform
                     foreach (var item in saved)
                         if (!string.IsNullOrWhiteSpace(item.Key) && !string.IsNullOrWhiteSpace(item.Value))
                             workspacePaths[item.Key] = Path.GetFullPath(item.Value);
+            }
+            catch
+            {
+            }
+        }
+
+        private void LoadConversationMetadata()
+        {
+            try
+            {
+                if (!File.Exists(conversationMetadataPath)) return;
+                var serializer = new JavaScriptSerializer();
+                var saved = serializer.Deserialize<Dictionary<string, ConversationDisplayMetadata>>(
+                    File.ReadAllText(conversationMetadataPath, Encoding.UTF8));
+                if (saved == null) return;
+                lock (sync)
+                    foreach (var item in saved)
+                        if (!string.IsNullOrWhiteSpace(item.Key) && item.Value != null)
+                            conversationMetadata[item.Key] = item.Value;
             }
             catch
             {

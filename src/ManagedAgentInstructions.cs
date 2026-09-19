@@ -66,6 +66,13 @@ namespace DevSpaceControlPlatform
             builder.AppendLine("`git notes --ref=devspace-control-platform add -f -m \"<summary>\" <reviewRef>`");
             builder.AppendLine("Summary style: one short sentence, normally 20-60 Chinese characters, in the form `问题/动机；处理结果`. Prefer the user-visible symptom when it explains why the change was needed. State a root cause only when it was actually established; never invent one. Mention the resulting behavior, not file counts or +/- line statistics. Example: `最大化后布局错位；将固定坐标控件改为响应式布局。`");
             builder.AppendLine("Keep it factual and specific; avoid vague phrases such as `优化代码` or `调整逻辑`. This only writes Git metadata; do not modify project files just to store the summary. ControlPlatform maps that reviewRef to its persistent version history and has a local diff summary fallback.");
+            builder.AppendLine();
+            builder.AppendLine("## Project ownership and local Git");
+            builder.AppendLine("Treat a DevSpace workspace and a project/repository as separate concepts. Before editing, determine the canonical project root from the user's task, repository boundaries, and the files that belong together; do not infer ownership only from a parent folder name.");
+            builder.AppendLine("If the intended project is already inside Git, use `git rev-parse --show-toplevel` as the canonical repository root and keep all project-scoped work attached to that repository.");
+            builder.AppendLine("If the intended project has no Git repository, initialize local Git at the canonical project root before making project changes. Do not initialize a collection folder, workspace parent, or unrelated nested folder just because it is convenient.");
+            builder.AppendLine("Inspect `git status`, branch, and HEAD before and after project changes. The Control Platform management UI reads the real local Git history and uses it to identify project ownership.");
+            builder.AppendLine("Do not push automatically. Create local commits only when the active authorization policy permits a commit, and commit only files belonging to that project.");
 
             if (notice != null)
             {

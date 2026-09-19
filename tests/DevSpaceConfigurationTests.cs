@@ -25,11 +25,19 @@ internal static class DevSpaceConfigurationTests
         Run("effective state rejects enabled modern subagents", TestModernSecurityRejectsSubagents);
         Run("managed CLI isolates modern DevSpace env", TestModernCliEnvironmentIsolation);
         Run("managed CLI applies legacy effective env", TestLegacyCliEnvironment);
+        Run("setup normalizes tunnel hostname and MCP links", TestSetupHostnameNormalization);
+        Run("setup expands offline runtime payload", TestSetupOfflinePayload);
+        Run("runtime PATH exposes project Serena and uv tools", TestRuntimeToolPath);
+        Run("runtime slot pointer selects isolated node and DevSpace", TestRuntimeSlotSelection);
+        Run("invalid runtime slot pointer fails closed", TestInvalidRuntimeSlotPointer);
         Run("configuration history snapshots and trims", TestConfigurationHistory);
         Run("legacy QuickConfig migration preserves operational settings", TestLegacyQuickConfigMigration);
         Run("legacy minimal maps to claude for 1.1", TestLegacyToolModeMigration);
         Run("review rollback can walk backward across review chain", TestReviewRollback);
         Run("review histories isolate independent projects", TestIndependentProjectReviewHistories);
+        Run("project identity follows real git repository", TestProjectRepositoryIdentity);
+        Run("unborn git repository supports review history", TestUnbornRepositoryReviewHistory);
+        Run("non-git workspace gets local version baseline", TestNonGitWorkspaceInitialization);
         Run("rollback notice is one-shot managed context", TestRollbackNotice);
         Run("conversation logs isolate workspace sessions", TestConversationLogIsolation);
 
@@ -53,6 +61,7 @@ internal static class DevSpaceConfigurationTests
         var version = DevSpaceVersion.Parse("v1.1.0-beta.1");
         AssertEqual(DevSpaceConfigFamily.Modern11, version.Family, "family");
         AssertEqual("1.1.0", version.ToString(), "version");
+        AssertEqual("v1.1.0-beta.1", version.Raw, "raw version");
     }
 
     private static void TestUnknownMajor()
@@ -96,6 +105,61 @@ internal static class DevSpaceConfigurationTests
         AssertEqual(2, ((object[])json["allowedRoots"]).Length, "legacy roots");
     }
 
+    private static void TestSetupHostnameNormalization()
+    {
+        AssertEqual("devspace.example.com", SetupInstaller.NormalizeHostname("devspace.example.com"), "plain hostname");
+        AssertEqual("devspace.example.com", SetupInstaller.NormalizeHostname("https://devspace.example.com"), "https origin");
+        AssertEqual("devspace.example.com", SetupInstaller.NormalizeHostname("https://devspace.example.com/mcp"), "full MCP URL");
+        AssertEqual("http://127.0.0.1:7677", SetupInstaller.LocalOrigin(7677), "local origin");
+        AssertEqual("http://127.0.0.1:7677/mcp", SetupInstaller.LocalMcpUrl(7677), "local MCP URL");
+        AssertEqual("https://devspace.example.com/mcp", SetupInstaller.PublicMcpUrl("devspace.example.com"), "public MCP URL");
+        AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("http://devspace.example.com"); });
+        AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/not-mcp"); });
+    }
+
+    private static void TestSetupOfflinePayload()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-control-setup-payload-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "source");
+        var install = Path.Combine(root, "install");
+        Directory.CreateDirectory(Path.Combine(source, "runtime", "slots", "offline-test", "node"));
+        Directory.CreateDirectory(Path.Combine(source, "runtime", "slots", "offline-test", "devspace", "node_modules", "@waishnav", "devspace"));
+        File.WriteAllText(Path.Combine(source, "runtime", "active-slot.txt"), "offline-test\n");
+        File.WriteAllText(Path.Combine(source, "runtime", "slots", "offline-test", "READY"), "ready\n");
+        File.WriteAllBytes(Path.Combine(source, "runtime", "slots", "offline-test", "node", "node.exe"), new byte[] { 1 });
+        File.WriteAllText(
+            Path.Combine(source, "runtime", "slots", "offline-test", "devspace", "node_modules", "@waishnav", "devspace", "package.json"),
+            "{\"version\":\"1.1.0-beta.4+offline.test\"}");
+        File.WriteAllBytes(Path.Combine(source, "cloudflared.exe"), new byte[] { 1 });
+        Directory.CreateDirectory(Path.Combine(install, "payload"));
+        var payload = Path.Combine(install, "payload", "runtime.tar");
+
+        var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = tar,
+            Arguments = "-cf \"" + payload + "\" runtime cloudflared.exe",
+            WorkingDirectory = source,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using (var process = Process.Start(startInfo))
+        {
+            var stderr = process.StandardError.ReadToEnd();
+            process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0) throw new Exception("tar payload fixture failed: " + stderr);
+        }
+
+        AssertTrue(SetupInstaller.HasOfflinePayload(install), "offline payload detected");
+        SetupInstaller.EnsureOfflinePayload(install);
+        AssertEqual("1.1.0-beta.4+offline.test", SetupInstaller.ValidateBundle(install), "payload expands into valid bundle");
+        AssertTrue(File.Exists(Path.Combine(install, "cloudflared.exe")), "cloudflared expanded from payload");
+        AssertTrue(File.Exists(Path.Combine(install, "runtime", "active-slot.txt")), "runtime pointer expanded from payload");
+    }
+
     private static void TestModernPlan()
     {
         var root = TestRoot("modern");
@@ -112,8 +176,14 @@ internal static class DevSpaceConfigurationTests
         DevSpaceConfiguration.WritePlan(plan);
 
         AssertEqual("config.jsonc", Path.GetFileName(plan.ConfigPath), "modern config filename");
-        AssertEqual(1, plan.EnvironmentVariables.Count, "modern env count");
+        AssertEqual(4, plan.EnvironmentVariables.Count, "modern env count");
         AssertTrue(plan.EnvironmentVariables.ContainsKey("DEVSPACE_CONFIG_DIR"), "modern config dir env");
+        AssertEqual(
+            Path.Combine(Path.GetFullPath(settings.StateDir), "compact-runs"),
+            plan.EnvironmentVariables["DEVSPACE_COMPACT_RUN_ROOT"],
+            "compact output run root");
+        AssertEqual("30", plan.EnvironmentVariables["DEVSPACE_COMPACT_LOG_RETENTION_DAYS"], "compact retention days");
+        AssertEqual("2147483648", plan.EnvironmentVariables["DEVSPACE_COMPACT_LOG_MAX_BYTES"], "compact retention bytes");
         AssertTrue(!plan.EnvironmentVariables.ContainsKey("DEVSPACE_SUBAGENTS"), "removed env not emitted");
         AssertTrue(!plan.EnvironmentVariables.ContainsKey("DEVSPACE_TOOL_MODE"), "removed tool env not emitted");
 
@@ -221,6 +291,55 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("minimal", json["toolMode"], "legacy tool env");
         AssertEqual("config", ((object[])json["args"])[0], "config arg");
         AssertEqual("get", ((object[])json["args"])[1], "get arg");
+    }
+
+    private static void TestRuntimeToolPath()
+    {
+        var root = TestRoot("runtime-tools");
+        var serenaBin = Path.Combine(root, "runtime", "serena", "bin");
+        var uvDir = Path.Combine(root, "runtime", "uv");
+        Directory.CreateDirectory(serenaBin);
+        Directory.CreateDirectory(uvDir);
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "PATH", "C:\\ExistingTools" }
+        };
+
+        RuntimeResolver.AddRuntimeToolPaths(environment, root);
+        var path = environment["PATH"];
+        AssertTrue(path.StartsWith(serenaBin + Path.PathSeparator + uvDir + Path.PathSeparator, StringComparison.OrdinalIgnoreCase), "runtime tools precede inherited PATH");
+        AssertTrue(path.EndsWith("C:\\ExistingTools", StringComparison.OrdinalIgnoreCase), "existing PATH retained");
+    }
+
+    private static void TestRuntimeSlotSelection()
+    {
+        var root = TestRoot("runtime-slot");
+        var runtime = Path.Combine(root, "runtime");
+        var slot = Path.Combine(runtime, "slots", "slot-a");
+        var node = Path.Combine(slot, "node", "node.exe");
+        var packageRoot = Path.Combine(slot, "devspace", "node_modules", "@waishnav", "devspace");
+        var sharedSerena = Path.Combine(runtime, "serena", "bin");
+        Directory.CreateDirectory(Path.GetDirectoryName(node));
+        Directory.CreateDirectory(packageRoot);
+        Directory.CreateDirectory(sharedSerena);
+        File.WriteAllText(node, "test");
+        File.WriteAllText(Path.Combine(packageRoot, "package.json"), "{\"version\":\"1.1.0-beta.3+local.7.win.1\"}");
+        File.WriteAllText(Path.Combine(slot, "READY"), "ready");
+        File.WriteAllText(Path.Combine(runtime, "active-slot.txt"), "slot-a");
+
+        AssertEqual(Path.GetFullPath(node), RuntimeResolver.ResolveNodePath(root), "slot node path");
+        AssertEqual(Path.GetFullPath(packageRoot), RuntimeResolver.ResolveDevSpacePackageRoot(root), "slot package root");
+        AssertEqual("slot-a", RuntimeResolver.ActiveRuntimeSlot(root), "active slot name");
+        AssertEqual(Path.GetFullPath(sharedSerena), RuntimeResolver.ResolveSerenaBinDirectory(root), "shared Serena remains visible outside slot");
+    }
+
+    private static void TestInvalidRuntimeSlotPointer()
+    {
+        var root = TestRoot("runtime-slot-invalid");
+        var runtime = Path.Combine(root, "runtime");
+        Directory.CreateDirectory(runtime);
+        File.WriteAllText(Path.Combine(runtime, "active-slot.txt"), "..\\escape");
+        AssertThrows<InvalidDataException>(delegate { RuntimeResolver.ActiveRuntimeSlot(root); });
     }
 
     private static void TestConfigurationHistory()
@@ -359,6 +478,9 @@ internal static class DevSpaceConfigurationTests
         AssertTrue(text.IndexOf("git notes --ref=devspace-control-platform", StringComparison.Ordinal) >= 0, "GPT summary instruction present");
         AssertTrue(text.IndexOf("问题/动机；处理结果", StringComparison.Ordinal) >= 0, "GPT summary requires reason and result");
         AssertTrue(text.IndexOf("never invent one", StringComparison.Ordinal) >= 0, "GPT summary must not invent root cause");
+        AssertTrue(text.IndexOf("Project ownership and local Git", StringComparison.Ordinal) >= 0, "project ownership instruction present");
+        AssertTrue(text.IndexOf("git rev-parse --show-toplevel", StringComparison.Ordinal) >= 0, "canonical Git root instruction present");
+        AssertTrue(text.IndexOf("Do not push automatically", StringComparison.Ordinal) >= 0, "managed instructions prohibit automatic push");
         AssertTrue(!ManagedAgentInstructions.ConsumeRollbackNoticeIfMatches(root, Path.Combine(root, "other")), "unrelated workspace does not consume notice");
         AssertTrue(ManagedAgentInstructions.ConsumeRollbackNoticeIfMatches(root, workspace), "matching workspace consumes notice");
         text = File.ReadAllText(instructions);
@@ -410,6 +532,87 @@ internal static class DevSpaceConfigurationTests
         historyB = DevSpaceReviewRollback.ListVersions(projectB);
         AssertEqual("V1", historyB.Versions.Single(v => v.IsCurrent).Version, "rolling back A leaves B untouched");
         AssertEqual("project-b-v1\n", File.ReadAllText(Path.Combine(projectB, "file.txt")).Replace("\r\n", "\n"), "project B files untouched");
+    }
+
+    private static void TestNonGitWorkspaceInitialization()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-control-non-git-review-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "file.txt"), "baseline\n");
+        AssertEqual(Path.GetFullPath(root), DevSpaceReviewRollback.EnsureRepository(root), "initialized repository root");
+        AssertTrue(Directory.Exists(Path.Combine(root, ".git")), "local git metadata created");
+        DevSpaceReviewRollback.ObserveWorkspaceOpen(root);
+        var history = DevSpaceReviewRollback.ListVersions(root);
+        AssertEqual(1, history.Versions.Count, "initial working tree captured as V0");
+        AssertTrue(history.Versions.Single().IsBaseline, "initial version is baseline");
+        AssertEqual("baseline\n", File.ReadAllText(Path.Combine(root, "file.txt")).Replace("\r\n", "\n"), "business file unchanged");
+    }
+
+    private static void TestProjectRepositoryIdentity()
+    {
+        var root = TestRoot("project-identity");
+        var nested = Path.Combine(root, "src", "feature");
+        Directory.CreateDirectory(nested);
+        Git(root, "init");
+        Git(root, "config user.name Test");
+        Git(root, "config user.email test@local.invalid");
+        File.WriteAllText(Path.Combine(root, "README.md"), "baseline\n");
+        Git(root, "add -A");
+        Git(root, "commit -m baseline");
+
+        string repositoryRoot;
+        AssertTrue(DevSpaceReviewRollback.TryRepositoryRoot(nested, out repositoryRoot), "nested workspace resolves existing repository");
+        AssertEqual(Path.GetFullPath(root), repositoryRoot, "nested workspace maps to canonical Git root");
+
+        var info = DevSpaceReviewRollback.DescribeRepository(nested);
+        AssertTrue(info.IsRepository, "repository identity detected");
+        AssertEqual(Path.GetFileName(root), info.Name, "repository display name");
+        AssertEqual(1, info.CommitCount, "real Git commit count");
+        AssertEqual("baseline", info.HeadSummary, "real Git HEAD summary");
+        AssertTrue(!info.IsDirty, "clean repository reported clean");
+        AssertEqual(1, DevSpaceReviewRollback.ListRecentCommits(nested, 12).Count, "recent Git commits exposed");
+
+        File.WriteAllText(Path.Combine(root, "dirty.txt"), "dirty\n");
+        info = DevSpaceReviewRollback.DescribeRepository(nested);
+        AssertTrue(info.IsDirty, "working tree changes reported dirty");
+
+        var nonGit = Path.Combine(Path.GetTempPath(), "devspace-control-project-identity-no-git-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(nonGit);
+        info = DevSpaceReviewRollback.DescribeRepository(nonGit);
+        AssertTrue(!info.IsRepository, "non-Git workspace remains unowned until model initializes repository");
+    }
+
+    private static void TestUnbornRepositoryReviewHistory()
+    {
+        var root = TestRoot("unborn-review");
+        Git(root, "init");
+        File.WriteAllText(Path.Combine(root, "file.txt"), "baseline\n");
+
+        DevSpaceReviewRollback.ObserveWorkspaceOpen(root);
+        var history = DevSpaceReviewRollback.ListVersions(root);
+        AssertEqual(1, history.Versions.Count, "unborn repository gets hidden V0 baseline");
+        AssertTrue(history.Versions.Single().IsBaseline, "unborn V0 is baseline");
+
+        File.WriteAllText(Path.Combine(root, "file.txt"), "changed\n");
+        AssertTrue(DevSpaceReviewRollback.RecordReview(root, "ws_unborn"), "unborn repository records V1 without a real branch commit");
+        history = DevSpaceReviewRollback.ListVersions(root);
+        AssertEqual("V1", history.Versions.Single(v => v.IsCurrent).Version, "unborn repository advances hidden review chain");
+
+        var headCheck = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = "rev-parse --verify HEAD",
+            WorkingDirectory = root,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using (var process = Process.Start(headCheck))
+        {
+            process.WaitForExit();
+            AssertTrue(process.ExitCode != 0, "ControlPlatform hidden review does not create a real branch commit");
+        }
     }
 
     private static string Git(string workingDirectory, string arguments)

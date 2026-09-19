@@ -1,114 +1,33 @@
-# DevSpace Control Platform: Windows and Linux
+# DevSpace Control Platform platform map
 
-[中文说明](#中文说明)
+## Current versions
 
-This repository intentionally uses separate implementation lines for Windows
-and Linux because the two environments need different control surfaces and
-different upgrade mechanics.
+| Platform / component | Branch | Version |
+| --- | --- | --- |
+| Windows Control Platform | `main` | `v0.3.0` |
+| Windows DevSpace runtime | `windows/context-intelligence` | `1.1.0-beta.3+local.7.win.1` |
+| Linux DevSpace runtime/control | `linux/context-intelligence` | `1.1.0-beta.3+local.7` |
 
-## Platform map
+The Windows and Linux runtime branches share the same `local.7` Context Intelligence baseline: canonical workspace containment, lazy path-scoped instructions, `context_pack`, Serena semantic queries, bounded reads, compact `run_id` evidence, cached camelCase client compatibility, unborn-repository reviews, and explicit non-zero process logging.
 
-| Platform | Branch | Current version | Implementation | Primary responsibility |
-| --- | --- | --- | --- | --- |
-| Windows | `main` | `v0.2.0` | C# / WinForms control application | Desktop UI, tray, runtime/tunnel supervision, config/history/review presentation |
-| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | DevSpace runtime branch plus Linux control integration | systemd supervision, upstream-aligned runtime, compact context/output, semantic code navigation |
+Windows additionally carries official upstream commit `eaf8f3e` for native artifact downloads. Linux keeps its own PTY fallback; Windows deliberately does not import that Linux-specific layer.
 
-The branches share product invariants rather than source layout:
+## Source relationships
 
-- explicit Allowed Roots;
-- subagents disabled in the current personal-control scope;
-- protected Cloudflare tunnel credentials;
-- observable local/public MCP health;
-- reversible runtime upgrades and retained rollback points;
-- DevSpace upstream security and workspace contracts take precedence over local overlays.
+- Primary upstream: [Waishnav/devspace](https://github.com/Waishnav/devspace)
+- Context/runtime reference: [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)
+- Serena: [oraios/serena](https://github.com/oraios/serena)
 
-## Windows line
+`devspace-verge` is a reference for compact output and Serena integration, not the replacement upstream. Official DevSpace contracts remain authoritative.
 
-`main` is the Windows product line. It remains a small control plane around
-DevSpace rather than a DevSpace source fork. The current implementation owns:
+## Windows installation model
 
-- WinForms UI and tray behavior;
-- start/stop/restart supervision;
-- Cloudflare Remote Tunnel integration;
-- DevSpace 1.0.x / 1.1.x configuration adaptation;
-- diagnostics, tool-call logs, configuration history, and review/rollback UI.
-
-Windows build/release instructions remain in the root README.
-
-## Linux line
-
-`linux/context-intelligence` tracks DevSpace source history because Linux
-runtime changes need to be rebased against upstream security, MCP, workspace,
-and review behavior. Its current baseline is `1.1.0-beta.3+local.7`.
-
-The Linux overlay adds or preserves:
-
-- lazy path-scoped `AGENTS.md` / `CLAUDE.md` context loading;
-- bounded `read` and `context_pack` output;
-- Serena/LSP symbol navigation through `semantic_code`;
-- exact source slicing from semantic `body_location` data;
-- compact process output with full local `run_id` evidence retention;
-- Linux PTY fallback when upstream `node-pty` has no usable ABI-compatible binary;
-- compatibility for older clients that cached camelCase MCP arguments;
-- upstream fixes for symlink containment, unborn-repository reviews, and
-  non-zero process logging.
-
-See the Linux branch's `DEVCONTROL-LINUX.md` and
-`docs/context-intelligence.md` for the complete maintenance rules.
-
-## Sources and attribution
-
-Official DevSpace remains the primary upstream:
-
-- [Waishnav/devspace](https://github.com/Waishnav/devspace)
-
-The Linux context/semantic work also references:
-
-- [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)
-
-`devspace-verge` is an important reference for compact model-visible command
-output and workspace-scoped Serena semantic querying. The Linux branch does not
-wholesale replace official DevSpace with Verge; it keeps an intentionally small
-overlay so upstream DevSpace remains rebaseable and auditable.
-
----
+The `v0.3.0` Windows release remains lightweight. Core runtime setup and Serena setup are separate. Existing installations use a side-by-side runtime-slot workflow: prepare and validate a new slot while the current instance remains online, inject the pinned Koffi 3.2.1 Windows native dependency, verify Serena 1.7.0 semantically, then switch a small `active-slot.txt` pointer at cutover time. The final cutover/rollback scripts are offline and fail closed. Runtime/state/secrets remain local and are not committed to Git.
 
 ## 中文说明
 
-这个仓库故意把 Windows 和 Linux 分成不同实现线，因为两种环境需要不同的
-控制界面、运行方式和升级机制。
+- Windows 控制器：`main` / `v0.3.0`
+- Windows Runtime：`windows/context-intelligence` / `1.1.0-beta.3+local.7.win.1`
+- Linux Runtime：`linux/context-intelligence` / `1.1.0-beta.3+local.7`
 
-| 平台 | 分支 | 当前版本 | 实现方式 | 主要职责 |
-| --- | --- | --- | --- | --- |
-| Windows | `main` | `v0.2.0` | C# / WinForms | 桌面 UI、托盘、Runtime/Tunnel 监督、配置/历史/Review 展示 |
-| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | DevSpace Runtime 分支 + Linux 控制层 | systemd、紧跟上游 Runtime、上下文压缩、符号化查询 |
-
-两条分支共享的是产品约束，而不是目录结构：Allowed Roots 明确限制、当前范围
-保持 Subagents 关闭、Tunnel secret 独立保护、本地和公网 MCP 状态可观察、
-升级可回滚，并且发生冲突时优先采用官方 DevSpace 的安全与 Workspace contract。
-
-### Windows
-
-`main` 是 Windows 产品线。它仍然是围绕 DevSpace 的小型控制层，而不是
-DevSpace 源码 Fork，负责 WinForms、托盘、进程监督、Cloudflare、版本配置适配、
-诊断、日志、配置历史和 Review / rollback UI。
-
-### Linux
-
-`linux/context-intelligence` 直接跟踪 DevSpace 源码历史，因为 Linux Runtime 的
-安全、MCP、Workspace、Review 修改需要持续和上游 rebase。当前基线是
-`1.1.0-beta.3+local.7`。
-
-主要增强包括 lazy path context、bounded read / `context_pack`、Serena/LSP
-`semantic_code`、符号源码精确切片、compact process output + `run_id` 完整证据、
-Linux PTY fallback、旧 camelCase MCP 会话兼容，以及 beta3 之后与 Linux 相关的
-官方安全和可观察性修复。
-
-### 引用来源
-
-- 官方基线：[Waishnav/devspace](https://github.com/Waishnav/devspace)
-- 上下文 / 语义查询重要参考：[yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)
-
-`devspace-verge` 主要提供 compact model-visible command output 和 workspace-scoped
-Serena semantic backend 的重要参考。本项目没有整仓替换官方 DevSpace，而是保持
-一个尽可能小的 overlay，确保 Linux 版本仍可以持续跟随和审计官方上游。
+Windows 和 Linux 共享 `local.7` Context Intelligence；Windows 额外包含官方 Windows native artifact 修复，Linux 则保留 Linux 专用 PTY fallback。Windows `v0.3.0` 对已有实例默认采用旁路 Runtime slot：在线准备、独立验证、指针切换、可立即回滚。`devspace-verge` 是 compact output 和 Serena 语义层的重要参考，但官方 DevSpace 仍是主上游。

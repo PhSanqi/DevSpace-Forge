@@ -167,7 +167,10 @@ namespace DevSpaceControlPlatform
             var normalizedConfigDirectory = Path.GetFullPath(configDirectory);
             var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                { "DEVSPACE_CONFIG_DIR", normalizedConfigDirectory }
+                { "DEVSPACE_CONFIG_DIR", normalizedConfigDirectory },
+                { "DEVSPACE_COMPACT_RUN_ROOT", Path.Combine(Path.GetFullPath(settings.StateDir), "compact-runs") },
+                { "DEVSPACE_COMPACT_LOG_RETENTION_DAYS", "30" },
+                { "DEVSPACE_COMPACT_LOG_MAX_BYTES", (2L * 1024 * 1024 * 1024).ToString() }
             };
 
             object config;
