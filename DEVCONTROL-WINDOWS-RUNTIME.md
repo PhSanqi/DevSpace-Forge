@@ -30,9 +30,11 @@ release contracts.
 
 ## Control Platform integration
 
-The Windows `main` branch of DevSpaceControlPlatform should consume a packaged
-artifact built from this runtime branch rather than reimplementing the shared
-runtime changes as an ever-growing text patch against npm `1.1.0-beta.3`.
+DevSpaceControlPlatform `v0.3.0` packages the Windows runtime into a complete
+offline ZIP with `Setup.exe`, Node.js, cloudflared, and the validated DevSpace
+runtime. Setup collects Allowed Root, local port, Cloudflare public hostname,
+Remote Tunnel token, and shows the resulting local/public MCP addresses.
 
-That keeps Windows and Linux context behavior aligned while allowing each
-platform to carry only the OS-specific runtime changes it actually needs.
+Shared runtime changes must remain aligned with `linux/context-intelligence`.
+Windows-only native artifact code remains on this branch. The synchronization
+contract is documented in [DEVCONTROL-RUNTIME-SYNC.md](DEVCONTROL-RUNTIME-SYNC.md).
