@@ -1,6 +1,7 @@
 param(
     [string]$NodePath,
-    [string]$DevSpacePackageRoot
+    [string]$DevSpacePackageRoot,
+    [switch]$SkipRuntimeSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,11 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 & $output
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if ($SkipRuntimeSmoke) {
+    Write-Host 'Control configuration tests passed; runtime smoke skipped by request.'
+    exit 0
+}
 
 $node = $null
 if (-not [string]::IsNullOrWhiteSpace($NodePath)) {

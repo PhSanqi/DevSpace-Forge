@@ -1,0 +1,88 @@
+name: Build Windows Runtime Payload
+
+on:
+  push:
+    tags:
+      - 'runtime-windows-bundle-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runtime-windows-beta4-local8
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare pruned offline Windows runtime
+        shell: powershell
+        run: .\prepare-offline-windows-runtime.ps1 -OutputRoot dist\offline-windows-runtime
+
+      - name: Validate Windows runtime
+        shell: powershell
+        run: |
+          $slot = (Get-Content -Raw dist\offline-windows-runtime\runtime\active-slot.txt).Trim()
+          $node = "dist\offline-windows-runtime\runtime\slots\$slot\node\node.exe"
+          $package = "dist\offline-windows-runtime\runtime\slots\$slot\devspace\node_modules\@waishnav\devspace"
+          .\test.ps1 -NodePath $node -DevSpacePackageRoot $package
+
+      - name: Transfer expanded runtime to Linux packer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-runtime-expanded
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            dist/offline-windows-runtime/runtime
+            dist/offline-windows-runtime/cloudflared.exe
+
+  pack:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download expanded Windows runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-runtime-expanded
+          path: runtime-expanded
+
+      - name: Build single runtime payload on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          name='DevSpaceControlRuntime-windows-beta4-local8.tar'
+          tar -C runtime-expanded -cf "$name" runtime cloudflared.exe
+          tar -tf "$name" >/dev/null
+          required=(
+            'runtime/active-slot.txt'
+            'runtime/slots/windows-beta4-local8/READY'
+            'runtime/slots/windows-beta4-local8/node/node.exe'
+            'runtime/slots/windows-beta4-local8/devspace/node_modules/@waishnav/devspace/package.json'
+            'cloudflared.exe'
+          )
+          entries="$(tar -tf "$name")"
+          for item in "${required[@]}"; do
+            grep -Fxq "$item" <<<"$entries" || { echo "Missing payload entry: $item" >&2; exit 1; }
+          done
+          sha256sum "$name" > "$name.sha256.txt"
+          du -h "$name"
+          cat "$name.sha256.txt"
+
+      - name: Publish runtime payload asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload runtime-1.1.0-beta.4-local.8 \
+            DevSpaceControlRuntime-windows-beta4-local8.tar \
+            DevSpaceControlRuntime-windows-beta4-local8.tar.sha256.txt \
+            --repo '${{ github.repository }}' \
+            --clobber

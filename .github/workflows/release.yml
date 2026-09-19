@@ -15,31 +15,38 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare full offline Windows runtime
+      - name: Download validated Windows runtime payload
         shell: powershell
-        run: .\prepare-offline-windows-runtime.ps1 -OutputRoot dist\offline-windows-runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
+          gh release download runtime-1.1.0-beta.4-local.8 `
+            --repo '${{ github.repository }}' `
+            --pattern 'DevSpaceControlRuntime-windows-beta4-local8.tar' `
+            --pattern 'DevSpaceControlRuntime-windows-beta4-local8.tar.sha256.txt' `
+            --dir dist\runtime-payload
 
-      - name: Validate Windows release inputs
+      - name: Verify Windows runtime payload
+        shell: powershell
+        run: |
+          $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local8.tar'
+          $expected = ((Get-Content -Raw ($payload + '.sha256.txt')).Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 $payload).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Windows runtime payload SHA256 mismatch: $actual != $expected" }
+          Write-Host "Windows runtime payload SHA256 $actual"
+
+      - name: Build Windows release package
         shell: powershell
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
-          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime -Phase Validate
-
-      - name: Stage Windows release package
-        shell: powershell
-        run: |
-          $version = '${{ github.ref_name }}'.TrimStart('v')
-          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime -Phase Stage
-
-      - name: Archive Windows release package
-        shell: powershell
-        run: |
-          $version = '${{ github.ref_name }}'.TrimStart('v')
-          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime -Phase Archive
+          .\package-release-windows-payload.ps1 `
+            -Version $version `
+            -RuntimePayloadPath dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local8.tar
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
