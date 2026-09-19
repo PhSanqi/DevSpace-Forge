@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -18,11 +23,23 @@ jobs:
         shell: powershell
         run: .\prepare-offline-windows-runtime.ps1 -OutputRoot dist\offline-windows-runtime
 
-      - name: Build release package
+      - name: Validate Windows release inputs
         shell: powershell
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
-          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime
+          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime -Phase Validate
+
+      - name: Stage Windows release package
+        shell: powershell
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime -Phase Stage
+
+      - name: Archive Windows release package
+        shell: powershell
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          .\package-release.ps1 -Version $version -RuntimeBundleRoot dist\offline-windows-runtime -Phase Archive
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
@@ -103,10 +120,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create '${{ github.ref_name }}' \
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip \
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip.sha256.txt \
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz \
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt \
-            --title '${{ github.ref_name }}' \
-            --generate-notes
+          files=(
+            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip
+            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip.sha256.txt
+            dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz
+            dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt
+          )
+          if gh release view '${{ github.ref_name }}' >/dev/null 2>&1; then
+            gh release upload '${{ github.ref_name }}' "${files[@]}" --clobber
+          else
+            gh release create '${{ github.ref_name }}' "${files[@]}" \
+              --title '${{ github.ref_name }}' \
+              --generate-notes
+          fi
