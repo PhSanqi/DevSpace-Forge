@@ -222,6 +222,42 @@ RestartSec=3
 WantedBy=default.target
 EOF
 
+probe_endpoint() {
+  local url="$1"
+  local code=""
+  if command -v curl >/dev/null 2>&1; then
+    code="$(curl -sS -o /dev/null --max-time 4 --connect-timeout 2 --max-redirs 0 -w '%{http_code}' "$url" 2>/dev/null || true)"
+  else
+    code="$($NODE - "$url" <<'NODE'
+const http = require('node:http');
+const https = require('node:https');
+const url = new URL(process.argv[2]);
+const client = url.protocol === 'https:' ? https : http;
+const request = client.request(url, { method: 'GET', timeout: 3500 }, response => {
+  console.log(response.statusCode || 0);
+  response.resume();
+});
+request.on('timeout', () => request.destroy());
+request.on('error', () => console.log(0));
+request.end();
+NODE
+)"
+  fi
+  [[ "$code" =~ ^[0-9]+$ ]] || return 1
+  (( code >= 200 && code < 500 && code != 404 ))
+}
+
+wait_for_endpoint() {
+  local url="$1"
+  local timeout="$2"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if probe_endpoint "$url"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if [[ "$START_SERVICES" -eq 1 ]]; then
@@ -229,6 +265,32 @@ if command -v systemctl >/dev/null 2>&1; then
     if [[ -f "$CLOUDFLARE_ENV" ]]; then
       systemctl --user enable --now devspace-control-cloudflared.service
     fi
+
+    echo 'Verifying DevSpace and Cloudflare connectivity...'
+    if ! systemctl --user is-active --quiet devspace-control.service; then
+      echo 'DevSpace user service did not stay active.' >&2
+      systemctl --user --no-pager status devspace-control.service >&2 || true
+      exit 1
+    fi
+    if ! wait_for_endpoint "http://127.0.0.1:${PORT}/mcp" 45; then
+      echo "Local DevSpace MCP did not become reachable: http://127.0.0.1:${PORT}/mcp" >&2
+      systemctl --user --no-pager status devspace-control.service >&2 || true
+      exit 1
+    fi
+    if [[ -f "$CLOUDFLARE_ENV" ]]; then
+      if ! systemctl --user is-active --quiet devspace-control-cloudflared.service; then
+        echo 'Cloudflare Tunnel user service did not stay active.' >&2
+        systemctl --user --no-pager status devspace-control-cloudflared.service >&2 || true
+        exit 1
+      fi
+      if [[ -n "$PUBLIC_URL" ]] && ! wait_for_endpoint "${PUBLIC_URL%/}/mcp" 60; then
+        echo "Public MCP did not become reachable: ${PUBLIC_URL%/}/mcp" >&2
+        echo 'Confirm the Cloudflare Public Hostname routes to the local Origin shown below.' >&2
+        systemctl --user --no-pager status devspace-control-cloudflared.service >&2 || true
+        exit 1
+      fi
+    fi
+    echo 'Connectivity verification passed.'
   fi
 else
   echo 'systemctl was not found; services were installed but not started.' >&2

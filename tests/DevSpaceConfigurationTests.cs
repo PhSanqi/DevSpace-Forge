@@ -113,6 +113,19 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("http://127.0.0.1:7677", SetupInstaller.LocalOrigin(7677), "local origin");
         AssertEqual("http://127.0.0.1:7677/mcp", SetupInstaller.LocalMcpUrl(7677), "local MCP URL");
         AssertEqual("https://devspace.example.com/mcp", SetupInstaller.PublicMcpUrl("devspace.example.com"), "public MCP URL");
+        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(200), "setup accepts HTTP 200");
+        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(302), "setup accepts Access redirect");
+        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(401), "setup accepts auth challenge");
+        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(403), "setup accepts Access denial as reachable edge");
+        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(405), "setup accepts MCP method response");
+        AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(404), "setup rejects wrong route");
+        AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(502), "setup rejects bad gateway");
+        AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(530), "setup rejects Cloudflare origin failure");
+        var autoStartRoot = Path.Combine(Path.GetTempPath(), "devspace-control-autostart");
+        AssertEqual(
+            "\"" + Path.Combine(Path.GetFullPath(autoStartRoot), "DevSpaceControlPlatform.exe") + "\"",
+            SetupInstaller.WindowsAutoStartCommand(autoStartRoot),
+            "Windows setup autostart command");
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("http://devspace.example.com"); });
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/not-mcp"); });
     }

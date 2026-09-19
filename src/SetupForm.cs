@@ -246,9 +246,20 @@ namespace DevSpaceControlPlatform
                 if (!File.Exists(app)) throw new FileNotFoundException("找不到 DevSpaceControlPlatform.exe。", app);
                 Process.Start(new ProcessStartInfo { FileName = app, WorkingDirectory = platformRoot, UseShellExecute = true });
 
+                installButton.Text = "正在验证 DevSpace / Cloudflare…";
+                Application.DoEvents();
+                var connectivity = SetupInstaller.WaitForConnectivity(
+                    platformRoot,
+                    Decimal.ToInt32(portBox.Value),
+                    hostnameBox.Text,
+                    60);
+
                 Text = "DevSpace Control Platform Setup - 已完成";
                 MessageBox.Show(
-                    "配置完成并已启动 Control。\r\n\r\n" +
+                    "配置完成，DevSpace 与 Cloudflare Tunnel 已通过连通性验收。\r\n\r\n" +
+                    "本地 MCP：HTTP " + connectivity.LocalStatusCode + "\r\n" +
+                    "cloudflared：运行中\r\n" +
+                    "公网 MCP：HTTP " + connectivity.PublicStatusCode + "\r\n\r\n" +
                     "Cloudflare Origin：" + result.LocalOrigin + "\r\n" +
                     "本地 MCP：" + result.LocalMcpUrl + "\r\n" +
                     "公网 MCP：" + result.PublicMcpUrl + "\r\n\r\n" +
