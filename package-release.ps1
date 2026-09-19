@@ -69,7 +69,9 @@ Write-Host ("Expanded runtime: {0:N1} MiB" -f ((Get-ChildItem (Join-Path $stage 
 # This is the direct full-bundle path: the final ZIP contains the expanded
 # runtime, so Setup can validate and use it immediately without a second archive
 # extraction step. GitHub-hosted Windows runners ship 7-Zip; use its
-# multithreaded low-compression ZIP path for large node_modules trees. Keep a
+# multithreaded store-mode ZIP path for large node_modules trees. The release is
+# intentionally larger, but packaging becomes I/O-bound instead of spending
+# many minutes recompressing already packaged runtime dependencies. Keep a
 # PowerShell fallback for developer machines without 7-Zip.
 $sevenZip = $null
 $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
@@ -82,7 +84,7 @@ if (-not $sevenZip) {
 if ($sevenZip) {
     Push-Location $dist
     try {
-        & $sevenZip a -tzip -mx=1 -mmt=on -bd -bb0 (Split-Path $zip -Leaf) $packageName
+        & $sevenZip a -tzip -mx=0 -mmt=on -bd -bb0 (Split-Path $zip -Leaf) $packageName
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     finally { Pop-Location }
