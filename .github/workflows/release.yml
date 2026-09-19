@@ -28,6 +28,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
+          compression-level: 0
+          if-no-files-found: error
           path: |
             dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip
             dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip.sha256.txt
@@ -79,6 +81,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-release
+          compression-level: 0
+          if-no-files-found: error
           path: |
             control/dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz
             control/dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt
