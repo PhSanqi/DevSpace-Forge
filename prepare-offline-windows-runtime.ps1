@@ -90,6 +90,24 @@ $npmCli = Join-Path $nodeDir 'node_modules\npm\bin\npm-cli.js'
 & $node $npmCli install --omit=dev --no-fund --no-audit --prefix $devspaceDir
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# DevSpaceControl keeps subagents disabled. The Claude Agent SDK is therefore a
+# dormant provider dependency here, and its Windows payload alone is hundreds
+# of MiB. Remove it from the Control runtime together with build/debug metadata
+# that Node does not need at runtime. Keep pi-coding-agent because core
+# workspace/skills code imports it directly.
+$nodeModules = Join-Path $devspaceDir 'node_modules'
+Get-ChildItem -LiteralPath $nodeModules -Recurse -File -Force | ForEach-Object {
+    $name = $_.Name.ToLowerInvariant()
+    if ($name.EndsWith('.map') -or $name.EndsWith('.d.ts') -or $name.EndsWith('.pdb')) {
+        Remove-Item -LiteralPath $_.FullName -Force
+    }
+}
+$anthropicModules = Join-Path $nodeModules '@anthropic-ai'
+if (Test-Path -LiteralPath $anthropicModules) {
+    Get-ChildItem -LiteralPath $anthropicModules -Directory -Filter 'claude-agent-sdk*' -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force
+}
+
 $installed = Join-Path $devspaceDir 'node_modules\@waishnav\devspace\package.json'
 if (-not (Test-Path -LiteralPath $installed)) { throw 'DevSpace offline runtime installation failed.' }
 $actualVersion = (Get-Content -Raw $installed | ConvertFrom-Json).version
@@ -106,6 +124,9 @@ $nodeActual = & $node --version
 if ($nodeActual -ne "v$nodeVersion") { throw "Unexpected Node version: $nodeActual" }
 $cfActual = & $cloudflared --version
 if ($LASTEXITCODE -ne 0 -or $cfActual -notmatch [regex]::Escape($cloudflaredVersion)) { throw "Unexpected cloudflared version: $cfActual" }
+
+$runtimeFiles = Get-ChildItem -LiteralPath $slot -Recurse -File -Force
+Write-Host ("Pruned Windows runtime: {0:N1} MiB / {1:N0} files" -f (($runtimeFiles | Measure-Object Length -Sum).Sum / 1MB), $runtimeFiles.Count)
 
 Set-Content -LiteralPath (Join-Path $slot 'READY') -Encoding ASCII -Value $devSpaceVersion
 $slotMetadata = @{

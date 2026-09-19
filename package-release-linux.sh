@@ -47,6 +47,15 @@ PATH="$STAGE/runtime/node/bin:$PATH" \
   "$STAGE/runtime/node/lib/node_modules/npm/bin/npm-cli.js" \
   install --omit=dev --no-fund --no-audit --prefix "$STAGE/runtime/devspace"
 
+# Keep the Linux bundle aligned with the Windows Control runtime. Subagents are
+# disabled in the current product scope, so the Claude Agent SDK payload is not
+# needed. Type declarations, source maps, and PDBs are build/debug metadata and
+# are also unnecessary at runtime. pi-coding-agent stays because core
+# workspace/skills code imports it directly.
+NODE_MODULES="$STAGE/runtime/devspace/node_modules"
+find "$NODE_MODULES" -type f \( -name '*.map' -o -name '*.d.ts' -o -name '*.pdb' \) -delete
+rm -rf "$NODE_MODULES"/@anthropic-ai/claude-agent-sdk*
+
 CLOUDFLARED_CACHE="$DIST/.offline-cache/linux/cloudflared-${CLOUDFLARED_VERSION}-linux-amd64"
 if [[ ! -f "$CLOUDFLARED_CACHE" ]] || [[ "$(sha256sum "$CLOUDFLARED_CACHE" | awk '{print $1}')" != "$CLOUDFLARED_SHA256" ]]; then
   curl -fL --retry 8 --retry-delay 2 -o "$CLOUDFLARED_CACHE.partial" "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
@@ -58,6 +67,9 @@ chmod 0755 "$STAGE/cloudflared" "$STAGE/runtime/node/bin/node"
 
 DEVSPACE_VERSION="$($STAGE/runtime/node/bin/node -p "require(process.argv[1]).version" "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/package.json")"
 echo "Linux bundle runtime: $DEVSPACE_VERSION"
+RUNTIME_FILE_COUNT="$(find "$STAGE/runtime" -type f | wc -l | tr -d ' ')"
+RUNTIME_SIZE_MIB="$(du -sm "$STAGE/runtime" | awk '{print $1}')"
+echo "Pruned Linux runtime: ${RUNTIME_SIZE_MIB} MiB / ${RUNTIME_FILE_COUNT} files"
 "$STAGE/runtime/node/bin/node" --version
 "$STAGE/cloudflared" --version
 
