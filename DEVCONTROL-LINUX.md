@@ -13,12 +13,18 @@ rebased from upstream with minimal drift.
 
 | Platform | Branch | Current version | Role |
 | --- | --- | --- | --- |
-| Windows | `main` | `v0.2.0` | WinForms control UI, runtime supervision, Cloudflare integration, configuration/history/review presentation |
-| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | systemd-managed DevSpace runtime/control integration plus a small context-intelligence overlay |
+| Windows Control | `main` | `v0.3.0` | Offline `Setup.exe`, WinForms control UI, runtime supervision, Cloudflare integration, project/Git visibility, diagnostics and rollback |
+| Linux runtime | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | DevSpace runtime used by the Linux x86_64 offline bundle, plus the Linux context/runtime compatibility layer |
+| Windows runtime | `windows/context-intelligence` | `1.1.0-beta.3+local.7.win.1` | Shared context baseline plus Windows-native artifact support |
 
 Both lines keep the same operating principles: explicit Allowed Roots,
 observable runtime state, reversible upgrades, protected tunnel credentials,
 and subagents disabled in the current personal-control scope.
+
+The cross-platform synchronization contract is documented in
+[DEVCONTROL-RUNTIME-SYNC.md](DEVCONTROL-RUNTIME-SYNC.md). Shared runtime fixes
+must stay aligned across Windows and Linux; OS-specific code stays on its
+platform branch.
 
 ## Current Linux baseline
 
@@ -76,6 +82,21 @@ official DevSpace `main` after beta3:
 
 Windows/macOS-only native artifact download changes are intentionally not
 pulled into the Linux branch merely to match upstream commit count.
+
+## Control Platform v0.3.0 integration
+
+The Linux runtime is packaged by DevSpaceControlPlatform as
+`DevSpaceControlPlatform-vX.Y.Z-linux-x64.tar.gz`. The archive contains Node.js,
+the validated DevSpace runtime, cloudflared, and `setup-linux.sh`; end users do
+not need to install npm dependencies during setup.
+
+The Linux installer uses the same user-facing contract as Windows: Allowed
+Root, local DevSpace port, Cloudflare public hostname, Remote Tunnel token,
+local Origin, local MCP URL, public MCP URL, and Owner password/approval.
+
+The Control Platform README is the user-facing installation and daily-use
+documentation. This branch document remains focused on runtime maintenance and
+platform-specific behavior.
 
 ## Validation state
 

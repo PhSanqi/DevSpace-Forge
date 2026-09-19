@@ -12,11 +12,15 @@
 
 | 平台 | 分支 | 当前版本 | 主要职责 |
 | --- | --- | --- | --- |
-| Windows | `main` | `v0.2.0` | WinForms 控制界面、运行时监督、Cloudflare、配置历史、Review / 回滚展示 |
-| Linux | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | systemd 管理的 DevSpace Runtime / 控制层，以及上下文与语义查询增强 |
+| Windows Control | `main` | `v0.3.0` | 完整离线 `Setup.exe`、WinForms 控制界面、Runtime 监督、Cloudflare、项目 / Git 可见性、诊断和回滚 |
+| Linux Runtime | `linux/context-intelligence` | `1.1.0-beta.3+local.7` | Linux x86_64 离线包使用的 DevSpace Runtime，以及 Linux context/runtime 兼容层 |
+| Windows Runtime | `windows/context-intelligence` | `1.1.0-beta.3+local.7.win.1` | 共享 context 基线，以及 Windows native artifact 支持 |
 
 两条实现线保持相同原则：Allowed Roots 明确限制、运行状态可观察、升级可回滚、
 Tunnel 凭据独立保护，并且当前个人控制范围内保持 Subagents 关闭。
+
+跨平台同步规则见 [DEVCONTROL-RUNTIME-SYNC.md](DEVCONTROL-RUNTIME-SYNC.md)。
+共享 Runtime 修复必须同时落到 Windows / Linux；仅与某个 OS 有关的实现保留在对应平台分支。
 
 ## 当前 Linux 基线
 
@@ -71,6 +75,20 @@ beta3 之后已经额外同步的 Linux 相关官方修复包括：
 
 仅影响 Windows / macOS native artifact download 的上游提交没有为了“追提交数量”
 而强行并入 Linux Runtime。
+
+## Control Platform v0.3.0 集成
+
+Linux Runtime 会由 DevSpaceControlPlatform 打入
+`DevSpaceControlPlatform-vX.Y.Z-linux-x64.tar.gz`。成品包已经包含 Node.js、
+经过验证的 DevSpace Runtime、cloudflared 和 `setup-linux.sh`，最终用户安装时
+不需要再执行 npm 安装 Runtime 依赖。
+
+Linux 安装器与 Windows 使用同一套用户配置语义：Allowed Root、本地 DevSpace
+端口、Cloudflare public hostname、Remote Tunnel token、本地 Origin、本地 MCP、
+公网 MCP，以及 Owner password / 首次授权。
+
+面向最终用户的安装和日常使用说明统一放在 Control Platform 的中英文 README；
+本分支文档继续只描述 Runtime 维护和 Linux 平台差异。
 
 ## 当前验证状态
 
