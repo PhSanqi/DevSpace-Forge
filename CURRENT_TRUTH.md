@@ -1,6 +1,6 @@
 # Current Truth
 
-Date: 2026-09-20
+Date: 2026-09-21
 
 ## Product boundary
 
@@ -35,9 +35,11 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 - DevSpace local port: 17677
 - Public base URL: https://dev.sanqi.org/group
 - ControlPlatform owns the local Windows lifecycle.
-- Legacy 7677/4060 runtime is retired.
-- Current deployed cloudflared is older than the canonical package target and
-  must be upgraded to 2026.9.1 during the next deployment convergence.
+- Active runtime slot: `windows-beta4-local11`.
+- Deployed DevSpace version: `1.1.0-beta.4.local.11`.
+- Deployed cloudflared version: `2026.9.1`.
+- The pre-convergence local8 slot and cloudflared 2026.8.2 binary are retained
+  only as rollback material.
 
 ### Server / Linux
 
@@ -45,11 +47,14 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 - Public base URL: https://dev.sanqi.org/server
 - devspace-control-server.service owns DevSpace.
 - devspace-server-cloudflared.service owns the Tunnel connector.
-- Legacy Python Control, port 7676, and management page 8787 are retired.
+- Deployed DevSpace version: `1.1.0-beta.4.local.11`.
+- Legacy devspace-control.service, port 7676, management page 8787 and its
+  legacy Tunnel connector are stopped and disabled. Their runtime/state are
+  retained only for rollback; `/server` and `/group` no longer depend on them.
 
 ## Runtime baseline
 
-The next canonical runtime line is 1.1.0-beta.4.local.11.
+The deployed canonical runtime line is 1.1.0-beta.4.local.11.
 
 It is based on the beta4 image/context runtime and includes:
 
@@ -64,6 +69,11 @@ It is based on the beta4 image/context runtime and includes:
 Windows and Linux should consume builds from the same canonical runtime source.
 Platform-specific packaging differences are expected; divergent source behavior
 under the same package version is not.
+
+The Linux Server and Windows Group currently load the same packaged runtime;
+their deployed `dist/server.js` hashes are identical. Both public MCP paths
+were re-verified after the legacy 7676/8787 service was disabled, including
+repeated calls and long-call-followed-by-short-call coverage.
 
 ## Source convergence
 
@@ -91,11 +101,16 @@ Verge wholesale over production.
 
 ### WebCodex
 
-High-value mechanisms to absorb:
+The local platform already has several foundations that overlap the useful
+WebCodex mechanisms: bounded durable `run_id` evidence, managed worktrees and
+pruning, review evidence, and readiness/session-oriented management surfaces.
+Those foundations do not mean the WebCodex absorption roadmap is complete.
+
+Still-open mechanisms to absorb:
 
 1. durable Job identity/observation/cancellation;
 2. bounded Workflow Session evidence and handoff;
-3. managed worktree lifecycle and hygiene checks;
+3. a fully explicit managed worktree finish/hygiene lifecycle;
 4. structured validation plus an explicit finish contract;
 5. Runtime Console views for jobs, sessions and recent activity.
 

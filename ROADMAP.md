@@ -1,15 +1,21 @@
 # Roadmap
 
-## Phase A — Canonical source and runtime
+## Phase A — Canonical source and runtime — Completed 2026-09-21
 
-- Collapse the old Windows master and release/main history into one canonical
-  branch.
-- Build Group and Server from one ControlPlatform source.
-- Build Windows and Linux DevSpace packages from one beta4 local runtime source.
-- Upgrade Group cloudflared to 2026.9.1.
-- Verify both public MCP/OAuth paths after deployment.
+- Canonical ControlPlatform source is `main`.
+- Canonical DevSpace runtime source is `runtime/beta4-unified`.
+- Group and Server both run packaged `1.1.0-beta.4.local.11` from that runtime
+  line rather than divergent per-machine source copies.
+- Group cloudflared is 2026.9.1.
+- Legacy Linux 7676/8787 control service is stopped and disabled; rollback
+  material remains available without participating in the live path.
+- Both public MCP/OAuth paths were verified after convergence and again after
+  legacy shutdown, including repeated and long-running tool calls.
 
 ## Phase B — Durable Jobs
+
+Status: not complete. Existing `run_id` plus bounded log storage is the base,
+not yet a first-class durable Job contract.
 
 Evolve the existing compact run_id implementation into a first-class Job:
 
@@ -25,6 +31,9 @@ Runner service.
 
 ## Phase C — Workflow Session evidence
 
+Status: not complete. Existing process/workspace session state is reusable
+infrastructure, but there is no bounded canonical Workflow Session record yet.
+
 Add a bounded task/session record above workspaces:
 
 - task intent and workspace/worktree identity;
@@ -37,6 +46,9 @@ The host remains the orchestrator.
 
 ## Phase D — Managed worktree lifecycle
 
+Status: partially present. Managed create/reuse and stale pruning exist; the
+explicit finish/hygiene contract remains open.
+
 - explicit create/reuse/finish/prune lifecycle;
 - hygiene checks before finishing;
 - protection for unrelated dirty changes;
@@ -44,12 +56,17 @@ The host remains the orchestrator.
 
 ## Phase E — Structured validation and finish
 
+Status: not complete.
+
 - language-aware validation recipes;
 - one structured finish operation that reports validation + review evidence;
 - shell remains available as an escape hatch, not the default for routine
   validation.
 
 ## Phase F — Runtime Console
+
+Status: partially present. Current management/readiness surfaces cover instance
+and runtime status, but first-class Jobs and Workflow Sessions do not yet exist.
 
 Expose one management surface for:
 
