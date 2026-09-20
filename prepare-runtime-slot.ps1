@@ -13,7 +13,7 @@ $preparing = $slot + '.preparing'
 $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
 $devSpaceVersion = '1.1.0-beta.4.local.11'
-$devSpaceSha256 = '71b41c67175687b6042f8d0a75ef477134b1abe4ce10c1fa2889e48f40b9976b'
+$devSpaceSha256 = '005b39efd927b06fef9c4c2bf676322318f3308e43d1491343fd2821fb4ee39e'
 $assetName = 'waishnav-devspace-1.1.0-beta.4.local.11.tgz'
 $assetUrl = 'https://github.com/PhSanqi/DevSpace-Forge/releases/download/runtime-1.1.0-beta.4.local.11/waishnav-devspace-1.1.0-beta.4.local.11.tgz'
 

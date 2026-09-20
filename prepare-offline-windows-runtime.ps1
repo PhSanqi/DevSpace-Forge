@@ -12,7 +12,7 @@ $cloudflaredSha256 = '2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df
 $devSpaceVersion = '1.1.0-beta.4.local.11'
 $devSpaceTag = 'runtime-1.1.0-beta.4.local.11'
 $devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.11.tgz'
-$devSpaceSha256 = '71b41c67175687b6042f8d0a75ef477134b1abe4ce10c1fa2889e48f40b9976b'
+$devSpaceSha256 = '005b39efd927b06fef9c4c2bf676322318f3308e43d1491343fd2821fb4ee39e'
 $slotName = 'windows-beta4-local11'
 
 $root = $PSScriptRoot
