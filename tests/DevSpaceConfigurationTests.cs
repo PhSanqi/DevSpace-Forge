@@ -348,7 +348,7 @@ internal static class DevSpaceConfigurationTests
         Directory.CreateDirectory(packageRoot);
         Directory.CreateDirectory(sharedSerena);
         File.WriteAllText(node, "test");
-        File.WriteAllText(Path.Combine(packageRoot, "package.json"), "{\"version\":\"1.1.0-beta.4+local.9\"}");
+        File.WriteAllText(Path.Combine(packageRoot, "package.json"), "{\"version\":\"1.1.0-beta.4.local.10\"}");
         File.WriteAllText(Path.Combine(slot, "READY"), "ready");
         File.WriteAllText(Path.Combine(runtime, "active-slot.txt"), "slot-a");
 
