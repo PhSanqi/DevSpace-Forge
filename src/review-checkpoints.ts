@@ -34,6 +34,7 @@ export type ReviewAvailability =
 interface WorkspaceReviewState {
   root: string;
   gitRoot?: string;
+  pathspec?: string;
   openRef: string;
   baselineRef: string;
   openRefAvailable: boolean;
@@ -57,6 +58,8 @@ export interface ReviewCheckpointManager {
 }
 
 const REVIEW_REF_PREFIX = "refs/devspace/review";
+const MAX_REVIEW_DIAGNOSTIC_CHARS = 1_200;
+const REVIEW_GIT_TIMEOUT_MS = 12_000;
 
 export function createReviewCheckpointManager(): ReviewCheckpointManager {
   const states = new Map<string, WorkspaceReviewState>();
@@ -102,6 +105,7 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
       if (!state?.gitRoot) {
         throw new Error(state?.diagnostic ?? "show_changes requires a Git workspace in this version.");
       }
+      const pathspec = state.pathspec ?? ".";
 
       let effectiveSince = since;
       let usedWorkspaceOpenFallback = false;
@@ -119,8 +123,8 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
 
       const baselineRef = effectiveSince === "workspace_open" ? state.openRef : state.baselineRef;
       const baseline = (await git(state.gitRoot, ["rev-parse", "--verify", `${baselineRef}^{commit}`])).stdout.trim();
-      const current = await createWorkingTreeSnapshot(state.gitRoot, baseline);
-      const review = await readReviewBetween(state.gitRoot, baseline, current);
+      const current = await createWorkingTreeSnapshot(state.gitRoot, baseline, pathspec);
+      const review = await readReviewBetween(state.gitRoot, baseline, current, pathspec);
 
       if (markReviewed) {
         await git(state.gitRoot, ["update-ref", state.baselineRef, current]);
@@ -153,6 +157,7 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
       if (!state?.gitRoot) {
         throw new Error(state?.diagnostic ?? "show_changes requires a Git workspace in this version.");
       }
+      const pathspec = state.pathspec ?? ".";
 
       const [openCommit, baselineCommit, reviewCommit] = await Promise.all([
         commitForRef(state.gitRoot, state.openRef),
@@ -176,7 +181,7 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
         throw new Error(`Unknown review reference for workspace ${workspaceId}: ${reviewRef}`);
       }
 
-      return readReviewCommit(state.gitRoot, reviewCommit);
+      return readReviewCommit(state.gitRoot, reviewCommit, pathspec);
     },
   };
 }
@@ -186,12 +191,13 @@ export async function readReviewRef(root: string, reviewRef: string): Promise<Re
   if (!eligibility.ok || !eligibility.gitRoot) {
     throw new Error(eligibility.message ?? "show-changes requires a Git workspace.");
   }
+  const pathspec = await reviewPathspec(eligibility.gitRoot, root);
 
   const commit = await resolveReviewCommit(eligibility.gitRoot, reviewRef);
   if (!await isKnownReviewCommit(eligibility.gitRoot, commit)) {
     throw new Error(`Unknown DevSpace review reference: ${reviewRef}`);
   }
-  return readReviewCommit(eligibility.gitRoot, commit);
+  return readReviewCommit(eligibility.gitRoot, commit, pathspec);
 }
 
 function assertWorkspaceRoot(
@@ -223,6 +229,7 @@ async function initializeWorkspaceState(
       state.diagnostic = eligibility.message ?? "show_changes requires a Git workspace in this version.";
       return;
     }
+    const pathspec = await reviewPathspec(eligibility.gitRoot, root);
 
     const [openCommit, baselineCommit] = await Promise.all([
       commitForRef(eligibility.gitRoot, state.openRef),
@@ -233,7 +240,7 @@ async function initializeWorkspaceState(
       const head = eligibility.hasHead
         ? (await git(eligibility.gitRoot, ["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim()
         : undefined;
-      const initialCommit = await createWorkingTreeSnapshot(eligibility.gitRoot, head);
+      const initialCommit = await createWorkingTreeSnapshot(eligibility.gitRoot, head, pathspec);
       await git(eligibility.gitRoot, ["update-ref", state.openRef, initialCommit]);
       await git(eligibility.gitRoot, ["update-ref", state.baselineRef, initialCommit]);
       state.openRefAvailable = true;
@@ -244,8 +251,9 @@ async function initializeWorkspaceState(
     }
 
     state.gitRoot = eligibility.gitRoot;
+    state.pathspec = pathspec;
   } catch (error) {
-    state.diagnostic = error instanceof Error ? error.message : String(error);
+    state.diagnostic = boundedReviewDiagnostic(error);
   } finally {
     states.set(workspaceId, state);
   }
@@ -282,14 +290,21 @@ function reviewRefs(
   };
 }
 
-async function createWorkingTreeSnapshot(gitRoot: string, parent?: string): Promise<string> {
+async function createWorkingTreeSnapshot(
+  gitRoot: string,
+  parent: string | undefined,
+  pathspec: string,
+): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "devspace-review-index-"));
   const indexPath = join(tempDir, "index");
   const env = checkpointEnv(indexPath);
 
   try {
     await git(gitRoot, parent ? ["read-tree", parent] : ["read-tree", "--empty"], { env });
-    await git(gitRoot, ["add", "-A", "--", "."], { env });
+    await git(gitRoot, ["add", "-A", "--", pathspec], {
+      env,
+      timeoutMs: REVIEW_GIT_TIMEOUT_MS,
+    });
     const tree = (await git(gitRoot, ["write-tree"], { env })).stdout.trim();
     const commitArgs = ["commit-tree", tree];
     if (parent) commitArgs.push("-p", parent);
@@ -300,9 +315,13 @@ async function createWorkingTreeSnapshot(gitRoot: string, parent?: string): Prom
   }
 }
 
-async function readReviewCommit(gitRoot: string, reviewRef: string): Promise<ReviewChangesResult> {
+async function readReviewCommit(
+  gitRoot: string,
+  reviewRef: string,
+  pathspec: string,
+): Promise<ReviewChangesResult> {
   const parent = (await git(gitRoot, ["rev-parse", "--verify", `${reviewRef}^1`])).stdout.trim();
-  const review = await readReviewBetween(gitRoot, parent, reviewRef);
+  const review = await readReviewBetween(gitRoot, parent, reviewRef, pathspec);
   return {
     reviewRef,
     result: review.summary.files === 0 ? "No changes in this review." : formatChangedFiles(review.summary),
@@ -314,12 +333,15 @@ async function readReviewBetween(
   gitRoot: string,
   before: string,
   after: string,
+  pathspec: string,
 ): Promise<Pick<ReviewChangesResult, "summary" | "files" | "patch">> {
-  const patch = (await git(gitRoot, ["diff", "--binary", "--no-color", before, after], {
+  const patch = (await git(gitRoot, ["diff", "--binary", "--no-color", before, after, "--", pathspec], {
     maxBuffer: 50 * 1024 * 1024,
+    timeoutMs: REVIEW_GIT_TIMEOUT_MS,
   })).stdout;
-  const numstat = (await git(gitRoot, ["diff", "--numstat", "-z", before, after], {
+  const numstat = (await git(gitRoot, ["diff", "--numstat", "-z", before, after, "--", pathspec], {
     maxBuffer: 50 * 1024 * 1024,
+    timeoutMs: REVIEW_GIT_TIMEOUT_MS,
   })).stdout;
   const files = parseNumstat(numstat);
   return {
@@ -327,6 +349,34 @@ async function readReviewBetween(
     files,
     patch,
   };
+}
+
+async function workspacePathspec(workspaceRoot: string): Promise<string> {
+  const prefix = (await git(workspaceRoot, ["rev-parse", "--show-prefix"])).stdout.trim();
+  return prefix.replace(/\/+$/, "") || ".";
+}
+
+async function reviewPathspec(gitRoot: string, workspaceRoot: string): Promise<string> {
+  const pathspec = await workspacePathspec(workspaceRoot);
+  if (pathspec === ".") return pathspec;
+
+  const tracked = (await git(gitRoot, ["ls-files", "-z", "--", pathspec], {
+    maxBuffer: 1024 * 1024,
+    timeoutMs: 3_000,
+  })).stdout;
+  if (tracked) return pathspec;
+
+  throw new Error(
+    "workspace is nested inside an ancestor Git repository but is not tracked by that repository; "
+      + "initialize Git in the workspace or add it to the parent repository to enable show_changes.",
+  );
+}
+
+function boundedReviewDiagnostic(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.length <= MAX_REVIEW_DIAGNOSTIC_CHARS) return message;
+  const omitted = message.length - MAX_REVIEW_DIAGNOSTIC_CHARS;
+  return `${message.slice(0, MAX_REVIEW_DIAGNOSTIC_CHARS)}\n...[review diagnostic truncated; ${omitted} chars omitted]`;
 }
 
 async function resolveReviewCommit(gitRoot: string, reviewRef: string): Promise<string> {

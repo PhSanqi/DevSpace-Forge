@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { access, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { Request, RequestHandler, Response as ExpressResponse } from "express";
 import { loadConfig, type ServerConfig, type ToolMode } from "./config.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import { buildLocalAgentProviderStatuses } from "./local-agent-catalog.js";
@@ -15,7 +17,7 @@ import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { ProcessSessionManager } from "./process-sessions.js";
-import { createMcpServer, createServer } from "./server.js";
+import { createMcpServer, createServer, waitForExpressMiddleware } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
@@ -485,6 +487,26 @@ test("show_changes keeps model output compact and preserves the rich review card
   assert.equal(inputProperties && "reviewRef" in inputProperties, false);
 });
 
+test("show_changes bounds oversized review card patches", async (t) => {
+  const context = await fixture(t, { git: true, uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "large-review"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  await writeFile(join(context.project, "large.txt"), "x".repeat(400_000));
+  const review = await context.client.callTool({
+    name: "show_changes",
+    arguments: { workspace_id: workspaceId },
+  });
+  const card = responseCard(review);
+  const patch = ((card.payload as { patch?: string } | undefined)?.patch) ?? "";
+
+  assert.ok(patch.length < 300_000);
+  assert.match(patch, /review patch truncated/);
+});
+
 test("show_changes can reopen a historical review without advancing the checkpoint", async (t) => {
   const context = await fixture(t, { git: true });
   const workspaceId = structuredContent(
@@ -680,6 +702,78 @@ test("open_workspace scopes checkout reuse to OpenAI session metadata", async (t
   assert.ok(Array.isArray(structuredContent(unscoped).agents_files));
 });
 
+test("Express auth middleware lifecycle settles once and releases listeners", async (t) => {
+  await t.test("next continues the request", async () => {
+    const exchange = fakeMiddlewareExchange();
+    const completion = await waitForExpressMiddleware(
+      ((_req, _res, next) => next()) as RequestHandler,
+      exchange.req,
+      exchange.res,
+    );
+
+    assert.equal(completion, "next");
+    exchange.assertNoLifecycleListeners();
+  });
+
+  for (const status of [400, 401, 403]) {
+    await t.test(`direct ${status} response completes without next`, async () => {
+      const exchange = fakeMiddlewareExchange();
+      const completion = await waitForExpressMiddleware(
+        ((_req, res) => res.status(status).end()) as RequestHandler,
+        exchange.req,
+        exchange.res,
+      );
+
+      assert.equal(completion, "response");
+      assert.equal(exchange.statusCode(), status);
+      exchange.assertNoLifecycleListeners();
+    });
+  }
+
+  await t.test("finish and close cannot settle twice", async () => {
+    const exchange = fakeMiddlewareExchange();
+    let settlements = 0;
+    const completion = waitForExpressMiddleware(
+      (() => undefined) as RequestHandler,
+      exchange.req,
+      exchange.res,
+    ).then((result) => {
+      settlements += 1;
+      return result;
+    });
+
+    exchange.responseEvents.emit("finish");
+    exchange.responseEvents.emit("close");
+
+    assert.equal(await completion, "response");
+    assert.equal(settlements, 1);
+    exchange.assertNoLifecycleListeners();
+  });
+
+  await t.test("request abort does not affect the next request", async () => {
+    const aborted = fakeMiddlewareExchange();
+    const abortedCompletion = waitForExpressMiddleware(
+      (() => undefined) as RequestHandler,
+      aborted.req,
+      aborted.res,
+    );
+    aborted.requestEvents.emit("aborted");
+    assert.equal(await abortedCompletion, "response");
+    aborted.assertNoLifecycleListeners();
+
+    const nextRequest = fakeMiddlewareExchange();
+    assert.equal(
+      await waitForExpressMiddleware(
+        ((_req, _res, next) => next()) as RequestHandler,
+        nextRequest.req,
+        nextRequest.res,
+      ),
+      "next",
+    );
+    nextRequest.assertNoLifecycleListeners();
+  });
+});
+
 test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) => {
   const { root, localBaseUrl, accessToken } = await httpServerFixture(
     t,
@@ -751,6 +845,28 @@ test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) =
   };
   assert.equal(repeatedBody.result?.structuredContent?.workspace_id, workspaceId);
   assert.equal(repeatedBody.result?.structuredContent?.agents_files, undefined);
+
+  const closedNotification = await postModernMcpNotification(
+    localBaseUrl,
+    accessToken,
+    "notifications/initialized",
+    { connection: "close" },
+  );
+  assert.equal(closedNotification.status, 202, await closedNotification.clone().text());
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const sequential = await postModernMcp(
+      localBaseUrl,
+      accessToken,
+      "tools/list",
+      {},
+    );
+    assert.equal(
+      sequential.status,
+      200,
+      `sequential request ${attempt + 1}: ${await sequential.clone().text()}`,
+    );
+  }
 
   const legacy = await fetch(`${localBaseUrl}/mcp`, {
     method: "POST",
@@ -845,6 +961,66 @@ test("server shutdown waits for an active MCP tool call", async (t) => {
   await toolCall;
   await shutdown;
   assert.equal(shutdownFinished, true);
+});
+
+test("a long MCP tool call does not poison the next request", async (t) => {
+  const { root, localBaseUrl, accessToken } = await httpServerFixture(
+    t,
+    "devspace-long-call-test-",
+  );
+  const opened = await postModernMcp(
+    localBaseUrl,
+    accessToken,
+    "tools/call",
+    {
+      name: "open_workspace",
+      arguments: { path: root },
+      _meta: { "openai/session": "long-call-test" },
+    },
+  );
+  const openBody = await opened.json() as {
+    result?: { structuredContent?: { workspace_id?: string } };
+  };
+  const workspaceId = openBody.result?.structuredContent?.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const command = [
+    "const fs=require('node:fs')",
+    "fs.writeFileSync('started','')",
+    "const timer=setInterval(()=>{if(fs.existsSync('release')) clearInterval(timer)},10)",
+  ].join(";");
+  let toolCallFinished = false;
+  const toolCall = postModernMcp(
+    localBaseUrl,
+    accessToken,
+    "tools/call",
+    {
+      name: "exec_command",
+      arguments: {
+        workspace_id: workspaceId,
+        cmd: `node -e \"${command}\"`,
+        yield_time_ms: 12_000,
+      },
+    },
+  ).then((response) => {
+    toolCallFinished = true;
+    return response;
+  });
+  await waitForFile(join(root, "started"));
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(toolCallFinished, false);
+
+  await writeFile(join(root, "release"), "");
+  const toolResponse = await toolCall;
+  assert.equal(toolResponse.status, 200, await toolResponse.clone().text());
+
+  const subsequent = await postModernMcp(
+    localBaseUrl,
+    accessToken,
+    "tools/list",
+    {},
+  );
+  assert.equal(subsequent.status, 200, await subsequent.clone().text());
 });
 
 interface ServerFixture {
@@ -1159,6 +1335,85 @@ function postModernMcp(
       },
     }),
   });
+}
+
+function postModernMcpNotification(
+  localBaseUrl: string,
+  accessToken: string,
+  method: string,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(`${localBaseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+      "mcp-method": method,
+      "mcp-protocol-version": "2026-07-28",
+      ...headers,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      method,
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+          "io.modelcontextprotocol/clientInfo": {
+            name: "devspace-modern-http-test",
+            version: "1.0.0",
+          },
+        },
+      },
+    }),
+  });
+}
+
+function fakeMiddlewareExchange(): {
+  req: Request;
+  res: ExpressResponse;
+  requestEvents: EventEmitter;
+  responseEvents: EventEmitter;
+  statusCode(): number;
+  assertNoLifecycleListeners(): void;
+} {
+  const requestEvents = new EventEmitter();
+  const responseEvents = new EventEmitter();
+  let statusCode = 200;
+  const response = Object.assign(responseEvents, {
+    headersSent: false,
+    writableEnded: false,
+    destroyed: false,
+    status(status: number) {
+      statusCode = status;
+      return this;
+    },
+    end() {
+      this.headersSent = true;
+      this.writableEnded = true;
+      responseEvents.emit("finish");
+      responseEvents.emit("close");
+      return this;
+    },
+  });
+  const lifecycleEvents = ["finish", "close", "error"];
+  const requestLifecycleEvents = ["aborted", "error"];
+
+  return {
+    req: requestEvents as unknown as Request,
+    res: response as unknown as ExpressResponse,
+    requestEvents,
+    responseEvents,
+    statusCode: () => statusCode,
+    assertNoLifecycleListeners: () => {
+      for (const event of lifecycleEvents) {
+        assert.equal(responseEvents.listenerCount(event), 0, `response ${event} listener leaked`);
+      }
+      for (const event of requestLifecycleEvents) {
+        assert.equal(requestEvents.listenerCount(event), 0, `request ${event} listener leaked`);
+      }
+    },
+  };
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

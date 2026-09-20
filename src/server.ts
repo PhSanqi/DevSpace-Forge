@@ -20,7 +20,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
-import type { Request, Response } from "express";
+import type { Request, RequestHandler, Response } from "express";
 import * as z from "zod/v4";
 import {
   isArtifactDownloadSupportedPlatform,
@@ -85,6 +85,7 @@ import {
 } from "./tool-surfaces/types.js";
 
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+const MAX_REVIEW_CARD_PATCH_CHARS = 256_000;
 
 function normalizedPublicBasePath(publicBaseUrl: string): string {
   const pathname = new URL(publicBaseUrl).pathname.replace(/\/+$/, "");
@@ -99,6 +100,12 @@ function publicEndpointUrl(publicBaseUrl: string, suffix: string): URL {
   url.search = "";
   url.hash = "";
   return url;
+}
+
+function boundedReviewCardPatch(patch: string): string {
+  if (patch.length <= MAX_REVIEW_CARD_PATCH_CHARS) return patch;
+  const omitted = patch.length - MAX_REVIEW_CARD_PATCH_CHARS;
+  return `${patch.slice(0, MAX_REVIEW_CARD_PATCH_CHARS)}\n...[review patch truncated; ${omitted} chars omitted]`;
 }
 
 function authorizationMetadataPath(publicBaseUrl: string): string {
@@ -120,6 +127,58 @@ interface RunningServer {
   config: ServerConfig;
   localAgentProviders: LocalAgentProviderStatus[];
   close(): Promise<void>;
+}
+
+export type ExpressMiddlewareCompletion = "next" | "response";
+
+export function waitForExpressMiddleware(
+  middleware: RequestHandler,
+  req: Request,
+  res: Response,
+): Promise<ExpressMiddlewareCompletion> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      res.removeListener("finish", onResponseComplete);
+      res.removeListener("close", onResponseComplete);
+      res.removeListener("error", onError);
+      req.removeListener("aborted", onResponseComplete);
+      req.removeListener("error", onError);
+    };
+    const settle = (
+      completion: ExpressMiddlewareCompletion | undefined,
+      error?: unknown,
+    ) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error !== undefined) reject(error);
+      else resolve(completion ?? "response");
+    };
+    const onResponseComplete = () => settle("response");
+    const onError = (error: unknown) => settle(undefined, error);
+
+    res.once("finish", onResponseComplete);
+    res.once("close", onResponseComplete);
+    res.once("error", onError);
+    req.once("aborted", onResponseComplete);
+    req.once("error", onError);
+
+    try {
+      const result = middleware(req, res, (error?: unknown) => {
+        if (error !== undefined && error !== null) settle(undefined, error);
+        else settle("next");
+      });
+      void Promise.resolve(result).catch(onError);
+    } catch (error) {
+      onError(error);
+    }
+
+    if (res.writableEnded || res.destroyed) {
+      onResponseComplete();
+    }
+  });
 }
 
 type TrackToolActivity = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -963,7 +1022,7 @@ function registerMcpSurface(
             summary: review.summary,
             files: review.files,
             payload: {
-              patch: review.patch,
+              patch: boundedReviewCardPatch(review.patch),
             },
           },
         },
@@ -1171,13 +1230,8 @@ export function createServer(
   app.all(mcpRoute, async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
 
-    await new Promise<void>((resolve, reject) => {
-      bearerAuth(req, res, (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-    if (res.headersSent) return;
+    const authCompletion = await waitForExpressMiddleware(bearerAuth, req, res);
+    if (authCompletion === "response" || res.headersSent) return;
 
     if (!req.auth?.resource || !oauthProvider.isResourceAllowed(req.auth.resource)) {
       logEvent(config.logging, "warn", "auth_denied", {

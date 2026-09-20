@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -36,6 +36,47 @@ test("initialization reports whether aggregate review is available", async (t) =
   });
   assert.equal(unavailable.available, false);
   if (!unavailable.available) assert.match(unavailable.reason, /git repository/i);
+});
+
+test("a nested workspace review is scoped to that workspace", async (t) => {
+  const gitRoot = await committedRepository(t);
+  const workspaceRoot = join(gitRoot, "workspace");
+  const siblingRoot = join(gitRoot, "sibling");
+  await mkdir(workspaceRoot);
+  await mkdir(siblingRoot);
+  await writeFile(join(workspaceRoot, "tracked.txt"), "workspace\n");
+  await writeFile(join(siblingRoot, "tracked.txt"), "sibling\n");
+  await git(gitRoot, ["add", "workspace/tracked.txt", "sibling/tracked.txt"]);
+  await git(gitRoot, ["commit", "-m", "Add nested workspaces"]);
+
+  const manager = createReviewCheckpointManager();
+  await manager.initializeWorkspace({ workspaceId: "ws_nested", root: workspaceRoot });
+
+  await writeFile(join(workspaceRoot, "tracked.txt"), "workspace\nchanged\n");
+  await writeFile(join(siblingRoot, "tracked.txt"), "sibling\nchanged\n");
+  const review = await manager.reviewChanges({ workspaceId: "ws_nested", root: workspaceRoot });
+
+  assert.equal(review.summary.files, 1);
+  assert.match(review.patch, /workspace\/tracked\.txt/);
+  assert.doesNotMatch(review.patch, /sibling\/tracked\.txt/);
+});
+
+test("an untracked nested workspace does not inherit ancestor review state", async (t) => {
+  const gitRoot = await committedRepository(t);
+  const workspaceRoot = join(gitRoot, "untracked-workspace");
+  await mkdir(workspaceRoot);
+  await writeFile(join(workspaceRoot, "README.md"), "standalone project\n");
+
+  const manager = createReviewCheckpointManager();
+  const availability = await manager.initializeWorkspace({
+    workspaceId: "ws_untracked_nested",
+    root: workspaceRoot,
+  });
+
+  assert.equal(availability.available, false);
+  if (!availability.available) {
+    assert.match(availability.reason, /not tracked by that repository/i);
+  }
 });
 
 test("show_changes reports and advances the last-shown checkpoint", async (t) => {
