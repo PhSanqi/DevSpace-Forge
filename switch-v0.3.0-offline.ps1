@@ -1,4 +1,4 @@
-param([string]$SlotName = 'windows-local7-win1')
+param([string]$SlotName = 'windows-beta4-local9')
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -93,7 +93,7 @@ try {
     $selected = (Get-Content -Raw -LiteralPath (Join-Path $runtime 'active-slot.txt')).Trim()
     if ($selected -ne $SlotName) { throw "Unexpected active slot after startup: $selected" }
     $slotVersion = (Get-Content -Raw -LiteralPath (Join-Path $slot 'devspace\node_modules\@waishnav\devspace\package.json') | ConvertFrom-Json).version
-    if ($slotVersion -ne '1.1.0-beta.3+local.7.win.1') { throw "Unexpected runtime version: $slotVersion" }
+    if ($slotVersion -ne '1.1.0-beta.4+local.9') { throw "Unexpected runtime version: $slotVersion" }
 
     Write-Host ''
     Write-Host 'CUTOVER OK' -ForegroundColor Green

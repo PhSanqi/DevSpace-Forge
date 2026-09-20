@@ -24,11 +24,11 @@ Options:
   --instance NAME       Install a side-by-side named instance (for example: server)
   --allowed-root PATH   Project root DevSpace may access (default: $HOME)
   --port PORT           Local DevSpace port (default: 7677)
-  --public-url URL      Public base URL; path bases are supported
+  --public-url URL      Public base URL; path bases are supported (example: https://dev.example.com/server)
   --origin-host HOST    Cloudflare Tunnel origin hostname accepted by DevSpace
   --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
   --reuse-existing-tunnel
-                        Start only DevSpace; reuse an already-running Tunnel
+                        Start only DevSpace; reuse an already-running Tunnel on this machine
   --no-start            Install and configure without starting user services
   --non-interactive     Do not prompt for missing Cloudflare values
   -h, --help            Show this help

@@ -177,7 +177,7 @@ namespace DevSpaceControlPlatform
                 !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
                 string.IsNullOrWhiteSpace(uri.Host))
             {
-                throw new InvalidDataException("Cloudflare public endpoint 无效。请填写例如 devspace.example.com 或 devspace.example.com/group。");
+                throw new InvalidDataException("Cloudflare public endpoint 无效。请填写例如 dev.sanqi.org/group。");
             }
             if (!string.IsNullOrWhiteSpace(uri.Query) || !string.IsNullOrWhiteSpace(uri.Fragment))
                 throw new InvalidDataException("Cloudflare public endpoint 不能包含 query 或 fragment。");

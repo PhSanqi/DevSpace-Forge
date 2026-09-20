@@ -389,7 +389,8 @@ namespace DevSpaceControlPlatform
         {
             var normalized = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var host in hosts ?? new string[0])
+            if (hosts == null) return normalized.ToArray();
+            foreach (var host in hosts)
             {
                 if (string.IsNullOrWhiteSpace(host)) continue;
                 var value = host.Trim();

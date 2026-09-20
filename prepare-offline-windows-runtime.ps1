@@ -7,13 +7,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
-$cloudflaredVersion = '2026.8.2'
-$cloudflaredSha256 = 'c29eee2b121f5436a642eed69fd9767da7e7b8c510fa50aaa130337f931357b5'
-$devSpaceVersion = '1.1.0-beta.4+local.8'
-$devSpaceTag = 'runtime-1.1.0-beta.4-local.8'
-$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4+local.8.tgz'
-$devSpaceSha256 = '0ed94fea1f733f6edacda72cd684309d9f15e71d4b96eeb159a7e4b0c7a05d42'
-$slotName = 'windows-beta4-local8'
+$cloudflaredVersion = '2026.9.1'
+$cloudflaredSha256 = 'b82135613fa344b767f2bc5ae694396519b2682017f213e0f36ea180f2eef94c'
+$devSpaceVersion = '1.1.0-beta.4+local.9'
+$devSpaceTag = 'runtime-1.1.0-beta.4-local.9'
+$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4+local.9.tgz'
+$devSpaceSha256 = '29c9a325955e61bb8c5dfbb8f440aa72d23b367c92a76b334a432c89d6fdbce2'
+$slotName = 'windows-beta4-local9'
 
 $root = $PSScriptRoot
 $output = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
@@ -70,7 +70,7 @@ Copy-Item -LiteralPath $cloudflaredCache -Destination $cloudflared -Force
 
 $runtimePackage = Join-Path $cache $devSpacePackageName
 Get-Verified `
-    "https://github.com/PhSanqi/DevSpaceControlPlatform/releases/download/$devSpaceTag/waishnav-devspace-1.1.0-beta.4%2Blocal.8.tgz" `
+    "https://github.com/PhSanqi/DevSpaceControlPlatform/releases/download/$devSpaceTag/waishnav-devspace-1.1.0-beta.4%2Blocal.9.tgz" `
     $runtimePackage `
     $devSpaceSha256
 Copy-Item -LiteralPath $runtimePackage -Destination (Join-Path $devspaceDir 'devspace-runtime.tgz') -Force

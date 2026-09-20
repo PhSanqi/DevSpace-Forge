@@ -644,13 +644,10 @@ namespace DevSpaceControlPlatform
 
             EndpointProbeResult localEndpointProbe = null;
             EndpointProbeResult publicEndpointProbe = null;
-            if (probeEndpointReadiness)
+            if (probeEndpointReadiness && !string.IsNullOrWhiteSpace(publicBaseUrl))
             {
-                if (!string.IsNullOrWhiteSpace(publicBaseUrl))
-                {
-                    localEndpointProbe = ProbeEndpointSet(publicBaseUrl, settings.LocalPort, true, 1500);
-                    publicEndpointProbe = ProbeEndpointSet(publicBaseUrl, settings.LocalPort, false, 2500);
-                }
+                localEndpointProbe = ProbeEndpointSet(publicBaseUrl, settings.LocalPort, true, 1500);
+                publicEndpointProbe = ProbeEndpointSet(publicBaseUrl, settings.LocalPort, false, 2500);
             }
 
             string readinessChange = null;

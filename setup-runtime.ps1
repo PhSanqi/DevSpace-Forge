@@ -6,12 +6,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
-$cloudflaredVersion = '2026.8.2'
-$cloudflaredSha256 = 'c29eee2b121f5436a642eed69fd9767da7e7b8c510fa50aaa130337f931357b5'
-$devSpaceVersion = '1.1.0-beta.3+local.7.win.1'
-$devSpaceRuntimeTag = 'windows-runtime-1.1.0-beta.3-local.7-win.1'
-$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.3+local.7.win.1.tgz'
-$devSpacePackageSha256 = 'c9106a7af0d431be38450b82d2c32da394521200502ed95278b03be254b4ab5f'
+$cloudflaredVersion = '2026.9.1'
+$cloudflaredSha256 = 'b82135613fa344b767f2bc5ae694396519b2682017f213e0f36ea180f2eef94c'
+$devSpaceVersion = '1.1.0-beta.4+local.9'
+$devSpaceRuntimeTag = 'runtime-1.1.0-beta.4-local.9'
+$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4+local.9.tgz'
+$devSpacePackageSha256 = '29c9a325955e61bb8c5dfbb8f440aa72d23b367c92a76b334a432c89d6fdbce2'
 
 $root = $PSScriptRoot
 $runtime = Join-Path $root 'runtime'

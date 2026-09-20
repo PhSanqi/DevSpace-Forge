@@ -22,6 +22,7 @@ export default {
     const url = new URL(request.url);
     const instance = resolveInstance(url.pathname);
     if (!instance) return new Response("Not found", { status: 404 });
+
     url.hostname = INSTANCES[instance];
     return fetch(new Request(url, request));
   },

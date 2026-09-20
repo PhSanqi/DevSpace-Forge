@@ -607,6 +607,7 @@ namespace DevSpaceControlPlatform
             {
                 SchemaVersion = 1,
                 AllowedRoots = rootsList.Items.Cast<object>().Select(Convert.ToString).Where(v => !string.IsNullOrWhiteSpace(v)).ToList(),
+                AllowedHosts = new List<string>((settings == null ? null : settings.AllowedHosts) ?? new List<string>()),
                 LocalPort = Decimal.ToInt32(portBox.Value),
                 TunnelMode = string.Equals(Convert.ToString(tunnelModeBox.SelectedItem), "未配置", StringComparison.OrdinalIgnoreCase)
                     ? string.Empty

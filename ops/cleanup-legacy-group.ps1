@@ -22,12 +22,8 @@ function Test-ListeningPort([int]$Port) {
 }
 
 function Assert-SafeMigrationState {
-    if (-not (Test-ListeningPort 17677)) {
-        throw 'Refusing cleanup: new group DevSpace is not listening on 17677.'
-    }
-    if (Test-ListeningPort 7677) {
-        throw 'Refusing cleanup: legacy 7677 is still listening.'
-    }
+    if (-not (Test-ListeningPort 17677)) { throw 'Refusing cleanup: new group DevSpace is not listening on 17677.' }
+    if (Test-ListeningPort 7677) { throw 'Refusing cleanup: legacy 7677 is still listening.' }
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:17677/group/mcp' -Method Get -TimeoutSec 3 -MaximumRedirection 0
         $status = [int]$response.StatusCode
@@ -36,9 +32,7 @@ function Assert-SafeMigrationState {
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode.value__ }
         else { throw 'Refusing cleanup: new group MCP probe failed.' }
     }
-    if ($status -ne 401) {
-        throw "Refusing cleanup: expected unauthenticated group MCP status 401, got $status."
-    }
+    if ($status -ne 401) { throw "Refusing cleanup: expected unauthenticated group MCP status 401, got $status." }
 }
 
 function Add-Candidate([string]$Kind, [string]$Path, [string]$Reason) {
@@ -98,9 +92,7 @@ if ($runKey -and $fixedRunValue) {
 
 if (Test-Path -LiteralPath $publishWorktree) {
     & git -C $projectRoot worktree remove --force $publishWorktree
-    if ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $publishWorktree)) {
-        throw 'Failed to remove obsolete publish worktree cleanly.'
-    }
+    if ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $publishWorktree)) { throw 'Failed to remove obsolete publish worktree cleanly.' }
 }
 
 foreach ($path in @($legacyRuntime, $testOutput, $distOutput, $beta3Inspect, $legacyCloudflaredData)) {

@@ -38,15 +38,14 @@ namespace DevSpaceControlPlatform
 
         private static string InstanceMutexName()
         {
-            var root = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory)
+            var baseDirectory = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 .ToUpperInvariant();
+            byte[] digest;
             using (var sha256 = SHA256.Create())
-            {
-                var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(root));
-                var suffix = BitConverter.ToString(hash, 0, 12).Replace("-", string.Empty);
-                return @"Local\DevSpaceControlPlatform-" + suffix;
-            }
+                digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(baseDirectory));
+            var suffix = BitConverter.ToString(digest, 0, 12).Replace("-", string.Empty);
+            return @"Local\DevSpaceControlPlatform-" + suffix;
         }
 
         private static void DeleteOldExecutableCopy(string fileName)
