@@ -2,12 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading;
 using System.Web.Script.Serialization;
-using Microsoft.Win32;
 
 namespace DevSpaceControlPlatform
 {
@@ -18,13 +15,6 @@ namespace DevSpaceControlPlatform
         public string PublicMcpUrl { get; set; }
         public string OwnerPassword { get; set; }
         public string DevSpaceVersion { get; set; }
-    }
-
-    internal sealed class SetupConnectivityReport
-    {
-        public int LocalStatusCode { get; set; }
-        public bool CloudflaredRunning { get; set; }
-        public int PublicStatusCode { get; set; }
     }
 
     internal static class SetupInstaller
@@ -90,24 +80,7 @@ namespace DevSpaceControlPlatform
 
         public static string NormalizeHostname(string value)
         {
-            var input = (value ?? string.Empty).Trim();
-            if (input.Length == 0) return string.Empty;
-
-            Uri uri;
-            if (!input.Contains("://")) input = "https://" + input;
-            if (!Uri.TryCreate(input, UriKind.Absolute, out uri) ||
-                !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-                string.IsNullOrWhiteSpace(uri.Host))
-            {
-                throw new InvalidDataException("Cloudflare hostname 无效。请填写例如 devspace.example.com。\n不要填写 Tunnel 名称；Remote Tunnel 实际运行只需要公网 hostname 和 token。");
-            }
-
-            if (!string.IsNullOrWhiteSpace(uri.Query) || !string.IsNullOrWhiteSpace(uri.Fragment))
-                throw new InvalidDataException("Cloudflare hostname 不能包含 query 或 fragment。");
-            var path = uri.AbsolutePath.Trim('/');
-            if (path.Length > 0 && !string.Equals(path, "mcp", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Cloudflare hostname 只填写域名；可以粘贴完整的 https://.../mcp 地址，但不能包含其它路径。");
-            return uri.Host;
+            return PublicEndpoint.NormalizeHostAndPath(value);
         }
 
         public static string LocalOrigin(int port)
@@ -123,91 +96,7 @@ namespace DevSpaceControlPlatform
 
         public static string PublicMcpUrl(string hostname)
         {
-            var normalized = NormalizeHostname(hostname);
-            return normalized.Length == 0 ? string.Empty : "https://" + normalized + "/mcp";
-        }
-
-        public static string WindowsAutoStartCommand(string platformRoot)
-        {
-            return Quote(Path.Combine(Path.GetFullPath(platformRoot), "DevSpaceControlPlatform.exe"));
-        }
-
-        public static void ApplyWindowsAutoStart(string platformRoot, bool enabled)
-        {
-            using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
-            {
-                if (key == null) throw new InvalidOperationException("无法打开 Windows 当前用户启动项。\n请检查当前用户注册表权限。");
-                if (enabled)
-                {
-                    var executable = Path.Combine(Path.GetFullPath(platformRoot), "DevSpaceControlPlatform.exe");
-                    if (!File.Exists(executable)) throw new FileNotFoundException("找不到 DevSpace Control 主程序。", executable);
-                    key.SetValue("DevSpaceControlPlatform", Quote(executable), RegistryValueKind.String);
-                }
-                else
-                {
-                    key.DeleteValue("DevSpaceControlPlatform", false);
-                }
-            }
-        }
-
-        public static bool IsAcceptableEndpointStatus(int statusCode)
-        {
-            // 3xx/401/403/405 are valid for a reachable MCP endpoint (for example
-            // Cloudflare Access or an unauthenticated MCP probe). 404 means we
-            // reached the wrong route, while 5xx usually means Tunnel/origin failure.
-            return statusCode >= 200 && statusCode < 500 && statusCode != 404;
-        }
-
-        public static SetupConnectivityReport WaitForConnectivity(
-            string platformRoot,
-            int port,
-            string hostname,
-            int timeoutSeconds)
-        {
-            var root = Path.GetFullPath(platformRoot);
-            ValidatePort(port);
-            var normalizedHostname = NormalizeHostname(hostname);
-            if (normalizedHostname.Length == 0) throw new InvalidDataException("Cloudflare public hostname 不能为空。");
-            if (timeoutSeconds < 1) throw new ArgumentOutOfRangeException("timeoutSeconds");
-
-            var localUrl = LocalMcpUrl(port);
-            var publicUrl = PublicMcpUrl(normalizedHostname);
-            var cloudflaredPath = RuntimeResolver.ResolveCloudflaredPath(root);
-            var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-            var localStatus = 0;
-            var publicStatus = 0;
-            var cloudflaredRunning = false;
-
-            while (DateTime.UtcNow < deadline)
-            {
-                localStatus = ProbeHttpStatus(localUrl, 1800, true);
-                cloudflaredRunning = IsExpectedProcessRunning(cloudflaredPath);
-                publicStatus = ProbeHttpStatus(publicUrl, 2800, false);
-                if (IsAcceptableEndpointStatus(localStatus) &&
-                    cloudflaredRunning &&
-                    IsAcceptableEndpointStatus(publicStatus))
-                {
-                    return new SetupConnectivityReport
-                    {
-                        LocalStatusCode = localStatus,
-                        CloudflaredRunning = true,
-                        PublicStatusCode = publicStatus
-                    };
-                }
-                Thread.Sleep(1000);
-            }
-
-            var failures = new List<string>();
-            if (!IsAcceptableEndpointStatus(localStatus))
-                failures.Add("本地 DevSpace 未就绪（" + localUrl + "，HTTP " + DisplayStatus(localStatus) + "）");
-            if (!cloudflaredRunning)
-                failures.Add("当前安装目录的 cloudflared 未运行");
-            if (!IsAcceptableEndpointStatus(publicStatus))
-                failures.Add("公网 MCP 未连通（" + publicUrl + "，HTTP " + DisplayStatus(publicStatus) + "）");
-            throw new InvalidOperationException(
-                "安装配置已经写入，但连通性验收未通过：\r\n- " +
-                string.Join("\r\n- ", failures.ToArray()) +
-                "\r\n\r\n请确认 Cloudflare Public Hostname 指向该 Remote Tunnel，随后在 Control 中执行“重新启动全部”。");
+            return PublicEndpoint.McpUrl(hostname);
         }
 
         public static string ValidateBundle(string platformRoot)
@@ -269,11 +158,10 @@ namespace DevSpaceControlPlatform
             PlatformSettingsStore.Save(settingsPath, settings);
 
             if (token.Length > 0) CloudflareTunnelSecretStore.SaveToken(root, token);
-            ApplyWindowsAutoStart(root, autoStart);
 
             var packageRoot = RuntimeResolver.ResolveDevSpacePackageRoot(root);
             var version = DevSpaceVersion.FromPackageJson(Path.Combine(packageRoot, "package.json"));
-            var publicBaseUrl = "https://" + normalizedHostname;
+            var publicBaseUrl = PublicEndpoint.BaseUrl(normalizedHostname);
             var configDirectory = Path.Combine(root, "state", "devspace-config");
             var plan = DevSpaceConfiguration.BuildPlan(
                 version,
@@ -331,66 +219,6 @@ namespace DevSpaceControlPlatform
         {
             if (port < 1 || port > 65535)
                 throw new InvalidDataException("本地端口必须在 1 到 65535 之间。");
-        }
-
-        private static int ProbeHttpStatus(string url, int timeoutMilliseconds, bool bypassProxy)
-        {
-            try
-            {
-                var request = (HttpWebRequest)WebRequest.Create(url);
-                request.Method = "GET";
-                request.AllowAutoRedirect = false;
-                request.KeepAlive = false;
-                request.Timeout = timeoutMilliseconds;
-                request.ReadWriteTimeout = timeoutMilliseconds;
-                request.UserAgent = "DevSpaceControlPlatform-Setup";
-                if (bypassProxy) request.Proxy = null;
-                try
-                {
-                    using (var response = (HttpWebResponse)request.GetResponse())
-                        return (int)response.StatusCode;
-                }
-                catch (WebException exception)
-                {
-                    var response = exception.Response as HttpWebResponse;
-                    if (response == null) return 0;
-                    using (response) return (int)response.StatusCode;
-                }
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-
-        private static bool IsExpectedProcessRunning(string expectedExecutable)
-        {
-            var expected = Path.GetFullPath(expectedExecutable);
-            var processName = Path.GetFileNameWithoutExtension(expected);
-            foreach (var process in Process.GetProcessesByName(processName))
-            {
-                try
-                {
-                    var module = process.MainModule;
-                    var path = module == null ? string.Empty : module.FileName;
-                    if (!string.IsNullOrWhiteSpace(path) &&
-                        string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase))
-                        return true;
-                }
-                catch
-                {
-                }
-                finally
-                {
-                    process.Dispose();
-                }
-            }
-            return false;
-        }
-
-        private static string DisplayStatus(int statusCode)
-        {
-            return statusCode > 0 ? statusCode.ToString() : "无响应";
         }
 
         private static string Quote(string value)

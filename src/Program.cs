@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -17,7 +19,7 @@ namespace DevSpaceControlPlatform
             RefreshExplorerIcon();
 
             bool createdNew;
-            using (var mutex = new Mutex(true, @"Local\DevSpaceControlPlatform", out createdNew))
+            using (var mutex = new Mutex(true, InstanceMutexName(), out createdNew))
             {
                 if (!createdNew)
                 {
@@ -31,6 +33,19 @@ namespace DevSpaceControlPlatform
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new ControlApplicationContext());
+            }
+        }
+
+        private static string InstanceMutexName()
+        {
+            var root = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .ToUpperInvariant();
+            using (var sha256 = SHA256.Create())
+            {
+                var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(root));
+                var suffix = BitConverter.ToString(hash, 0, 12).Replace("-", string.Empty);
+                return @"Local\DevSpaceControlPlatform-" + suffix;
             }
         }
 

@@ -92,6 +92,7 @@ namespace DevSpaceControlPlatform
     internal sealed class ManagedDevSpaceSettings
     {
         public List<string> AllowedRoots { get; set; }
+        public List<string> AllowedHosts { get; set; }
         public string Host { get; set; }
         public int LocalPort { get; set; }
         public string PublicBaseUrl { get; set; }
@@ -115,6 +116,7 @@ namespace DevSpaceControlPlatform
             return new ManagedDevSpaceSettings
             {
                 AllowedRoots = new List<string> { platformRoot },
+                AllowedHosts = new List<string>(),
                 Host = "127.0.0.1",
                 LocalPort = 7676,
                 PublicBaseUrl = null,
@@ -268,7 +270,7 @@ namespace DevSpaceControlPlatform
                 { "port", settings.LocalPort },
                 { "allowedRoots", NormalizePaths(settings.AllowedRoots) },
                 { "publicBaseUrl", NullIfBlank(settings.PublicBaseUrl) },
-                { "allowedHosts", new string[0] },
+                { "allowedHosts", NormalizeHosts(settings.AllowedHosts) },
                 { "stateDir", Path.GetFullPath(settings.StateDir) },
                 { "worktreeRoot", Path.GetFullPath(settings.WorktreeRoot) },
                 { "artifactsEnabled", false },
@@ -289,7 +291,7 @@ namespace DevSpaceControlPlatform
                         { "host", settings.Host },
                         { "port", settings.LocalPort },
                         { "publicBaseUrl", NullIfBlank(settings.PublicBaseUrl) },
-                        { "allowedHosts", new string[0] },
+                        { "allowedHosts", NormalizeHosts(settings.AllowedHosts) },
                         { "trustProxy", settings.TrustProxy }
                     }
                 },
@@ -379,6 +381,19 @@ namespace DevSpaceControlPlatform
                 if (string.IsNullOrWhiteSpace(path)) continue;
                 var fullPath = Path.GetFullPath(path.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 if (seen.Add(fullPath)) normalized.Add(fullPath);
+            }
+            return normalized.ToArray();
+        }
+
+        private static string[] NormalizeHosts(IEnumerable<string> hosts)
+        {
+            var normalized = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var host in hosts ?? new string[0])
+            {
+                if (string.IsNullOrWhiteSpace(host)) continue;
+                var value = host.Trim();
+                if (seen.Add(value)) normalized.Add(value);
             }
             return normalized.ToArray();
         }

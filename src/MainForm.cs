@@ -656,7 +656,7 @@ namespace DevSpaceControlPlatform
         internal void RefreshServiceStatus()
         {
             if (IsDisposed) return;
-            devSpaceServiceLabel.Text = "状态：" + supervisor.DevSpaceStatus;
+            devSpaceServiceLabel.Text = "状态：" + supervisor.DevSpaceStatus + "\r\n验收：" + supervisor.ReadinessStatus;
             cloudflareServiceLabel.Text = "状态：" + supervisor.CloudflareStatus;
             managedMcpUrlBox.Text = supervisor.McpUrl;
             RefreshLiveDiagnostics();

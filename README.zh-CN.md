@@ -67,7 +67,7 @@ Cloudflare 本地 Origin   http://127.0.0.1:7677
 公网 MCP                 https://devspace.example.com/mcp
 ```
 
-配置完成后会启动 `DevSpaceControlPlatform.exe`，之后由 Control 统一管理 DevSpace 和 cloudflared。启用“登录 Windows 后自动启动”时，Setup 会直接写入当前用户启动项；在报告安装成功前，还会验收本地 MCP、包内 cloudflared 进程和公网 MCP 路由。Tunnel token 独立保存，不进入普通 settings 历史和项目 Git。
+配置完成后会启动 `DevSpaceControlPlatform.exe`，之后由 Control 统一管理 DevSpace 和 cloudflared。Tunnel token 独立保存，不进入普通 settings 历史和项目 Git。
 
 ### Windows 日常怎么用
 
@@ -108,7 +108,7 @@ Linux Release 同样已经包含 Node.js、经过验证的 DevSpace Runtime 和 
   --tunnel-token "YOUR_TUNNEL_TOKEN"
 ```
 
-安装完成后会直接打印本地 Origin、本地 MCP、公网 MCP 和 Owner password，并安装两个 user service；启动 service 时会先验收两个 service、本地 MCP 和公网 MCP，全部通过后才报告成功：
+安装完成后会直接打印本地 Origin、本地 MCP、公网 MCP 和 Owner password，并安装两个 user service：
 
 ```text
 devspace-control.service

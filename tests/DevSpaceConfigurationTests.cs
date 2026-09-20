@@ -40,6 +40,10 @@ internal static class DevSpaceConfigurationTests
         Run("non-git workspace gets local version baseline", TestNonGitWorkspaceInitialization);
         Run("rollback notice is one-shot managed context", TestRollbackNotice);
         Run("conversation logs isolate workspace sessions", TestConversationLogIsolation);
+        Run("readiness reports local failure", TestReadinessLocalFailure);
+        Run("readiness reports public route failure", TestReadinessPublicRouteFailure);
+        Run("readiness requires real MCP call", TestReadinessRequiresRealCall);
+        Run("readiness reaches verified state", TestReadinessVerified);
 
         if (failures != 0)
         {
@@ -110,24 +114,14 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("devspace.example.com", SetupInstaller.NormalizeHostname("devspace.example.com"), "plain hostname");
         AssertEqual("devspace.example.com", SetupInstaller.NormalizeHostname("https://devspace.example.com"), "https origin");
         AssertEqual("devspace.example.com", SetupInstaller.NormalizeHostname("https://devspace.example.com/mcp"), "full MCP URL");
+        AssertEqual("devspace.example.com/group", SetupInstaller.NormalizeHostname("https://devspace.example.com/group"), "path base URL");
+        AssertEqual("devspace.example.com/group", SetupInstaller.NormalizeHostname("https://devspace.example.com/group/mcp"), "path MCP URL");
         AssertEqual("http://127.0.0.1:7677", SetupInstaller.LocalOrigin(7677), "local origin");
         AssertEqual("http://127.0.0.1:7677/mcp", SetupInstaller.LocalMcpUrl(7677), "local MCP URL");
         AssertEqual("https://devspace.example.com/mcp", SetupInstaller.PublicMcpUrl("devspace.example.com"), "public MCP URL");
-        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(200), "setup accepts HTTP 200");
-        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(302), "setup accepts Access redirect");
-        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(401), "setup accepts auth challenge");
-        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(403), "setup accepts Access denial as reachable edge");
-        AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(405), "setup accepts MCP method response");
-        AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(404), "setup rejects wrong route");
-        AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(502), "setup rejects bad gateway");
-        AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(530), "setup rejects Cloudflare origin failure");
-        var autoStartRoot = Path.Combine(Path.GetTempPath(), "devspace-control-autostart");
-        AssertEqual(
-            "\"" + Path.Combine(Path.GetFullPath(autoStartRoot), "DevSpaceControlPlatform.exe") + "\"",
-            SetupInstaller.WindowsAutoStartCommand(autoStartRoot),
-            "Windows setup autostart command");
+        AssertEqual("https://devspace.example.com/group/mcp", SetupInstaller.PublicMcpUrl("devspace.example.com/group"), "path public MCP URL");
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("http://devspace.example.com"); });
-        AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/not-mcp"); });
+        AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/group?bad=1"); });
     }
 
     private static void TestSetupOfflinePayload()
@@ -180,6 +174,7 @@ internal static class DevSpaceConfigurationTests
         var second = Path.Combine(root, "second");
         Directory.CreateDirectory(second);
         settings.AllowedRoots.Add(second);
+        settings.AllowedHosts.Add("group-origin.example.test");
         settings.ToolMode = "codex";
 
         var plan = DevSpaceConfiguration.BuildPlan(
@@ -206,11 +201,14 @@ internal static class DevSpaceConfigurationTests
         var ui = AsObject(json["ui"]);
         var workspaces = AsObject(json["workspaces"]);
         var logging = AsObject(json["logging"]);
+        var server = AsObject(json["server"]);
 
         AssertEqual(false, subagents["enabled"], "modern subagents disabled");
         AssertEqual("codex", tools["mode"], "modern tool mode");
         AssertEqual(true, ui["enabled"], "modern review ui");
         AssertEqual(2, ((object[])workspaces["allowedRoots"]).Length, "modern roots");
+        AssertEqual("group-origin.example.test", ((object[])server["allowedHosts"])[0], "modern allowed host");
+        AssertEqual(false, server["trustProxy"], "modern trust proxy default");
         AssertEqual(false, logging["shellCommands"], "shell log default");
     }
 
@@ -258,6 +256,38 @@ internal static class DevSpaceConfigurationTests
             "\"subagents\":{\"enabled\":true");
         var report = DevSpaceEffectiveStateVerifier.Verify(plan, root);
         AssertTrue(!report.IsSafe, "enabled subagents rejected");
+    }
+
+    private static void TestReadinessLocalFailure()
+    {
+        AssertEqual(
+            "L1 本地 MCP/OAuth 未就绪",
+            ReadinessFormatter.Format(true, false, true, true, false, false, 404, 404, 404),
+            "local readiness failure");
+    }
+
+    private static void TestReadinessPublicRouteFailure()
+    {
+        AssertEqual(
+            "L3 公网路由未就绪（MCP 404 / OAuth 404 / Resource 404）",
+            ReadinessFormatter.Format(true, true, true, true, false, false, 404, 404, 404),
+            "public route readiness failure");
+    }
+
+    private static void TestReadinessRequiresRealCall()
+    {
+        AssertEqual(
+            "L4 公网 OAuth/MCP 已就绪；等待一次真实工具调用完成最终验收",
+            ReadinessFormatter.Format(true, true, true, true, true, false, 401, 200, 200),
+            "real call pending");
+    }
+
+    private static void TestReadinessVerified()
+    {
+        AssertEqual(
+            "READY 公网 OAuth/MCP 已通过真实工具调用验证",
+            ReadinessFormatter.Format(true, true, true, true, true, true, 401, 200, 200),
+            "real call verified");
     }
 
     private static void TestModernCliEnvironmentIsolation()
@@ -361,6 +391,7 @@ internal static class DevSpaceConfigurationTests
         var historyDir = Path.Combine(root, "history");
         var settingsPath = Path.Combine(root, "settings.json");
         var settings = PlatformSettings.CreateDefault(root);
+        settings.AllowedHosts.Add("origin.example.test");
         var version = DevSpaceVersion.Parse("1.1.0");
         PlatformSettingsStore.Save(settingsPath, settings);
 
@@ -381,6 +412,7 @@ internal static class DevSpaceConfigurationTests
         var loaded = history.Load(latest);
         var restored = PlatformSettingsStore.Deserialize(loaded.SettingsText);
         AssertEqual("warn", restored.LogLevel, "history settings content");
+        AssertEqual("origin.example.test", restored.AllowedHosts[0], "history allowed hosts content");
         AssertTrue(loaded.SettingsText.IndexOf("ownerToken", StringComparison.OrdinalIgnoreCase) < 0, "history contains no owner token");
     }
 

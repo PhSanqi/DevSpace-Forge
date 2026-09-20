@@ -67,7 +67,7 @@ Local MCP                 http://127.0.0.1:7677/mcp
 Public MCP                https://devspace.example.com/mcp
 ```
 
-After setup, `DevSpaceControlPlatform.exe` manages DevSpace and cloudflared. When Windows login auto-start is enabled, Setup writes the current-user startup entry itself. Before reporting success, Setup verifies that the local MCP endpoint responds, the bundled cloudflared process is running, and the public MCP route is reachable. The Tunnel token is stored separately from ordinary settings and project Git history.
+After setup, `DevSpaceControlPlatform.exe` manages DevSpace and cloudflared. The Tunnel token is stored separately from ordinary settings and project Git history.
 
 ### Windows daily use
 
@@ -108,7 +108,7 @@ Interactive setup asks for the allowed project root, local port, Cloudflare publ
   --tunnel-token "YOUR_TUNNEL_TOKEN"
 ```
 
-The installer prints the local Origin, local MCP URL, public MCP URL, and Owner password. It installs two user services and, when starting them, verifies both services plus the local and public MCP routes before reporting success:
+The installer prints the local Origin, local MCP URL, public MCP URL, and Owner password. It installs two user services:
 
 ```text
 devspace-control.service

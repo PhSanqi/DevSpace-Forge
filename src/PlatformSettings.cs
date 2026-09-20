@@ -10,6 +10,7 @@ namespace DevSpaceControlPlatform
     {
         public int SchemaVersion { get; set; }
         public List<string> AllowedRoots { get; set; }
+        public List<string> AllowedHosts { get; set; }
         public int LocalPort { get; set; }
         public string TunnelMode { get; set; }
         public string FixedHostname { get; set; }
@@ -33,6 +34,7 @@ namespace DevSpaceControlPlatform
             {
                 SchemaVersion = 1,
                 AllowedRoots = new List<string> { Path.GetFullPath(platformRoot) },
+                AllowedHosts = new List<string>(),
                 LocalPort = 7677,
                 TunnelMode = "Remote",
                 FixedHostname = string.Empty,
@@ -58,6 +60,7 @@ namespace DevSpaceControlPlatform
             {
                 SchemaVersion = SchemaVersion,
                 AllowedRoots = new List<string>(AllowedRoots ?? new List<string>()),
+                AllowedHosts = new List<string>(AllowedHosts ?? new List<string>()),
                 LocalPort = LocalPort,
                 TunnelMode = TunnelMode,
                 FixedHostname = FixedHostname,
@@ -85,6 +88,7 @@ namespace DevSpaceControlPlatform
             return new ManagedDevSpaceSettings
             {
                 AllowedRoots = new List<string>(AllowedRoots ?? new List<string>()),
+                AllowedHosts = new List<string>(AllowedHosts ?? new List<string>()),
                 Host = "127.0.0.1",
                 LocalPort = LocalPort,
                 PublicBaseUrl = string.IsNullOrWhiteSpace(publicBaseUrl) ? null : publicBaseUrl.Trim(),
@@ -95,7 +99,7 @@ namespace DevSpaceControlPlatform
                 AgentDir = Path.Combine(stateRoot, "agent-home"),
                 StateDir = Path.Combine(stateRoot, "devspace-state"),
                 WorktreeRoot = Path.Combine(stateRoot, "worktrees"),
-                TrustProxy = !string.IsNullOrWhiteSpace(publicBaseUrl),
+                TrustProxy = false,
                 LogLevel = LogLevel,
                 LogFormat = LogFormat,
                 LogRequests = LogRequests,
@@ -117,6 +121,7 @@ namespace DevSpaceControlPlatform
                 throw new InvalidDataException("settings.json schema version 不受支持。");
             }
             settings.AllowedRoots = settings.AllowedRoots ?? new List<string>();
+            settings.AllowedHosts = settings.AllowedHosts ?? new List<string>();
             settings.SkillPaths = settings.SkillPaths ?? new List<string>();
             return settings;
         }
@@ -143,6 +148,7 @@ namespace DevSpaceControlPlatform
                 throw new InvalidDataException("历史 settings schema version 不受支持。");
             }
             settings.AllowedRoots = settings.AllowedRoots ?? new List<string>();
+            settings.AllowedHosts = settings.AllowedHosts ?? new List<string>();
             settings.SkillPaths = settings.SkillPaths ?? new List<string>();
             return settings;
         }
@@ -155,6 +161,80 @@ namespace DevSpaceControlPlatform
             File.WriteAllText(temporaryPath, text + Environment.NewLine, new UTF8Encoding(false));
             if (File.Exists(path)) File.Replace(temporaryPath, path, null, true);
             else File.Move(temporaryPath, path);
+        }
+    }
+
+    internal static class PublicEndpoint
+    {
+        public static string NormalizeHostAndPath(string value)
+        {
+            var input = (value ?? string.Empty).Trim();
+            if (input.Length == 0) return string.Empty;
+
+            Uri uri;
+            if (!input.Contains("://")) input = "https://" + input;
+            if (!Uri.TryCreate(input, UriKind.Absolute, out uri) ||
+                !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(uri.Host))
+            {
+                throw new InvalidDataException("Cloudflare public endpoint 无效。请填写例如 devspace.example.com 或 devspace.example.com/group。");
+            }
+            if (!string.IsNullOrWhiteSpace(uri.Query) || !string.IsNullOrWhiteSpace(uri.Fragment))
+                throw new InvalidDataException("Cloudflare public endpoint 不能包含 query 或 fragment。");
+
+            var path = uri.AbsolutePath.Trim('/');
+            if (path.EndsWith("/mcp", StringComparison.OrdinalIgnoreCase))
+                path = path.Substring(0, path.Length - 4).TrimEnd('/');
+            else if (string.Equals(path, "mcp", StringComparison.OrdinalIgnoreCase))
+                path = string.Empty;
+
+            return path.Length == 0 ? uri.Host : uri.Host + "/" + path;
+        }
+
+        public static string BaseUrl(string value)
+        {
+            var normalized = NormalizeHostAndPath(value);
+            return normalized.Length == 0 ? string.Empty : "https://" + normalized;
+        }
+
+        public static string McpUrl(string value)
+        {
+            var baseUrl = BaseUrl(value);
+            return baseUrl.Length == 0 ? string.Empty : baseUrl.TrimEnd('/') + "/mcp";
+        }
+    }
+
+    internal static class ReadinessFormatter
+    {
+        public static string Format(
+            bool devSpaceRunning,
+            bool localReady,
+            bool tunnelReady,
+            bool publicConfigured,
+            bool publicReady,
+            bool realToolCallVerified,
+            int publicMcpStatus,
+            int publicAuthorizationMetadataStatus,
+            int publicProtectedResourceMetadataStatus)
+        {
+            if (!devSpaceRunning) return "L0 DevSpace 未运行";
+            if (!localReady) return "L1 本地 MCP/OAuth 未就绪";
+            if (!publicConfigured) return "L2 本地已就绪；尚未配置公网入口";
+            if (!tunnelReady) return "L2 本地已就绪；Tunnel 未就绪";
+            if (!publicReady)
+            {
+                return "L3 公网路由未就绪（MCP " + StatusText(publicMcpStatus) +
+                    " / OAuth " + StatusText(publicAuthorizationMetadataStatus) +
+                    " / Resource " + StatusText(publicProtectedResourceMetadataStatus) + "）";
+            }
+            return realToolCallVerified
+                ? "READY 公网 OAuth/MCP 已通过真实工具调用验证"
+                : "L4 公网 OAuth/MCP 已就绪；等待一次真实工具调用完成最终验收";
+        }
+
+        private static string StatusText(int status)
+        {
+            return status <= 0 ? "ERR" : status.ToString();
         }
     }
 }

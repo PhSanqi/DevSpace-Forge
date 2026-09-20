@@ -2,15 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_ROOT="${DEVSPACE_CONTROL_HOME:-$HOME/.local/share/devspace-control}"
-CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/devspace-control"
-DEVSPACE_CONFIG_DIR="$CONFIG_ROOT/devspace"
-STATE_DIR="$INSTALL_ROOT/state"
-WORKTREE_ROOT="$STATE_DIR/worktrees"
 PORT="7677"
 ALLOWED_ROOT="$HOME"
 PUBLIC_URL=""
+ORIGIN_HOST=""
 TUNNEL_TOKEN=""
+INSTANCE=""
+REUSE_EXISTING_TUNNEL=0
 START_SERVICES=1
 NON_INTERACTIVE=0
 
@@ -23,10 +21,14 @@ already included in the release archive; setup does not download npm/runtime
 dependencies.
 
 Options:
+  --instance NAME       Install a side-by-side named instance (for example: server)
   --allowed-root PATH   Project root DevSpace may access (default: $HOME)
   --port PORT           Local DevSpace port (default: 7677)
-  --public-url URL      Cloudflare public origin/hostname
+  --public-url URL      Public base URL; path bases are supported
+  --origin-host HOST    Cloudflare Tunnel origin hostname accepted by DevSpace
   --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
+  --reuse-existing-tunnel
+                        Start only DevSpace; reuse an already-running Tunnel
   --no-start            Install and configure without starting user services
   --non-interactive     Do not prompt for missing Cloudflare values
   -h, --help            Show this help
@@ -35,16 +37,35 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --instance) INSTANCE="${2:?missing instance name}"; shift 2 ;;
     --allowed-root) ALLOWED_ROOT="${2:?missing path}"; shift 2 ;;
     --port) PORT="${2:?missing port}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:?missing URL}"; shift 2 ;;
+    --origin-host) ORIGIN_HOST="${2:?missing hostname}"; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; shift 2 ;;
+    --reuse-existing-tunnel) REUSE_EXISTING_TUNNEL=1; shift ;;
     --no-start) START_SERVICES=0; shift ;;
     --non-interactive) NON_INTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$INSTANCE" ]] && ! [[ "$INSTANCE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo 'Instance name must contain only lowercase letters, digits, and hyphens.' >&2
+  exit 1
+fi
+
+INSTANCE_SUFFIX=""
+[[ -n "$INSTANCE" ]] && INSTANCE_SUFFIX="-$INSTANCE"
+INSTALL_ROOT="${DEVSPACE_CONTROL_HOME:-$HOME/.local/share/devspace-control${INSTANCE_SUFFIX}}"
+CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/devspace-control${INSTANCE_SUFFIX}"
+DEVSPACE_CONFIG_DIR="$CONFIG_ROOT/devspace"
+STATE_DIR="$INSTALL_ROOT/state"
+WORKTREE_ROOT="$STATE_DIR/worktrees"
+SERVICE_BASE="devspace-control${INSTANCE_SUFFIX}"
+DEVSPACE_SERVICE="$SERVICE_BASE.service"
+CLOUDFLARED_SERVICE="$SERVICE_BASE-cloudflared.service"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo 'setup-linux.sh only supports Linux.' >&2
@@ -117,9 +138,20 @@ let value=input.includes('://') ? input : `https://${input}`;
 let u;
 try { u=new URL(value); } catch { console.error('Invalid Cloudflare hostname/public URL.'); process.exit(2); }
 if (u.protocol !== 'https:' || !u.hostname) { console.error('Cloudflare public URL must use https.'); process.exit(2); }
-const path=u.pathname.replace(/^\/+|\/+$/g,'');
-if (path && path.toLowerCase() !== 'mcp') { console.error('Use only the hostname/origin, or a full /mcp URL.'); process.exit(2); }
-console.log(`https://${u.hostname}`);
+if (u.search || u.hash) { console.error('Cloudflare public URL must not contain query or fragment components.'); process.exit(2); }
+let path=u.pathname.replace(/\/+$/g,'');
+if (path.toLowerCase().endsWith('/mcp')) path=path.slice(0,-4).replace(/\/+$/g,'');
+if (path === '/') path='';
+console.log(`https://${u.hostname}${path}`);
+NODE
+)"
+
+MCP_PATH="$($NODE - "$PUBLIC_URL" <<'NODE'
+const input=(process.argv[2]||'').trim();
+if (!input) { console.log('/mcp'); process.exit(0); }
+const u=new URL(input);
+const base=u.pathname.replace(/\/+$/g,'');
+console.log(`${base || ''}/mcp`);
 NODE
 )"
 
@@ -128,7 +160,7 @@ if [[ -z "$PUBLIC_URL" && "$NON_INTERACTIVE" -eq 0 ]]; then
   exit 1
 fi
 
-"$NODE" - "$DEVSPACE_CONFIG_DIR/config.jsonc" "$ALLOWED_ROOT" "$PUBLIC_URL" "$PORT" "$STATE_DIR" "$WORKTREE_ROOT" "$CONFIG_ROOT/agent-home" <<'NODE'
+"$NODE" - "$DEVSPACE_CONFIG_DIR/config.jsonc" "$ALLOWED_ROOT" "$PUBLIC_URL" "$PORT" "$STATE_DIR" "$WORKTREE_ROOT" "$CONFIG_ROOT/agent-home" "$ORIGIN_HOST" <<'NODE'
 const fs = require('node:fs');
 const file = process.argv[2];
 const allowedRoot = process.argv[3];
@@ -137,11 +169,13 @@ const port = Number(process.argv[5]);
 const stateDir = process.argv[6];
 const worktreeRoot = process.argv[7];
 const agentDir = process.argv[8];
+const originHost = process.argv[9] || '';
 const allowedHosts = ['localhost', '127.0.0.1', '::1'];
 if (publicBaseUrl) allowedHosts.push(new URL(publicBaseUrl).hostname);
+if (originHost && !allowedHosts.includes(originHost)) allowedHosts.push(originHost);
 const config = {
   configVersion: 1,
-  server: { host: '127.0.0.1', port, publicBaseUrl, allowedHosts, trustProxy: Boolean(publicBaseUrl) },
+  server: { host: '127.0.0.1', port, publicBaseUrl, allowedHosts, trustProxy: false },
   workspaces: { allowedRoots: [allowedRoot], worktreeRoot },
   storage: { stateDir },
   tools: { mode: 'codex' },
@@ -164,7 +198,9 @@ else
 fi
 
 CLOUDFLARE_ENV="$CONFIG_ROOT/cloudflare.env"
-if [[ -n "$TUNNEL_TOKEN" ]]; then
+if [[ "$REUSE_EXISTING_TUNNEL" -eq 1 ]]; then
+  :
+elif [[ -n "$TUNNEL_TOKEN" ]]; then
   printf 'CLOUDFLARED_TOKEN=%q\n' "$TUNNEL_TOKEN" > "$CLOUDFLARE_ENV"
   chmod 0600 "$CLOUDFLARE_ENV"
 elif [[ ! -f "$CLOUDFLARE_ENV" && "$NON_INTERACTIVE" -eq 0 ]]; then
@@ -190,7 +226,7 @@ chmod 0755 "$INSTALL_ROOT/bin/run-cloudflared"
 
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
-cat > "$SYSTEMD_DIR/devspace-control.service" <<EOF
+cat > "$SYSTEMD_DIR/$DEVSPACE_SERVICE" <<EOF
 [Unit]
 Description=DevSpace Control - DevSpace MCP server
 After=network-online.target
@@ -206,10 +242,11 @@ RestartSec=3
 WantedBy=default.target
 EOF
 
-cat > "$SYSTEMD_DIR/devspace-control-cloudflared.service" <<EOF
+if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
+cat > "$SYSTEMD_DIR/$CLOUDFLARED_SERVICE" <<EOF
 [Unit]
 Description=DevSpace Control - Cloudflare Tunnel
-After=network-online.target devspace-control.service
+After=network-online.target $DEVSPACE_SERVICE
 Wants=network-online.target
 
 [Service]
@@ -221,6 +258,7 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
+fi
 
 probe_endpoint() {
   local url="$1"
@@ -261,34 +299,36 @@ wait_for_endpoint() {
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if [[ "$START_SERVICES" -eq 1 ]]; then
-    systemctl --user enable --now devspace-control.service
-    if [[ -f "$CLOUDFLARE_ENV" ]]; then
-      systemctl --user enable --now devspace-control-cloudflared.service
+    systemctl --user enable --now "$DEVSPACE_SERVICE"
+    if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
+      systemctl --user enable --now "$CLOUDFLARED_SERVICE"
     fi
 
     echo 'Verifying DevSpace and Cloudflare connectivity...'
-    if ! systemctl --user is-active --quiet devspace-control.service; then
+    if ! systemctl --user is-active --quiet "$DEVSPACE_SERVICE"; then
       echo 'DevSpace user service did not stay active.' >&2
-      systemctl --user --no-pager status devspace-control.service >&2 || true
+      systemctl --user --no-pager status "$DEVSPACE_SERVICE" >&2 || true
       exit 1
     fi
-    if ! wait_for_endpoint "http://127.0.0.1:${PORT}/mcp" 45; then
-      echo "Local DevSpace MCP did not become reachable: http://127.0.0.1:${PORT}/mcp" >&2
-      systemctl --user --no-pager status devspace-control.service >&2 || true
+    if ! wait_for_endpoint "http://127.0.0.1:${PORT}${MCP_PATH}" 45; then
+      echo "Local DevSpace MCP did not become reachable: http://127.0.0.1:${PORT}${MCP_PATH}" >&2
+      systemctl --user --no-pager status "$DEVSPACE_SERVICE" >&2 || true
       exit 1
     fi
-    if [[ -f "$CLOUDFLARE_ENV" ]]; then
-      if ! systemctl --user is-active --quiet devspace-control-cloudflared.service; then
+    if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
+      if ! systemctl --user is-active --quiet "$CLOUDFLARED_SERVICE"; then
         echo 'Cloudflare Tunnel user service did not stay active.' >&2
-        systemctl --user --no-pager status devspace-control-cloudflared.service >&2 || true
+        systemctl --user --no-pager status "$CLOUDFLARED_SERVICE" >&2 || true
         exit 1
       fi
       if [[ -n "$PUBLIC_URL" ]] && ! wait_for_endpoint "${PUBLIC_URL%/}/mcp" 60; then
         echo "Public MCP did not become reachable: ${PUBLIC_URL%/}/mcp" >&2
         echo 'Confirm the Cloudflare Public Hostname routes to the local Origin shown below.' >&2
-        systemctl --user --no-pager status devspace-control-cloudflared.service >&2 || true
+        systemctl --user --no-pager status "$CLOUDFLARED_SERVICE" >&2 || true
         exit 1
       fi
+    elif [[ "$REUSE_EXISTING_TUNNEL" -eq 1 ]]; then
+      echo 'Reusing an existing Cloudflare Tunnel; public-route verification is deferred until its Published Application is added.'
     fi
     echo 'Connectivity verification passed.'
   fi
@@ -300,11 +340,15 @@ echo
 echo "DevSpace installed under: $INSTALL_ROOT"
 echo "Owner password:           $OWNER_TOKEN"
 echo "Cloudflare local Origin:  http://127.0.0.1:${PORT}"
-echo "Local MCP endpoint:       http://127.0.0.1:${PORT}/mcp"
+echo "Local MCP endpoint:       http://127.0.0.1:${PORT}${MCP_PATH}"
 if [[ -n "$PUBLIC_URL" ]]; then
   echo "Public MCP endpoint:      ${PUBLIC_URL%/}/mcp"
 else
   echo 'Public MCP endpoint:      not configured'
 fi
 echo
-echo 'Cloudflare Dashboard: route your remotely-managed Tunnel public hostname to the local Origin shown above.'
+if [[ "$REUSE_EXISTING_TUNNEL" -eq 1 ]]; then
+  echo "Cloudflare Dashboard: add a Published Application on the existing Tunnel: ${ORIGIN_HOST:-<origin-host>} -> http://127.0.0.1:${PORT}"
+else
+  echo 'Cloudflare Dashboard: route your remotely-managed Tunnel public hostname to the local Origin shown above.'
+fi

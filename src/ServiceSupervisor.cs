@@ -79,6 +79,18 @@ namespace DevSpaceControlPlatform
         private DateTime cloudflareStartedUtc = DateTime.MinValue;
         private DateTime lastRecoveryAttemptUtc = DateTime.MinValue;
         private DateTime lastDevSpaceHealthProbeUtc = DateTime.MinValue;
+        private DateTime lastEndpointReadinessProbeUtc = DateTime.MinValue;
+        private DateTime lastSuccessfulMcpToolCallUtc = DateTime.MinValue;
+        private bool localEndpointReady;
+        private bool publicEndpointReady;
+        private bool publicEndpointConfigured;
+        private string lastReadinessStatus = string.Empty;
+        private int localMcpStatus;
+        private int localAuthorizationMetadataStatus;
+        private int localProtectedResourceMetadataStatus;
+        private int publicMcpStatus;
+        private int publicAuthorizationMetadataStatus;
+        private int publicProtectedResourceMetadataStatus;
         private int consecutiveDevSpaceHealthFailures;
         private int connectivityCheckRunning;
         private bool disposing;
@@ -141,6 +153,26 @@ namespace DevSpaceControlPlatform
         public bool IsCloudflareHealthy
         {
             get { lock (sync) return IsAlive(cloudflareProcess) && cloudflareConnections.Count > 0; }
+        }
+
+        public string ReadinessStatus
+        {
+            get
+            {
+                lock (sync)
+                {
+                    return ReadinessFormatter.Format(
+                        IsAlive(devSpaceProcess),
+                        localEndpointReady,
+                        IsAlive(cloudflareProcess) && cloudflareConnections.Count > 0,
+                        publicEndpointConfigured,
+                        publicEndpointReady,
+                        lastSuccessfulMcpToolCallUtc >= devSpaceStartedUtc && lastSuccessfulMcpToolCallUtc != DateTime.MinValue,
+                        publicMcpStatus,
+                        publicAuthorizationMetadataStatus,
+                        publicProtectedResourceMetadataStatus);
+                }
+            }
         }
 
         public string McpUrl
@@ -492,9 +524,22 @@ namespace DevSpaceControlPlatform
             using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
             {
                 if (key == null) return;
-                if (enabled) key.SetValue("DevSpaceControlPlatform", Quote(Process.GetCurrentProcess().MainModule.FileName), RegistryValueKind.String);
-                else key.DeleteValue("DevSpaceControlPlatform", false);
+                var valueName = AutoStartValueName();
+                if (enabled) key.SetValue(valueName, Quote(Process.GetCurrentProcess().MainModule.FileName), RegistryValueKind.String);
+                else key.DeleteValue(valueName, false);
             }
+        }
+
+        private string AutoStartValueName()
+        {
+            var normalizedRoot = platformRoot
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .ToUpperInvariant();
+            byte[] digest;
+            using (var sha256 = SHA256.Create())
+                digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedRoot));
+            var suffix = BitConverter.ToString(digest, 0, 8).Replace("-", string.Empty).ToLowerInvariant();
+            return "DevSpaceControlPlatform-" + suffix;
         }
 
         public void ApplyWindowsAutoStartFromSettings()
@@ -579,20 +624,36 @@ namespace DevSpaceControlPlatform
             if (disposing) return;
             var now = DateTime.UtcNow;
             var settings = LoadSettings();
+            var publicBaseUrl = PublicBaseUrl(settings);
             bool recoverDevSpace;
             bool recoverCloudflare;
             bool devAlive;
             bool probeDevSpace;
+            bool probeEndpointReadiness;
             lock (sync)
             {
+                publicEndpointConfigured = !string.IsNullOrWhiteSpace(publicBaseUrl);
                 devAlive = IsAlive(devSpaceProcess);
                 probeDevSpace = devAlive && (now - lastDevSpaceHealthProbeUtc).TotalSeconds >= 5;
+                probeEndpointReadiness = devAlive && (now - lastEndpointReadinessProbeUtc).TotalSeconds >= 10;
             }
 
             bool? probeResult = probeDevSpace
                 ? (bool?)ProbeLocalHttp(settings.LocalPort, 1200)
                 : null;
 
+            EndpointProbeResult localEndpointProbe = null;
+            EndpointProbeResult publicEndpointProbe = null;
+            if (probeEndpointReadiness)
+            {
+                if (!string.IsNullOrWhiteSpace(publicBaseUrl))
+                {
+                    localEndpointProbe = ProbeEndpointSet(publicBaseUrl, settings.LocalPort, true, 1500);
+                    publicEndpointProbe = ProbeEndpointSet(publicBaseUrl, settings.LocalPort, false, 2500);
+                }
+            }
+
+            string readinessChange = null;
             lock (sync)
             {
                 if (!devAlive)
@@ -608,6 +669,38 @@ namespace DevSpaceControlPlatform
                         ? 0
                         : consecutiveDevSpaceHealthFailures + 1;
                 }
+                if (probeEndpointReadiness)
+                {
+                    lastEndpointReadinessProbeUtc = now;
+                    if (localEndpointProbe != null)
+                    {
+                        localMcpStatus = localEndpointProbe.McpStatus;
+                        localAuthorizationMetadataStatus = localEndpointProbe.AuthorizationMetadataStatus;
+                        localProtectedResourceMetadataStatus = localEndpointProbe.ProtectedResourceMetadataStatus;
+                        localEndpointReady = localEndpointProbe.IsReady;
+                    }
+                    else
+                    {
+                        localMcpStatus = 0;
+                        localAuthorizationMetadataStatus = 0;
+                        localProtectedResourceMetadataStatus = 0;
+                        localEndpointReady = false;
+                    }
+                    if (publicEndpointProbe != null)
+                    {
+                        publicMcpStatus = publicEndpointProbe.McpStatus;
+                        publicAuthorizationMetadataStatus = publicEndpointProbe.AuthorizationMetadataStatus;
+                        publicProtectedResourceMetadataStatus = publicEndpointProbe.ProtectedResourceMetadataStatus;
+                        publicEndpointReady = publicEndpointProbe.IsReady;
+                    }
+                    else
+                    {
+                        publicMcpStatus = 0;
+                        publicAuthorizationMetadataStatus = 0;
+                        publicProtectedResourceMetadataStatus = 0;
+                        publicEndpointReady = false;
+                    }
+                }
                 recoverDevSpace = devSpaceDesired &&
                     (!devAlive || (consecutiveDevSpaceHealthFailures >= 3 &&
                                    (now - devSpaceStartedUtc).TotalSeconds >= 15));
@@ -615,8 +708,29 @@ namespace DevSpaceControlPlatform
                 var cloudflareAlive = IsAlive(cloudflareProcess);
                 recoverCloudflare = cloudflareDesired &&
                     (!cloudflareAlive || (cloudflareConnections.Count == 0 && (now - cloudflareStartedUtc).TotalSeconds >= 30));
+                var readiness = ReadinessFormatter.Format(
+                    IsAlive(devSpaceProcess),
+                    localEndpointReady,
+                    cloudflareAlive && cloudflareConnections.Count > 0,
+                    publicEndpointConfigured,
+                    publicEndpointReady,
+                    lastSuccessfulMcpToolCallUtc >= devSpaceStartedUtc && lastSuccessfulMcpToolCallUtc != DateTime.MinValue,
+                    publicMcpStatus,
+                    publicAuthorizationMetadataStatus,
+                    publicProtectedResourceMetadataStatus);
+                if (!string.Equals(readiness, lastReadinessStatus, StringComparison.Ordinal))
+                {
+                    lastReadinessStatus = readiness;
+                    readinessChange = readiness;
+                }
                 if ((recoverDevSpace || recoverCloudflare) && (now - lastRecoveryAttemptUtc).TotalSeconds < 8) return;
                 if (recoverDevSpace || recoverCloudflare) lastRecoveryAttemptUtc = now;
+            }
+
+            if (!string.IsNullOrWhiteSpace(readinessChange))
+            {
+                AppendLog("devspace-service.log", "[Readiness] " + readinessChange);
+                AddServiceLog("Readiness", readinessChange);
             }
 
             if (recoverDevSpace) RecoverService("DevSpace", RestartDevSpace);
@@ -666,6 +780,80 @@ namespace DevSpaceControlPlatform
             catch { return false; }
         }
 
+        internal sealed class EndpointProbeResult
+        {
+            public int McpStatus { get; set; }
+            public int AuthorizationMetadataStatus { get; set; }
+            public int ProtectedResourceMetadataStatus { get; set; }
+            public bool IsReady
+            {
+                get
+                {
+                    return McpStatus == 401 &&
+                        AuthorizationMetadataStatus == 200 &&
+                        ProtectedResourceMetadataStatus == 200;
+                }
+            }
+        }
+
+        private static EndpointProbeResult ProbeEndpointSet(
+            string publicBaseUrl,
+            int localPort,
+            bool local,
+            int timeoutMilliseconds)
+        {
+            try
+            {
+                var publicUri = new Uri(publicBaseUrl.TrimEnd('/'));
+                var basePath = publicUri.AbsolutePath.TrimEnd('/');
+                var root = local
+                    ? "http://127.0.0.1:" + localPort
+                    : publicUri.GetLeftPart(UriPartial.Authority);
+                return new EndpointProbeResult
+                {
+                    McpStatus = ProbeHttpStatus(root + basePath + "/mcp", timeoutMilliseconds, local),
+                    AuthorizationMetadataStatus = ProbeHttpStatus(
+                        root + "/.well-known/oauth-authorization-server" + basePath,
+                        timeoutMilliseconds,
+                        local),
+                    ProtectedResourceMetadataStatus = ProbeHttpStatus(
+                        root + "/.well-known/oauth-protected-resource" + basePath + "/mcp",
+                        timeoutMilliseconds,
+                        local)
+                };
+            }
+            catch
+            {
+                return new EndpointProbeResult();
+            }
+        }
+
+        private static int ProbeHttpStatus(string url, int timeoutMilliseconds, bool bypassProxy)
+        {
+            try
+            {
+                var request = (HttpWebRequest)WebRequest.Create(url);
+                request.Method = "GET";
+                request.KeepAlive = false;
+                request.AllowAutoRedirect = false;
+                request.Timeout = timeoutMilliseconds;
+                request.ReadWriteTimeout = timeoutMilliseconds;
+                if (bypassProxy) request.Proxy = null;
+                try
+                {
+                    using (var response = (HttpWebResponse)request.GetResponse())
+                        return (int)response.StatusCode;
+                }
+                catch (WebException exception)
+                {
+                    var response = exception.Response as HttpWebResponse;
+                    if (response == null) return 0;
+                    using (response) return (int)response.StatusCode;
+                }
+            }
+            catch { return 0; }
+        }
+
         private static int ConnectionIndex(string line)
         {
             var match = Regex.Match(line ?? string.Empty, @"connIndex=(\d+)", RegexOptions.IgnoreCase);
@@ -684,7 +872,7 @@ namespace DevSpaceControlPlatform
             if ((string.Equals(settings.TunnelMode, "Remote", StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(settings.TunnelMode, "Named", StringComparison.OrdinalIgnoreCase)) &&
                 !string.IsNullOrWhiteSpace(settings.FixedHostname))
-                return "https://" + settings.FixedHostname.Trim();
+                return PublicEndpoint.BaseUrl(settings.FixedHostname);
             return null;
         }
 
@@ -784,11 +972,14 @@ namespace DevSpaceControlPlatform
             var tool = ExtractLogField(line, "tool");
             var workspaceId = ExtractLogField(line, "workspaceId");
             if (string.IsNullOrWhiteSpace(tool)) return;
+            var success = ExtractLogField(line, "success");
             string openedWorkspacePath = null;
             string reviewedWorkspacePath = null;
 
             lock (sync)
             {
+                if (string.Equals(success, "true", StringComparison.OrdinalIgnoreCase))
+                    lastSuccessfulMcpToolCallUtc = DateTime.UtcNow;
                 latestToolCall = tool + (string.IsNullOrWhiteSpace(workspaceId) ? string.Empty : "  " + workspaceId);
                 if (!string.IsNullOrWhiteSpace(workspaceId))
                 {
