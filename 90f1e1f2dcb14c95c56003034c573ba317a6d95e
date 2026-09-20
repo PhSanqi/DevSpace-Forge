@@ -1,0 +1,1 @@
+local.11 release 资产哈希复核；修正 Windows/离线安装脚本校验值为 GitHub 实际资产 SHA。
