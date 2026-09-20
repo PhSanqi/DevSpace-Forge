@@ -1,5 +1,5 @@
 param(
-    [string]$SlotName = 'windows-beta4-local10',
+    [string]$SlotName = 'windows-beta4-local11',
     [switch]$NoDownload
 )
 
@@ -12,10 +12,10 @@ $slot = Join-Path $slots $SlotName
 $preparing = $slot + '.preparing'
 $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
-$devSpaceVersion = '1.1.0-beta.4.local.10'
-$devSpaceSha256 = '4516d348af6ebc149dbc30a0fdce75b746b5c0dbfd6ed8415c38e7435b07124a'
-$assetName = 'waishnav-devspace-1.1.0-beta.4.local.10.tgz'
-$assetUrl = 'https://github.com/PhSanqi/DevSpaceControlPlatform/releases/download/runtime-1.1.0-beta.4.local.10/waishnav-devspace-1.1.0-beta.4.local.10.tgz'
+$devSpaceVersion = '1.1.0-beta.4.local.11'
+$devSpaceSha256 = '71b41c67175687b6042f8d0a75ef477134b1abe4ce10c1fa2889e48f40b9976b'
+$assetName = 'waishnav-devspace-1.1.0-beta.4.local.11.tgz'
+$assetUrl = 'https://github.com/PhSanqi/DevSpace-Forge/releases/download/runtime-1.1.0-beta.4.local.11/waishnav-devspace-1.1.0-beta.4.local.11.tgz'
 
 function Assert-Hash([string]$Path, [string]$Expected) {
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
@@ -71,7 +71,7 @@ try {
     & robocopy.exe $legacyDevSpace $stagedDevSpace /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /XD $brokenSelfLink /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -gt 7) { throw "robocopy dependency reuse failed with code $LASTEXITCODE" }
 
-    Write-Host '3/4 Replace only @waishnav/devspace with the verified local.10 unified package...'
+    Write-Host '3/4 Replace only @waishnav/devspace with the verified local.11 unified package...'
     $extract = Join-Path $preparing '_package'
     New-Item -ItemType Directory -Force $extract | Out-Null
     & tar.exe -xzf $asset -C $extract

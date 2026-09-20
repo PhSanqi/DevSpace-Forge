@@ -9,11 +9,11 @@ $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
 $cloudflaredVersion = '2026.9.1'
 $cloudflaredSha256 = '2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712'
-$devSpaceVersion = '1.1.0-beta.4.local.10'
-$devSpaceTag = 'runtime-1.1.0-beta.4.local.10'
-$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.10.tgz'
-$devSpaceSha256 = '4516d348af6ebc149dbc30a0fdce75b746b5c0dbfd6ed8415c38e7435b07124a'
-$slotName = 'windows-beta4-local10'
+$devSpaceVersion = '1.1.0-beta.4.local.11'
+$devSpaceTag = 'runtime-1.1.0-beta.4.local.11'
+$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.11.tgz'
+$devSpaceSha256 = '71b41c67175687b6042f8d0a75ef477134b1abe4ce10c1fa2889e48f40b9976b'
+$slotName = 'windows-beta4-local11'
 
 $root = $PSScriptRoot
 $output = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
@@ -70,7 +70,7 @@ Copy-Item -LiteralPath $cloudflaredCache -Destination $cloudflared -Force
 
 $runtimePackage = Join-Path $cache $devSpacePackageName
 Get-Verified `
-    "https://github.com/PhSanqi/DevSpaceControlPlatform/releases/download/$devSpaceTag/waishnav-devspace-1.1.0-beta.4.local.10.tgz" `
+    "https://github.com/PhSanqi/DevSpace-Forge/releases/download/$devSpaceTag/waishnav-devspace-1.1.0-beta.4.local.11.tgz" `
     $runtimePackage `
     $devSpaceSha256
 Copy-Item -LiteralPath $runtimePackage -Destination (Join-Path $devspaceDir 'devspace-runtime.tgz') -Force

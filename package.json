@@ -3,6 +3,6 @@
   "name": "devspace-control-platform-runtime",
   "version": "0.3.0",
   "dependencies": {
-    "@waishnav/devspace": "file:waishnav-devspace-1.1.0-beta.4.local.10.tgz"
+    "@waishnav/devspace": "file:waishnav-devspace-1.1.0-beta.4.local.11.tgz"
   }
 }

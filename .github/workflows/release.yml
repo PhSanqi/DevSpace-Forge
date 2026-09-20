@@ -25,16 +25,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
-          gh release download runtime-1.1.0-beta.4.local.10 `
+          gh release download runtime-1.1.0-beta.4.local.11 `
             --repo '${{ github.repository }}' `
-            --pattern 'DevSpaceControlRuntime-windows-beta4-local10.tar' `
-            --pattern 'DevSpaceControlRuntime-windows-beta4-local10.tar.sha256.txt' `
+            --pattern 'DevSpaceControlRuntime-windows-beta4-local11.tar' `
+            --pattern 'DevSpaceControlRuntime-windows-beta4-local11.tar.sha256.txt' `
             --dir dist\runtime-payload
 
       - name: Verify Windows runtime payload
         shell: powershell
         run: |
-          $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local10.tar'
+          $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local11.tar'
           $expected = ((Get-Content -Raw ($payload + '.sha256.txt')).Trim() -split '\s+')[0].ToLowerInvariant()
           $actual = (Get-FileHash -Algorithm SHA256 $payload).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw "Windows runtime payload SHA256 mismatch: $actual != $expected" }
@@ -46,7 +46,7 @@ jobs:
           $version = '${{ github.ref_name }}'.TrimStart('v')
           .\package-release-windows-payload.ps1 `
             -Version $version `
-            -RuntimePayloadPath dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local10.tar
+            -RuntimePayloadPath dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local11.tar
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4

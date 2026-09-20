@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: runtime-windows-beta4-local10
+  group: runtime-windows-beta4-local11
   cancel-in-progress: true
 
 jobs:
@@ -58,14 +58,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name='DevSpaceControlRuntime-windows-beta4-local10.tar'
+          name='DevSpaceControlRuntime-windows-beta4-local11.tar'
           tar -C runtime-expanded -cf "$name" runtime cloudflared.exe
           tar -tf "$name" >/dev/null
           required=(
             'runtime/active-slot.txt'
-            'runtime/slots/windows-beta4-local10/READY'
-            'runtime/slots/windows-beta4-local10/node/node.exe'
-            'runtime/slots/windows-beta4-local10/devspace/node_modules/@waishnav/devspace/package.json'
+            'runtime/slots/windows-beta4-local11/READY'
+            'runtime/slots/windows-beta4-local11/node/node.exe'
+            'runtime/slots/windows-beta4-local11/devspace/node_modules/@waishnav/devspace/package.json'
             'cloudflared.exe'
           )
           entries="$(tar -tf "$name")"
@@ -81,8 +81,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload runtime-1.1.0-beta.4.local.10 \
-            DevSpaceControlRuntime-windows-beta4-local10.tar \
-            DevSpaceControlRuntime-windows-beta4-local10.tar.sha256.txt \
+          gh release upload runtime-1.1.0-beta.4.local.11 \
+            DevSpaceControlRuntime-windows-beta4-local11.tar \
+            DevSpaceControlRuntime-windows-beta4-local11.tar.sha256.txt \
             --repo '${{ github.repository }}' \
             --clobber

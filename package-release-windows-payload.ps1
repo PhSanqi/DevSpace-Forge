@@ -24,9 +24,9 @@ $entries = @(& tar.exe -tf $payload)
 if ($LASTEXITCODE -ne 0) { throw 'Windows runtime payload is not a readable tar archive.' }
 $required = @(
     'runtime/active-slot.txt',
-    'runtime/slots/windows-beta4-local10/READY',
-    'runtime/slots/windows-beta4-local10/node/node.exe',
-    'runtime/slots/windows-beta4-local10/devspace/node_modules/@waishnav/devspace/package.json',
+    'runtime/slots/windows-beta4-local11/READY',
+    'runtime/slots/windows-beta4-local11/node/node.exe',
+    'runtime/slots/windows-beta4-local11/devspace/node_modules/@waishnav/devspace/package.json',
     'cloudflared.exe'
 )
 foreach ($item in $required) {

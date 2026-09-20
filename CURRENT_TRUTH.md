@@ -49,7 +49,7 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 
 ## Runtime baseline
 
-The next canonical runtime line is 1.1.0-beta.4.local.10.
+The next canonical runtime line is 1.1.0-beta.4.local.11.
 
 It is based on the beta4 image/context runtime and includes:
 
