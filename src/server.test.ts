@@ -1059,10 +1059,14 @@ async function issueTestAccessToken(
   ownerToken: string,
 ): Promise<string> {
   const redirectUri = "http://127.0.0.1/callback";
-  const resource = new URL("/mcp", publicBaseUrl).href;
+  const publicUrl = new URL(publicBaseUrl);
+  const basePath = publicUrl.pathname.replace(/\/+$/, "");
+  const localOAuthBase = `${localBaseUrl}${basePath === "/" ? "" : basePath}`;
+  publicUrl.pathname = `${basePath === "/" ? "" : basePath}/mcp`;
+  const resource = publicUrl.href;
   const verifier = "devspace-modern-protocol-test-verifier-0123456789";
   const challenge = createHash("sha256").update(verifier).digest("base64url");
-  const registration = await fetch(`${localBaseUrl}/register`, {
+  const registration = await fetch(`${localOAuthBase}/register`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1077,7 +1081,7 @@ async function issueTestAccessToken(
   const client = await registration.json() as { client_id?: string };
   assert.ok(client.client_id);
 
-  const approval = await fetch(`${localBaseUrl}/authorize`, {
+  const approval = await fetch(`${localOAuthBase}/authorize`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -1099,7 +1103,7 @@ async function issueTestAccessToken(
   const code = new URL(location).searchParams.get("code");
   assert.ok(code);
 
-  const exchange = await fetch(`${localBaseUrl}/token`, {
+  const exchange = await fetch(`${localOAuthBase}/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({

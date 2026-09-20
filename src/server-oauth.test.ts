@@ -69,3 +69,61 @@ test("HTTP MCP enforces canonical and exact alias bearer resources", async (t) =
     if (accepted) assert.match(body, /"serverInfo"/);
   }
 });
+
+test("HTTP MCP supports a path-based public base URL", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-http-base-path-"));
+  const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
+    server: { publicBaseUrl: "https://dev.example.com/server" },
+    storage: { stateDir: join(root, "state") },
+    workspaces: { allowedRoots: [root] },
+    logging: { level: "silent" },
+  }));
+  const running = createServer(config);
+  const listener = running.app.listen(0, "127.0.0.1");
+  t.after(async () => {
+    await running.close();
+    listener.closeAllConnections();
+    await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  await once(listener, "listening");
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const rootMcp = await fetch(`${base}/mcp`);
+  assert.equal(rootMcp.status, 404);
+
+  const mcp = await fetch(`${base}/server/mcp`);
+  assert.equal(mcp.status, 401);
+  assert.match(
+    mcp.headers.get("www-authenticate") ?? "",
+    /resource_metadata="https:\/\/dev\.example\.com\/\.well-known\/oauth-protected-resource\/server\/mcp"/,
+  );
+
+  const authorizationMetadata = await fetch(
+    `${base}/.well-known/oauth-authorization-server/server`,
+  );
+  assert.equal(authorizationMetadata.status, 200);
+  const authorization = await authorizationMetadata.json() as Record<string, unknown>;
+  assert.equal(authorization.issuer, "https://dev.example.com/server");
+  assert.equal(authorization.authorization_endpoint, "https://dev.example.com/server/authorize");
+  assert.equal(authorization.token_endpoint, "https://dev.example.com/server/token");
+  assert.equal(authorization.registration_endpoint, "https://dev.example.com/server/register");
+  assert.equal(authorization.revocation_endpoint, "https://dev.example.com/server/revoke");
+
+  const resourceMetadata = await fetch(
+    `${base}/.well-known/oauth-protected-resource/server/mcp`,
+  );
+  assert.equal(resourceMetadata.status, 200);
+  const resource = await resourceMetadata.json() as Record<string, unknown>;
+  assert.equal(resource.resource, "https://dev.example.com/server/mcp");
+  assert.deepEqual(resource.authorization_servers, ["https://dev.example.com/server"]);
+
+  const registration = await fetch(`${base}/server/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.notEqual(registration.status, 404);
+});

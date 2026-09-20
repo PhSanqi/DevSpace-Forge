@@ -5,7 +5,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import {
+  createOAuthMetadata,
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { createMcpHandler } from "@modelcontextprotocol/server";
@@ -81,6 +85,25 @@ import {
 } from "./tool-surfaces/types.js";
 
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+
+function normalizedPublicBasePath(publicBaseUrl: string): string {
+  const pathname = new URL(publicBaseUrl).pathname.replace(/\/+$/, "");
+  return pathname === "/" ? "" : pathname;
+}
+
+function publicEndpointUrl(publicBaseUrl: string, suffix: string): URL {
+  const url = new URL(publicBaseUrl);
+  const basePath = normalizedPublicBasePath(publicBaseUrl);
+  const normalizedSuffix = suffix.startsWith("/") ? suffix : `/${suffix}`;
+  url.pathname = `${basePath}${normalizedSuffix}`.replace(/\/{2,}/g, "/");
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
+function authorizationMetadataPath(publicBaseUrl: string): string {
+  return `/.well-known/oauth-authorization-server${normalizedPublicBasePath(publicBaseUrl)}`;
+}
 
 function mcpServerInfo() {
   return {
@@ -997,7 +1020,11 @@ export function createServer(
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const mcpUrl = new URL("/mcp", config.publicBaseUrl);
+  const publicBasePath = normalizedPublicBasePath(config.publicBaseUrl);
+  const mcpRoute = `${publicBasePath}/mcp` || "/mcp";
+  const assetRoute = `${publicBasePath}/mcp-app-assets` || "/mcp-app-assets";
+  const healthRoute = `${publicBasePath}/healthz` || "/healthz";
+  const mcpUrl = publicEndpointUrl(config.publicBaseUrl, "/mcp");
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
   const bearerAuth = requireBearerAuth({
@@ -1085,24 +1112,50 @@ export function createServer(
     next();
   });
 
-  app.use(
-    mcpAuthRouter({
-      provider: oauthProvider,
-      issuerUrl: new URL(config.publicBaseUrl),
-      baseUrl: new URL(config.publicBaseUrl),
-      resourceServerUrl,
-      scopesSupported: config.oauth.scopes,
-      resourceName: "DevSpace",
-    }),
-  );
+  const oauthRouterOptions = {
+    provider: oauthProvider,
+    issuerUrl: new URL(config.publicBaseUrl),
+    baseUrl: new URL(config.publicBaseUrl),
+    resourceServerUrl,
+    scopesSupported: config.oauth.scopes,
+    resourceName: "DevSpace",
+  };
+  const generatedOAuthMetadata = createOAuthMetadata(oauthRouterOptions);
+  const publicOAuthMetadata = {
+    ...generatedOAuthMetadata,
+    authorization_endpoint: publicEndpointUrl(config.publicBaseUrl, "/authorize").href,
+    token_endpoint: publicEndpointUrl(config.publicBaseUrl, "/token").href,
+    registration_endpoint: generatedOAuthMetadata.registration_endpoint
+      ? publicEndpointUrl(config.publicBaseUrl, "/register").href
+      : undefined,
+    revocation_endpoint: generatedOAuthMetadata.revocation_endpoint
+      ? publicEndpointUrl(config.publicBaseUrl, "/revoke").href
+      : undefined,
+  };
 
-  app.options("/mcp-app-assets/{*asset}", (_req, res) => {
+  if (publicBasePath) {
+    app.get(authorizationMetadataPath(config.publicBaseUrl), (_req, res) => {
+      res.json(publicOAuthMetadata);
+    });
+    app.get(new URL(getOAuthProtectedResourceMetadataUrl(resourceServerUrl)).pathname, (_req, res) => {
+      res.json({
+        resource: resourceServerUrl.href,
+        authorization_servers: [publicOAuthMetadata.issuer],
+        scopes_supported: config.oauth.scopes,
+        resource_name: "DevSpace",
+      });
+    });
+  }
+
+  app.use(publicBasePath || "/", mcpAuthRouter(oauthRouterOptions));
+
+  app.options(`${assetRoute}/{*asset}`, (_req, res) => {
     setAssetHeaders(res);
     res.sendStatus(204);
   });
 
   app.use(
-    "/mcp-app-assets",
+    assetRoute,
     express.static(uiBuildDirectory(), {
       immutable: true,
       maxAge: "1y",
@@ -1111,11 +1164,11 @@ export function createServer(
     }),
   );
 
-  app.get("/healthz", (_req, res) => {
+  app.get(healthRoute, (_req, res) => {
     res.json({ ok: true, name: "devspace" });
   });
 
-  app.all("/mcp", async (req, res) => {
+  app.all(mcpRoute, async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
 
     await new Promise<void>((resolve, reject) => {
@@ -1193,7 +1246,7 @@ if (await isMainModule()) {
   const { app, config, close, localAgentProviders } = createServer();
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(
-      `devspace listening on http://${config.host}:${config.port}/mcp`,
+      `devspace listening on http://${config.host}:${config.port}${publicEndpointUrl(config.publicBaseUrl, "/mcp").pathname}`,
     );
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log("auth: oauth owner-token flow required");
