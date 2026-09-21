@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { HeadTailBuffer, ProcessSessionManager } from "./process-sessions.js";
+import { DEFAULT_EXEC_YIELD_MS, HeadTailBuffer, ProcessSessionManager } from "./process-sessions.js";
+
+assert.equal(DEFAULT_EXEC_YIELD_MS, 3_000);
 
 const smallBuffer = new HeadTailBuffer(100);
 smallBuffer.append("hello\n");

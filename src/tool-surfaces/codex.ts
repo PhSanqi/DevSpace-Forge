@@ -11,6 +11,11 @@ import {
   MAX_PROCESS_YIELD_MS,
   type ProcessSnapshot,
 } from "../process-sessions.js";
+import {
+  OPERATION_ID_DESCRIPTION,
+  OPERATION_ID_PATTERN,
+  runOptionalRecoverableOperation,
+} from "../operation-receipts.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
@@ -27,10 +32,33 @@ import {
   runLoggedToolOperation,
   textBlock,
 } from "./shared.js";
+import { registerDurableJobTools } from "./jobs.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered lazily for the path being read or packed, so do not recursively scan the repository for instruction files. Prefer context_pack for task-focused source context, then semantic_code for a specific symbol relation, and use read only for a concrete line range that is still needed. If a host cached an older tool list, exec_command accepts the internal read-only compatibility forms devspace-context and devspace-semantic; these are handled by DevSpace and are not passed to the shell. Command output may be compacted; retrieve saved full output with devspace-log meta/read/tail/grep using the returned run_id.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered lazily for the path being read or packed, so do not recursively scan the repository for instruction files. Prefer context_pack for task-focused source context, then semantic_code for a specific symbol relation, and use read only for a concrete line range that is still needed. If a host cached an older tool list, exec_command accepts the internal read-only compatibility forms devspace-context and devspace-semantic; these are handled by DevSpace and are not passed to the shell. Command output may be compacted; retrieve saved full output with devspace-log meta/read/tail/grep using the returned run_id. For retry-sensitive side effects, provide a stable operation_id and reuse it only for an exact retry after an unknown or lost response.`;
+
+const operationIdSchema = z
+  .string()
+  .regex(OPERATION_ID_PATTERN)
+  .optional()
+  .describe(OPERATION_ID_DESCRIPTION);
+
+function operationOutputSchema(): z.ZodRawShape {
+  return {
+    operation_id: z.string().optional(),
+    operation_replayed: z.boolean().optional(),
+  };
+}
+
+function operationOutput(
+  operationId: string | undefined,
+  replayed: boolean,
+): { operation_id?: string; operation_replayed?: boolean } {
+  return operationId
+    ? { operation_id: operationId, operation_replayed: replayed }
+    : {};
+}
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -47,6 +75,7 @@ const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerSemanticTools,
   registerContextPackTool,
   registerCodexProcessTools,
+  registerDurableJobTools,
 ];
 
 const semanticReadActionSchema = z.enum([
@@ -490,6 +519,7 @@ function processResult(snapshot: ProcessSnapshot): string {
 
 function processOutputSchema(): z.ZodRawShape {
   return resultOutputSchema({
+    ...operationOutputSchema(),
     run_id: z.string().optional(),
     session_id: z.number().optional(),
     running: z.boolean(),
@@ -503,7 +533,11 @@ function processOutputSchema(): z.ZodRawShape {
   });
 }
 
-function processToolResponse(snapshot: ProcessSnapshot) {
+function processToolResponse(
+  snapshot: ProcessSnapshot,
+  operationId?: string,
+  replayed = false,
+) {
   const result = processResult(snapshot);
   const content = [textBlock(result)];
   return {
@@ -520,6 +554,7 @@ function processToolResponse(snapshot: ProcessSnapshot) {
       output_bytes: snapshot.outputBytes,
       output_lines: snapshot.outputLines,
       log_error: snapshot.logError,
+      ...operationOutput(operationId, replayed),
     },
   };
 }
@@ -535,6 +570,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
         "Apply one Codex-style patch to add, overwrite, update, delete, or move workspace files. Paths must be relative to the workspace.",
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
+        operation_id: operationIdSchema,
         patch: z
           .string()
           .describe(
@@ -542,6 +578,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
           ),
       },
       outputSchema: resultOutputSchema({
+        ...operationOutputSchema(),
         additions: z.number(),
         removals: z.number(),
         files: z.array(
@@ -554,18 +591,28 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
       }),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspace_id, patch }) => {
-      const startedAt = performance.now();
+    async ({ workspace_id, operation_id, patch }) => {
       const workspaceId = workspace_id;
-      const applied = await runLoggedToolOperation(
-        config,
-        { tool: "apply_patch", workspaceId },
-        startedAt,
-        async () => {
-          const workspace = await workspaces.getWorkspace(workspaceId);
-          return applyPatch(workspace.root, patch);
+      const recovered = await runOptionalRecoverableOperation({
+        workspaceId,
+        stateDir: config.stateDir,
+        operationId: operation_id,
+        tool: "apply_patch",
+        request: { patch },
+        execute: async () => {
+          const startedAt = performance.now();
+          return runLoggedToolOperation(
+            config,
+            { tool: "apply_patch", workspaceId },
+            startedAt,
+            async () => {
+              const workspace = await workspaces.getWorkspace(workspaceId);
+              return applyPatch(workspace.root, patch);
+            },
+          );
         },
-      );
+      });
+      const applied = recovered.value;
       const paths = applied.files.map((file) => file.path).join(", ");
       const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
       const content = [textBlock(result)];
@@ -580,6 +627,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
             ...file,
             previous_path: previousPath,
           })),
+          ...operationOutput(operation_id, recovered.replayed),
         },
       };
     },
@@ -597,6 +645,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         "Run a shell command in a workspace with the user's local permissions. Returns the result when it exits during the yield window, otherwise returns a session_id for write_stdin. DevSpace also handles devspace-log bounded log retrieval internally. When semantic_code is unavailable because a host cached an older tool list, devspace-semantic provides an internal read-only Serena compatibility command and is not passed to the shell.",
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
+        operation_id: operationIdSchema,
         cmd: z.string().min(1).describe("Shell command to execute."),
         tty: z
           .boolean()
@@ -631,7 +680,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .max(MAX_PROCESS_YIELD_MS)
           .optional()
           .describe(
-            "Milliseconds to wait before returning a running session. Defaults to 10000, maximum 12000. Use write_stdin for work that runs longer.",
+            "Milliseconds to wait before returning a running session. Defaults to 3000, maximum 12000. Use write_stdin for work that runs longer.",
           ),
         max_output_tokens: z
           .number()
@@ -646,6 +695,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     },
     async ({
       workspace_id,
+      operation_id,
       cmd,
       tty,
       columns,
@@ -741,38 +791,45 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           };
         }
       }
-      const snapshot = await runLoggedToolOperation(
-        config,
-        {
-          tool: "exec_command",
-          workspaceId,
-          workingDirectory: workingDirectory ?? ".",
-          command: cmd,
-          commandLength: cmd.length,
-        },
-        startedAt,
-        async () => {
-          const workspace = await workspaces.getWorkspace(workspaceId);
-          const cwd = await workspaces.resolveWorkingDirectory(
-            workspace,
-            workingDirectory,
-          );
-          return processSessions.start({
+      const recovered = await runOptionalRecoverableOperation({
+        workspaceId,
+        stateDir: config.stateDir,
+        operationId: operation_id,
+        tool: "exec_command",
+        request: { cmd, tty, columns, rows, working_directory, yield_time_ms, max_output_tokens },
+        execute: async () => runLoggedToolOperation(
+          config,
+          {
+            tool: "exec_command",
             workspaceId,
+            workingDirectory: workingDirectory ?? ".",
             command: cmd,
-            cwd,
-            workspaceRoot: workspace.root,
-            tty,
-            columns,
-            rows,
-            yieldTimeMs,
-            maxOutputTokens,
-          });
-        },
-        processLogFields,
-      );
+            commandLength: cmd.length,
+          },
+          startedAt,
+          async () => {
+            const workspace = await workspaces.getWorkspace(workspaceId);
+            const cwd = await workspaces.resolveWorkingDirectory(
+              workspace,
+              workingDirectory,
+            );
+            return processSessions.start({
+              workspaceId,
+              command: cmd,
+              cwd,
+              workspaceRoot: workspace.root,
+              tty,
+              columns,
+              rows,
+              yieldTimeMs,
+              maxOutputTokens,
+            });
+          },
+          processLogFields,
+        ),
+      });
 
-      return processToolResponse(snapshot);
+      return processToolResponse(recovered.value, operation_id, recovered.replayed);
     },
   );
 
@@ -786,6 +843,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         workspace_id: z
           .string()
           .describe("Workspace identifier used to start the process."),
+        operation_id: operationIdSchema,
         session_id: z
           .number()
           .describe("Process session identifier returned by exec_command."),
@@ -831,6 +889,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     },
     async ({
       workspace_id,
+      operation_id,
       session_id,
       chars,
       columns,
@@ -843,26 +902,33 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const sessionId = session_id;
       const yieldTimeMs = yield_time_ms;
       const maxOutputTokens = max_output_tokens;
-      const snapshot = await runLoggedToolOperation(
-        config,
-        { tool: "write_stdin", workspaceId },
-        startedAt,
-        async () => {
-          await workspaces.getWorkspace(workspaceId);
-          return processSessions.write({
-            workspaceId,
-            sessionId,
-            chars,
-            columns,
-            rows,
-            yieldTimeMs,
-            maxOutputTokens,
-          });
-        },
-        processLogFields,
-      );
+      const recovered = await runOptionalRecoverableOperation({
+        workspaceId,
+        stateDir: config.stateDir,
+        operationId: operation_id,
+        tool: "write_stdin",
+        request: { session_id, chars, columns, rows, yield_time_ms, max_output_tokens },
+        execute: async () => runLoggedToolOperation(
+          config,
+          { tool: "write_stdin", workspaceId },
+          startedAt,
+          async () => {
+            await workspaces.getWorkspace(workspaceId);
+            return processSessions.write({
+              workspaceId,
+              sessionId,
+              chars,
+              columns,
+              rows,
+              yieldTimeMs,
+              maxOutputTokens,
+            });
+          },
+          processLogFields,
+        ),
+      });
 
-      return processToolResponse(snapshot);
+      return processToolResponse(recovered.value, operation_id, recovered.replayed);
     },
   );
 }

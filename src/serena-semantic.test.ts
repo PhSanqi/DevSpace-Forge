@@ -80,3 +80,31 @@ test("Serena semantic LRU never evicts a backend while it is busy", async () => 
   assert.equal(closed.includes(a), false);
   await manager.close();
 });
+
+test("Serena warm starts and reuses a backend without a semantic tool call", async () => {
+  let created = 0;
+  let calls = 0;
+  const root = path.resolve("/tmp/devspace-serena-warm");
+  const manager = new SerenaSemanticManager({
+    available: true,
+    createClient: async () => {
+      created += 1;
+      return {
+        callTool: async () => {
+          calls += 1;
+          return { content: [{ type: "text", text: "ready" }] };
+        },
+        close: async () => undefined,
+      };
+    },
+  });
+
+  await manager.warm(root);
+  assert.equal(created, 1);
+  assert.equal(calls, 0);
+  const result = await manager.call(root, "find_symbol", {});
+  assert.equal(result.result, "ready");
+  assert.equal(created, 1);
+  assert.equal(calls, 1);
+  await manager.close();
+});

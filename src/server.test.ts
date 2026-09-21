@@ -17,12 +17,52 @@ import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { ProcessSessionManager } from "./process-sessions.js";
-import { createMcpServer, createServer, waitForExpressMiddleware } from "./server.js";
+import { closeOperationReceiptManager } from "./operation-receipts.js";
+import {
+  DEVSPACE_HTTP_HEADERS_TIMEOUT_MS,
+  DEVSPACE_HTTP_KEEP_ALIVE_TIMEOUT_MS,
+  configureHttpServer,
+  createMcpServer,
+  createServer,
+  observeHttpResponseStart,
+  waitForExpressMiddleware,
+} from "./server.js";
+import { closeDurableJobManager } from "./tool-surfaces/jobs.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
 const execFileAsync = promisify(execFile);
+
+test("HTTP server transport timeouts keep long MCP connections alive", () => {
+  const fakeServer = {
+    keepAliveTimeout: 0,
+    headersTimeout: 0,
+  };
+  configureHttpServer(fakeServer as never);
+  assert.equal(fakeServer.keepAliveTimeout, DEVSPACE_HTTP_KEEP_ALIVE_TIMEOUT_MS);
+  assert.equal(fakeServer.headersTimeout, DEVSPACE_HTTP_HEADERS_TIMEOUT_MS);
+  assert.ok(fakeServer.headersTimeout > fakeServer.keepAliveTimeout);
+});
+
+test("HTTP response start timing records only the first writeHead", () => {
+  let writes = 0;
+  let starts = 0;
+  const response = {
+    writeHead() {
+      writes += 1;
+      return this;
+    },
+  } as unknown as ExpressResponse;
+  const timing = observeHttpResponseStart(response, () => {
+    starts += 1;
+  });
+  response.writeHead(200);
+  response.writeHead(204);
+  assert.equal(writes, 2);
+  assert.equal(starts, 1);
+  assert.equal(typeof timing.startedAt, "number");
+});
 
 test("tool modes expose the expected host-facing tool surface", async (t) => {
   const cases: Array<{
@@ -31,7 +71,22 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }> = [
     {
       mode: "claude",
-      expected: ["open_workspace", "read", "read_image", "write", "edit", "bash", "show_changes"],
+      expected: [
+        "open_workspace",
+        "read",
+        "read_image",
+        "write",
+        "edit",
+        "bash",
+        "show_changes",
+        "job_start",
+        "job_list",
+        "job_status",
+        "job_logs",
+        "job_cancel",
+        "job_wait",
+        "devspace_info",
+      ],
     },
     {
       mode: "codex",
@@ -44,6 +99,13 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "exec_command",
         "write_stdin",
         "show_changes",
+        "job_start",
+        "job_list",
+        "job_status",
+        "job_logs",
+        "job_cancel",
+        "job_wait",
+        "devspace_info",
       ],
     },
   ];
@@ -59,6 +121,146 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
       );
     });
   }
+});
+
+test("Codex mutation operation_id safely replays an identical lost response", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "operation-replay"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const operationId = "retry-apply-0001";
+  const patch = [
+    "*** Begin Patch",
+    "*** Add File: replay.txt",
+    "+once",
+    "*** End Patch",
+  ].join("\n");
+  const request = {
+    name: "apply_patch",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: operationId,
+      patch,
+    },
+  };
+
+  const first = await context.client.callTool(request);
+  const replayed = await context.client.callTool(request);
+  assert.notEqual(first.isError, true);
+  assert.notEqual(replayed.isError, true);
+  assert.equal(structuredContent(first).operation_replayed, false);
+  assert.equal(structuredContent(replayed).operation_replayed, true);
+  assert.equal(structuredContent(replayed).operation_id, operationId);
+  assert.equal(await readFile(join(context.project, "replay.txt"), "utf8"), "once\n");
+});
+
+test("durable job_start operation_id replays the same job after a lost response", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "job-operation-replay"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const operationId = "retry-job-0001";
+  const request = {
+    name: "job_start",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: operationId,
+      command: process.platform === "win32" ? "echo durable-replay" : "printf durable-replay",
+    },
+  };
+  const first = structuredContent(await context.client.callTool(request));
+  const replay = structuredContent(await context.client.callTool(request));
+  assert.equal(first.operation_id, operationId);
+  assert.equal(first.operation_replayed, false);
+  assert.equal(replay.operation_id, operationId);
+  assert.equal(replay.operation_replayed, true);
+  const firstJob = JSON.parse(String(first.result)) as { id: string };
+  const replayJob = JSON.parse(String(replay.result)) as { id: string };
+  assert.equal(replayJob.id, firstJob.id);
+  const waited = await context.client.callTool({
+    name: "job_wait",
+    arguments: {
+      job_id: firstJob.id,
+      timeout_seconds: 3,
+    },
+  });
+  assert.notEqual(waited.isError, true);
+});
+
+test("durable jobs remain discoverable after reconnecting the same workspace", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const first = structuredContent(
+    await callOpen(context.client, context.project, "job-rebind-before"),
+  );
+  const second = structuredContent(
+    await callOpen(context.client, context.project, "job-rebind-after"),
+  );
+  assert.notEqual(first.workspace_id, second.workspace_id);
+
+  const started = structuredContent(await context.client.callTool({
+    name: "job_start",
+    arguments: {
+      workspace_id: first.workspace_id,
+      operation_id: "job-rebind-start-0001",
+      command: process.platform === "win32"
+        ? "ping 127.0.0.1 -n 6 >NUL"
+        : "sleep 5",
+    },
+  }));
+  const startedJob = JSON.parse(String(started.result)) as { id: string };
+
+  const listed = structuredContent(await context.client.callTool({
+    name: "job_list",
+    arguments: { workspace_id: second.workspace_id },
+  }));
+  const jobs = JSON.parse(String(listed.result)) as Array<{ id: string }>;
+  assert.equal(jobs.some((job) => job.id === startedJob.id), true);
+
+  const cancelled = structuredContent(await context.client.callTool({
+    name: "job_cancel",
+    arguments: {
+      job_id: startedJob.id,
+      operation_id: "job-rebind-cancel-0001",
+    },
+  }));
+  const cancelResult = JSON.parse(String(cancelled.result)) as { success: boolean };
+  assert.equal(cancelResult.success, true);
+});
+
+test("durable job_cancel operation_id safely replays an identical lost response", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "job-cancel-replay"),
+  );
+  const started = structuredContent(await context.client.callTool({
+    name: "job_start",
+    arguments: {
+      workspace_id: opened.workspace_id,
+      operation_id: "job-cancel-start-0001",
+      command: process.platform === "win32"
+        ? "ping 127.0.0.1 -n 61 >NUL"
+        : "sleep 60",
+    },
+  }));
+  const job = JSON.parse(String(started.result)) as { id: string };
+  const request = {
+    name: "job_cancel",
+    arguments: {
+      job_id: job.id,
+      operation_id: "job-cancel-retry-0001",
+    },
+  };
+  const first = structuredContent(await context.client.callTool(request));
+  const replay = structuredContent(await context.client.callTool(request));
+  assert.equal(first.operation_replayed, false);
+  assert.equal(replay.operation_replayed, true);
+  assert.equal(first.result, replay.result);
 });
 
 test("model-facing tool schemas use snake_case recursively", async (t) => {
@@ -1202,6 +1404,8 @@ async function fixture(
     closed = true;
     await client.close();
     await server.close();
+    closeDurableJobManager(config.stateDir);
+    closeOperationReceiptManager(config.stateDir);
     store.close();
   };
 

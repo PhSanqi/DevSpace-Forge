@@ -10,6 +10,7 @@ import {
 } from "@anthropic-ai/sandbox-runtime";
 import {
   createBashTool,
+  createLocalBashOperations,
   createEditTool,
   createFindTool,
   createGrepTool,
@@ -111,15 +112,125 @@ export function createPiSandboxExtension(
 
     const withProviderEnv = (context: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({
       ...context,
-      env: { ...context.env, ...env },
+      env: mergeProviderEnvironment(context.env, env),
     });
-    const localBash = createBashTool(workspace, { spawnHook: withProviderEnv });
+    const localBash = createBashTool(workspace, {
+      operations: withWindowsWslOutputFilter(createLocalBashOperations()),
+      spawnHook: withProviderEnv,
+    });
     const restrictedBash = createBashTool(workspace, {
-      operations: createSandboxedBashOperations(restrictedWorkspace),
+      operations: withWindowsWslOutputFilter(createSandboxedBashOperations(restrictedWorkspace)),
       spawnHook: withProviderEnv,
     });
     pi.registerTool(dynamicTool(localBash, restrictedBash, modeRef, true));
   };
+}
+
+function mergeProviderEnvironment(
+  inherited: NodeJS.ProcessEnv,
+  overrides: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const merged = { ...inherited, ...overrides };
+  if (process.platform !== "win32") return merged;
+
+  const passthrough = Object.keys(overrides).filter(
+    (key) =>
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+      && key.toUpperCase() !== "PATH"
+      && key.toUpperCase() !== "WSLENV",
+  );
+  if (passthrough.length === 0) return merged;
+
+  const entries = (merged.WSLENV ?? "").split(":").filter(Boolean);
+  const known = new Set(
+    entries.map((entry) => entry.split("/", 1)[0]?.toUpperCase()).filter(Boolean),
+  );
+  for (const key of passthrough) {
+    if (known.has(key.toUpperCase())) continue;
+    entries.push(key);
+    known.add(key.toUpperCase());
+  }
+  merged.WSLENV = entries.join(":");
+  return merged;
+}
+
+function withWindowsWslOutputFilter(operations: BashOperations): BashOperations {
+  if (process.platform !== "win32") return operations;
+  return {
+    exec: async (command, cwd, options) => {
+      const filter = createWindowsWslOutputFilter(options.onData);
+      try {
+        return await operations.exec(command, cwd, {
+          ...options,
+          onData: filter.onData,
+        });
+      } finally {
+        filter.flush();
+      }
+    },
+  };
+}
+
+function createWindowsWslOutputFilter(onData: (data: Buffer) => void): {
+  onData: (data: Buffer) => void;
+  flush: () => void;
+} {
+  let pendingUtf16 = "";
+
+  const emitLine = (line: string, withNewline: boolean) => {
+    const normalized = line.replace(/\r$/, "");
+    if (
+      normalized.startsWith(
+        "wsl: A localhost proxy configuration was detected but not mirrored into WSL.",
+      )
+    ) {
+      return;
+    }
+    if (normalized || withNewline) {
+      onData(Buffer.from(`${normalized}${withNewline ? "\n" : ""}`, "utf8"));
+    }
+  };
+
+  const flushCompleteLines = () => {
+    for (;;) {
+      const newline = pendingUtf16.indexOf("\n");
+      if (newline < 0) return;
+      emitLine(pendingUtf16.slice(0, newline), true);
+      pendingUtf16 = pendingUtf16.slice(newline + 1);
+    }
+  };
+
+  return {
+    onData: (data) => {
+      if (!looksLikeUtf16Le(data)) {
+        onData(data);
+        return;
+      }
+      const evenLength = data.length - (data.length % 2);
+      pendingUtf16 += data.subarray(0, evenLength).toString("utf16le");
+      flushCompleteLines();
+      if (evenLength !== data.length) {
+        onData(data.subarray(evenLength));
+      }
+    },
+    flush: () => {
+      flushCompleteLines();
+      if (pendingUtf16) {
+        emitLine(pendingUtf16, false);
+        pendingUtf16 = "";
+      }
+    },
+  };
+}
+
+function looksLikeUtf16Le(data: Buffer): boolean {
+  const pairCount = Math.min(Math.floor(data.length / 2), 32);
+  if (pairCount < 2) return false;
+  let zeroHighBytes = 0;
+  for (let index = 0; index < pairCount; index += 1) {
+    if (data[index * 2 + 1] === 0) zeroHighBytes += 1;
+  }
+  return zeroHighBytes / pairCount >= 0.75;
 }
 
 export function createPiSandboxConfig(workspace?: string): SandboxRuntimeConfig {

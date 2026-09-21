@@ -155,6 +155,11 @@ export class SerenaSemanticManager {
     this.maxBackends = Math.max(1, options.maxBackends ?? 4);
   }
 
+  async warm(root: string): Promise<void> {
+    if (!this.available) return;
+    await this.backend(path.resolve(root));
+  }
+
   async call(
     root: string,
     tool: string,

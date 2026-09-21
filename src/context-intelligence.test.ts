@@ -158,3 +158,61 @@ test("context_pack falls back to a bounded file header when Serena is unavailabl
   assert.match(packed.result, /Avoid broad whole-file reads/);
 });
 
+test("context_pack bounds Serena cold-start latency and returns a useful symbol fallback", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-context-pack-budget-"));
+  const agentDir = join(root, ".agent");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(join(root, "src", "AGENTS.md"), "budget fallback rules\n");
+  await writeFile(
+    join(root, "src", "slow.ts"),
+    [
+      "export class SlowService {",
+      "  run() { return 'fallback-source'; }",
+      "}",
+    ].join("\n"),
+  );
+  const config = loadConfig(writeTestDevspaceConfig(join(root, ".config"), {
+    server: { port: 1 },
+    workspaces: { allowedRoots: [root], worktreeRoot: join(root, ".worktrees") },
+    skills: { agentDir },
+  }));
+  const workspaces = new WorkspaceRegistry(config);
+  const opened = await workspaces.openWorkspace(root);
+  const semantic = new SerenaSemanticManager({
+    available: true,
+    createClient: async () => ({
+      callTool: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return { content: [{ type: "text", text: "late-semantic-result" }] };
+      },
+      close: async () => undefined,
+    }),
+  });
+
+  t.after(async () => {
+    await semantic.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const startedAt = performance.now();
+  const packed = await buildContextPack({
+    workspace: opened.workspace,
+    workspaces,
+    semantic,
+    semanticBudgetMs: 25,
+    request: {
+      path: "src/slow.ts",
+      symbol: "SlowService/run",
+      maxChars: 2_000,
+    },
+  });
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.ok(elapsedMs < 120, `context_pack exceeded bounded fallback budget: ${elapsedMs}ms`);
+  assert.equal(packed.semantic, false);
+  assert.match(packed.result, /budget fallback rules/);
+  assert.match(packed.result, /fallback-source/);
+  assert.match(packed.result, /semantic response budget/);
+});
+

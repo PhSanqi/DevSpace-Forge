@@ -37,6 +37,15 @@ interface SemanticResult {
   backendAgeMs: number;
 }
 
+export const CONTEXT_PACK_SEMANTIC_BUDGET_MS = 4_000;
+
+class SemanticBudgetExceededError extends Error {
+  constructor(tool: string, budgetMs: number) {
+    super(`${tool}: semantic response budget exhausted after ${budgetMs}ms; Serena continues warming in the background.`);
+    this.name = "SemanticBudgetExceededError";
+  }
+}
+
 const DEFAULT_MAX_CHARS = 9_000;
 const MIN_MAX_CHARS = 2_000;
 const HARD_MAX_CHARS = 20_000;
@@ -223,15 +232,33 @@ async function semanticCall(
   tool: string,
   args: Record<string, unknown>,
   warnings: string[],
+  deadlineAt: number,
 ): Promise<SemanticResult | undefined> {
   if (!semantic?.available) return undefined;
+  const remainingMs = Math.max(0, Math.ceil(deadlineAt - performance.now()));
+  if (remainingMs <= 0) {
+    warnings.push(`${tool}: semantic response budget already exhausted; Serena continues warming in the background.`);
+    return undefined;
+  }
+  let timer: NodeJS.Timeout | undefined;
   try {
-    return await semantic.call(root, tool, args);
+    return await Promise.race([
+      semantic.call(root, tool, args),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new SemanticBudgetExceededError(tool, remainingMs)),
+          remainingMs,
+        );
+        timer.unref();
+      }),
+    ]);
   } catch (error) {
     warnings.push(
       `${tool}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -241,6 +268,7 @@ export async function buildContextPack(input: {
   semantic?: SerenaSemanticManager;
   request: ContextPackInput;
   conversationScopeId?: string;
+  semanticBudgetMs?: number;
 }): Promise<ContextPackResult> {
   const { workspace, workspaces, semantic, request, conversationScopeId } = input;
   const maxChars = boundedMaxChars(request.maxChars);
@@ -270,6 +298,12 @@ export async function buildContextPack(input: {
     // search rooted at an existing parent directory.
   }
 
+  const semanticBudgetMs = Math.max(
+    0,
+    Math.floor(input.semanticBudgetMs ?? CONTEXT_PACK_SEMANTIC_BUDGET_MS),
+  );
+  const semanticDeadlineAt = performance.now() + semanticBudgetMs;
+
   const overviewPromise = semanticCall(
     semantic,
     workspace.root,
@@ -279,6 +313,7 @@ export async function buildContextPack(input: {
       max_answer_chars: depth === "focused" ? 2_000 : 3_500,
     },
     warnings,
+    semanticDeadlineAt,
   );
   const definitionPromise = request.symbol
     ? semanticCall(
@@ -293,6 +328,7 @@ export async function buildContextPack(input: {
           max_answer_chars: depth === "focused" ? 2_000 : 3_000,
         },
         warnings,
+        semanticDeadlineAt,
       )
     : Promise.resolve(undefined);
   const diagnosticsPromise = isFile && wantsDiagnostics(request.intent, depth)
@@ -302,6 +338,7 @@ export async function buildContextPack(input: {
         "get_diagnostics_for_file",
         { relative_path: pathForSemantic, max_answer_chars: 2_500 },
         warnings,
+        semanticDeadlineAt,
       )
     : Promise.resolve(undefined);
 
@@ -365,6 +402,7 @@ export async function buildContextPack(input: {
               max_answer_chars: depth === "deep" ? 4_000 : 2_800,
             },
             warnings,
+            semanticDeadlineAt,
           )
         : Promise.resolve(undefined);
       const implementationsPromise =
@@ -380,6 +418,7 @@ export async function buildContextPack(input: {
                 max_answer_chars: 2_500,
               },
               warnings,
+              semanticDeadlineAt,
             )
           : Promise.resolve(undefined);
       [references, implementations] = await Promise.all([
@@ -392,7 +431,7 @@ export async function buildContextPack(input: {
   }
 
   let header: string | undefined;
-  if (isFile && (!request.symbol || depth === "deep")) {
+  if (isFile && (!request.symbol || depth === "deep" || !definition)) {
     try {
       header = await readHead(
         resolved,

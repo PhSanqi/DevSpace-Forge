@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { ProcessRunLogger } from "./compact-runtime/process-run-store.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
-const DEFAULT_EXEC_YIELD_MS = 10_000;
+export const DEFAULT_EXEC_YIELD_MS = 3_000;
 const DEFAULT_INTERACTIVE_YIELD_MS = 250;
 const DEFAULT_POLL_YIELD_MS = 5_000;
 export const MAX_PROCESS_YIELD_MS = 12_000;

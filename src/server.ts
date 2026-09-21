@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
+import type { Server as HttpServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -46,6 +47,7 @@ import {
   type McpRegistrationTarget,
 } from "./mcp-modern-server.js";
 import { ProcessSessionManager } from "./process-sessions.js";
+import { closeOperationReceiptManager } from "./operation-receipts.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
@@ -68,6 +70,7 @@ import {
   type LocalAgentProviderStatus,
 } from "./local-agent-catalog.js";
 import { getToolSurface } from "./tool-surfaces/index.js";
+import { closeDurableJobManager } from "./tool-surfaces/jobs.js";
 import {
   contentText,
   logFailedToolResponse,
@@ -127,6 +130,34 @@ interface RunningServer {
   config: ServerConfig;
   localAgentProviders: LocalAgentProviderStatus[];
   close(): Promise<void>;
+}
+
+export const DEVSPACE_HTTP_KEEP_ALIVE_TIMEOUT_MS = 5 * 60 * 1_000;
+export const DEVSPACE_HTTP_HEADERS_TIMEOUT_MS = DEVSPACE_HTTP_KEEP_ALIVE_TIMEOUT_MS + 5_000;
+
+export function configureHttpServer(httpServer: HttpServer): void {
+  httpServer.keepAliveTimeout = DEVSPACE_HTTP_KEEP_ALIVE_TIMEOUT_MS;
+  httpServer.headersTimeout = DEVSPACE_HTTP_HEADERS_TIMEOUT_MS;
+}
+
+export interface HttpResponseTiming {
+  startedAt?: number;
+}
+
+export function observeHttpResponseStart(
+  res: Response,
+  onStart: (startedAt: number) => void,
+): HttpResponseTiming {
+  const timing: HttpResponseTiming = {};
+  const originalWriteHead = res.writeHead;
+  res.writeHead = function (this: Response, ...args: Parameters<Response["writeHead"]>) {
+    if (timing.startedAt === undefined) {
+      timing.startedAt = performance.now();
+      onStart(timing.startedAt);
+    }
+    return originalWriteHead.apply(this, args);
+  } as Response["writeHead"];
+  return timing;
 }
 
 export type ExpressMiddlewareCompletion = "next" | "response";
@@ -362,6 +393,23 @@ function requestLogFields(req: Request, config: ServerConfig): Record<string, un
     origin: req.header("origin"),
     referer: req.header("referer"),
     contentLength: req.header("content-length"),
+  };
+}
+
+function rpcRequestLogFields(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const candidate = body as {
+    id?: unknown;
+    method?: unknown;
+    params?: { name?: unknown };
+  };
+  return {
+    rpcId: candidate.id,
+    rpcIdType: typeof candidate.id,
+    rpcMethod: candidate.method,
+    rpcToolName: candidate.params && typeof candidate.params.name === "string"
+      ? candidate.params.name
+      : undefined,
   };
 }
 
@@ -602,6 +650,20 @@ function registerMcpSurface(
         { path, mode, baseRef },
         { conversationScopeId },
       );
+      if (semantic?.available) {
+        const warmStartedAt = performance.now();
+        void semantic.warm(workspace.root).then(
+          () => logEvent(config.logging, "debug", "serena_warm_ready", {
+            workspaceId: workspace.id,
+            durationMs: Math.round(performance.now() - warmStartedAt),
+          }),
+          (error) => logEvent(config.logging, "debug", "serena_warm_failed", {
+            workspaceId: workspace.id,
+            durationMs: Math.round(performance.now() - warmStartedAt),
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
       const review = await reviewCheckpoints.initializeWorkspace({
         workspaceId: workspace.id,
         root: workspace.root,
@@ -1151,12 +1213,39 @@ export function createServer(
   app.use((req, res, next) => {
     const requestId = randomUUID();
     const startedAt = performance.now();
+    const path = requestPath(req);
+    const shouldLogRequest = config.logging.requests
+      && (config.logging.assets || !path.startsWith("/mcp-app-assets"));
+    let finished = false;
     res.locals.requestId = requestId;
 
+    const responseTiming = observeHttpResponseStart(res, (responseStartedAt) => {
+      if (!shouldLogRequest) return;
+      logEvent(config.logging, "debug", "http_response_start", {
+        requestId,
+        method: req.method,
+        path,
+        status: res.statusCode,
+        firstByteMs: Math.round(responseStartedAt - startedAt),
+        transportEstablished: true,
+        ...requestLogFields(req, config),
+      });
+    });
+    res.locals.httpResponseTiming = responseTiming;
+
+    if (shouldLogRequest) {
+      logEvent(config.logging, "debug", "http_request_start", {
+        requestId,
+        method: req.method,
+        path,
+        transportEstablished: true,
+        ...requestLogFields(req, config),
+      });
+    }
+
     res.on("finish", () => {
-      const path = requestPath(req);
-      if (!config.logging.requests) return;
-      if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
+      finished = true;
+      if (!shouldLogRequest) return;
 
       logEvent(config.logging, "info", "http_request", {
         requestId,
@@ -1164,6 +1253,28 @@ export function createServer(
         path,
         status: res.statusCode,
         durationMs: Math.round(performance.now() - startedAt),
+        responseStarted: responseTiming.startedAt !== undefined,
+        firstByteMs: responseTiming.startedAt === undefined
+          ? undefined
+          : Math.round(responseTiming.startedAt - startedAt),
+        transportEstablished: true,
+        ...requestLogFields(req, config),
+      });
+    });
+
+    res.on("close", () => {
+      if (finished || !shouldLogRequest) return;
+      logEvent(config.logging, "warn", "http_request_aborted", {
+        requestId,
+        method: req.method,
+        path,
+        status: res.statusCode,
+        durationMs: Math.round(performance.now() - startedAt),
+        responseStarted: responseTiming.startedAt !== undefined,
+        firstByteMs: responseTiming.startedAt === undefined
+          ? undefined
+          : Math.round(responseTiming.startedAt - startedAt),
+        transportEstablished: true,
         ...requestLogFields(req, config),
       });
     });
@@ -1248,10 +1359,22 @@ export function createServer(
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
       method: req.method,
+      protocolVersion: req.header("mcp-protocol-version"),
+      mcpMethod: req.header("mcp-method"),
+      mcpName: req.header("mcp-name"),
+      ...rpcRequestLogFields(req.body),
     });
 
+    const handlerStartedAt = performance.now();
     try {
       await mcpNodeHandler(req, res, req.body);
+      const responseTiming = res.locals.httpResponseTiming as HttpResponseTiming | undefined;
+      logEvent(config.logging, "debug", "mcp_request_complete", {
+        requestId,
+        handlerDurationMs: Math.round(performance.now() - handlerStartedAt),
+        responseStarted: responseTiming?.startedAt !== undefined,
+        ...rpcRequestLogFields(req.body),
+      });
     } catch (error) {
       logEvent(config.logging, "error", "mcp_request_error", {
         requestId,
@@ -1280,6 +1403,8 @@ export function createServer(
         await toolActivities.waitForIdle();
         processSessions.shutdown();
         await semantic?.close();
+        closeDurableJobManager(config.stateDir);
+        closeOperationReceiptManager(config.stateDir);
         oauthProvider.close();
         workspaceStore.close?.();
       })();
@@ -1316,6 +1441,7 @@ if (await isMainModule()) {
     console.log(`native artifact download: ${artifactDownloadStatus}`);
     console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
   });
+  configureHttpServer(httpServer);
 
   let shuttingDown = false;
   const shutdown = async () => {
