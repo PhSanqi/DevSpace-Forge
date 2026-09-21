@@ -91,8 +91,17 @@ Copy-Item -LiteralPath $runtimePackage -Destination (Join-Path $devspaceDir 'dev
 
 $node = Join-Path $nodeDir 'node.exe'
 $npmCli = Join-Path $nodeDir 'node_modules\npm\bin\npm-cli.js'
-& $node $npmCli install --omit=dev --no-fund --no-audit --prefix $devspaceDir
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Push-Location $devspaceDir
+try {
+    & $node $npmCli install --omit=dev --no-fund --no-audit
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+finally { Pop-Location }
+
+$controlRuntimeLink = Join-Path $devspaceDir 'node_modules\devspace-control-platform-runtime'
+if (Test-Path -LiteralPath $controlRuntimeLink) {
+    throw 'Offline runtime installation unexpectedly linked the Control repository into node_modules.'
+}
 
 # DevSpaceControl keeps subagents disabled. The Claude Agent SDK is therefore a
 # dormant provider dependency here, and its Windows payload alone is hundreds
