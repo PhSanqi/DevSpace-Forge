@@ -75,6 +75,9 @@ namespace DevSpaceControlPlatform
         private string cloudflareProtocol = "unknown";
         private int cloudflareDisconnectCount;
         private int cloudflareNetworkTimeoutCount;
+        private int cloudflareTlsHandshakeErrorCount;
+        private int cloudflareQuicDialFailureCount;
+        private int cloudflarePrecheckFailureCount;
         private bool devSpaceDesired;
         private bool cloudflareDesired;
         private bool devSpaceOriginHealthy;
@@ -136,7 +139,10 @@ namespace DevSpaceControlPlatform
                     return (cloudflareConnections.Count > 0 ? "链路健康 - " : "正在连接 - ") + cloudflareMessage +
                         " · protocol=" + cloudflareProtocol +
                         " · reconnect=" + cloudflareDisconnectCount +
-                        " · idle-timeout=" + cloudflareNetworkTimeoutCount;
+                        " · idle-timeout=" + cloudflareNetworkTimeoutCount +
+                        " · tls-handshake=" + cloudflareTlsHandshakeErrorCount +
+                        " · quic-dial=" + cloudflareQuicDialFailureCount +
+                        " · precheck-fail=" + cloudflarePrecheckFailureCount;
                 }
             }
         }
@@ -448,7 +454,7 @@ namespace DevSpaceControlPlatform
             lock (sync) if (IsAlive(cloudflareProcess)) return;
 
             var settings = LoadSettings();
-            var protocolArgument = CloudflareTunnelProtocol.CommandArgument(settings.CloudflaredProtocol, "http2");
+            var protocolArgument = CloudflareTunnelProtocol.CommandArgument(settings.CloudflaredProtocol, "auto");
             string arguments;
             if (string.Equals(settings.TunnelMode, "Remote", StringComparison.OrdinalIgnoreCase))
             {
@@ -499,9 +505,12 @@ namespace DevSpaceControlPlatform
                 cloudflareMessage = "PID " + process.Id;
                 cloudflareDesired = true;
                 cloudflareConnections.Clear();
-                cloudflareProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
+                cloudflareProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "auto");
                 cloudflareDisconnectCount = 0;
                 cloudflareNetworkTimeoutCount = 0;
+                cloudflareTlsHandshakeErrorCount = 0;
+                cloudflareQuicDialFailureCount = 0;
+                cloudflarePrecheckFailureCount = 0;
                 cloudflareStartedUtc = DateTime.UtcNow;
             }
             process.BeginOutputReadLine();
@@ -597,28 +606,26 @@ namespace DevSpaceControlPlatform
                 }
                 return;
             }
+            var tunnelEvent = CloudflareTunnelLogClassifier.Classify(line);
             lock (sync)
             {
-                if (line.IndexOf("registered tunnel connection", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    line.IndexOf("connection registered", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (tunnelEvent.Registered)
                 {
                     cloudflareMessage = "Tunnel 已连接";
-                    var protocolMatch = Regex.Match(line ?? string.Empty, @"protocol=([^\s]+)", RegexOptions.IgnoreCase);
-                    if (protocolMatch.Success) cloudflareProtocol = protocolMatch.Groups[1].Value.Trim();
-                    var index = ConnectionIndex(line);
-                    if (index >= 0) cloudflareConnections.Add(index);
+                    if (!string.IsNullOrWhiteSpace(tunnelEvent.Protocol)) cloudflareProtocol = tunnelEvent.Protocol;
+                    if (tunnelEvent.ConnectionIndex >= 0) cloudflareConnections.Add(tunnelEvent.ConnectionIndex);
                 }
-                else if (line.IndexOf("connection terminated", StringComparison.OrdinalIgnoreCase) >= 0)
+                else if (tunnelEvent.Terminated)
                 {
                     cloudflareDisconnectCount += 1;
-                    var index = ConnectionIndex(line);
-                    if (index >= 0) cloudflareConnections.Remove(index);
+                    if (tunnelEvent.ConnectionIndex >= 0) cloudflareConnections.Remove(tunnelEvent.ConnectionIndex);
                     if (cloudflareConnections.Count == 0) cloudflareMessage = "Tunnel 连接已中断，等待自动恢复";
                 }
-                if (line.IndexOf("timeout: no recent network activity", StringComparison.OrdinalIgnoreCase) >= 0)
-                    cloudflareNetworkTimeoutCount += 1;
-                if (line.IndexOf("precheck", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    line.IndexOf("status=fail", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (tunnelEvent.IdleTimeout) cloudflareNetworkTimeoutCount += 1;
+                if (tunnelEvent.TlsHandshakeError) cloudflareTlsHandshakeErrorCount += 1;
+                if (tunnelEvent.QuicDialFailure) cloudflareQuicDialFailureCount += 1;
+                if (tunnelEvent.PrecheckFailure) cloudflarePrecheckFailureCount += 1;
+                if (tunnelEvent.PrecheckFailure)
                     cloudflareMessage = "Tunnel 网络预检失败 - " + line;
                 else if (line.IndexOf("ERR", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     line.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -867,13 +874,6 @@ namespace DevSpaceControlPlatform
                 }
             }
             catch { return 0; }
-        }
-
-        private static int ConnectionIndex(string line)
-        {
-            var match = Regex.Match(line ?? string.Empty, @"connIndex=(\d+)", RegexOptions.IgnoreCase);
-            int value;
-            return match.Success && int.TryParse(match.Groups[1].Value, out value) ? value : -1;
         }
 
         private PlatformSettings LoadSettings()

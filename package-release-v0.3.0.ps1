@@ -11,7 +11,7 @@ $hashFile = $zip + '.sha256.txt'
 & (Join-Path $root 'test.ps1')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& (Join-Path $root 'test-runtime-slot.ps1') -SlotName 'windows-beta4-local11'
+& (Join-Path $root 'test-runtime-slot.ps1') -SlotName 'windows-beta4-local12'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 New-Item -ItemType Directory -Force $dist | Out-Null

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 namespace DevSpaceControlPlatform
@@ -42,7 +43,7 @@ namespace DevSpaceControlPlatform
                 NamedTunnelIdOrName = string.Empty,
                 CredentialsFilePath = string.Empty,
                 CloudflaredConfigPath = string.Empty,
-                CloudflaredProtocol = "http2",
+                CloudflaredProtocol = "auto",
                 AutoStart = false,
                 ToolMode = "codex",
                 ReviewUiEnabled = true,
@@ -134,7 +135,7 @@ namespace DevSpaceControlPlatform
         {
             if (settings == null) throw new ArgumentNullException("settings");
             if (settings.SchemaVersion != 1) throw new InvalidDataException("settings.json schema version 不受支持。");
-            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
+            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "auto");
             var serializer = new JavaScriptSerializer();
             AtomicWrite(path, serializer.Serialize(settings));
         }
@@ -185,6 +186,46 @@ namespace DevSpaceControlPlatform
         {
             var protocol = Normalize(value, fallback);
             return protocol == "auto" ? string.Empty : " --protocol " + protocol;
+        }
+    }
+
+    internal sealed class CloudflareTunnelLogEvent
+    {
+        public bool Registered { get; set; }
+        public bool Terminated { get; set; }
+        public bool IdleTimeout { get; set; }
+        public bool TlsHandshakeError { get; set; }
+        public bool QuicDialFailure { get; set; }
+        public bool PrecheckFailure { get; set; }
+        public string Protocol { get; set; }
+        public int ConnectionIndex { get; set; }
+    }
+
+    internal static class CloudflareTunnelLogClassifier
+    {
+        public static CloudflareTunnelLogEvent Classify(string line)
+        {
+            var value = line ?? string.Empty;
+            var protocolMatch = Regex.Match(value, @"protocol=([^\s]+)", RegexOptions.IgnoreCase);
+            var connectionMatch = Regex.Match(value, @"connIndex=(\d+)", RegexOptions.IgnoreCase);
+            int connectionIndex;
+            if (!connectionMatch.Success || !int.TryParse(connectionMatch.Groups[1].Value, out connectionIndex))
+                connectionIndex = -1;
+            return new CloudflareTunnelLogEvent
+            {
+                Registered = value.IndexOf("registered tunnel connection", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    value.IndexOf("connection registered", StringComparison.OrdinalIgnoreCase) >= 0,
+                Terminated = value.IndexOf("connection terminated", StringComparison.OrdinalIgnoreCase) >= 0,
+                IdleTimeout = value.IndexOf("timeout: no recent network activity", StringComparison.OrdinalIgnoreCase) >= 0,
+                TlsHandshakeError = value.IndexOf("TLS handshake with edge error", StringComparison.OrdinalIgnoreCase) >= 0,
+                QuicDialFailure = value.IndexOf("Failed to dial a quic connection", StringComparison.OrdinalIgnoreCase) >= 0,
+                PrecheckFailure =
+                    (value.IndexOf("precheck", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                     value.IndexOf("status=fail", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                    value.IndexOf("HTTP/2 connection is blocked or unreachable", StringComparison.OrdinalIgnoreCase) >= 0,
+                Protocol = protocolMatch.Success ? protocolMatch.Groups[1].Value.Trim() : string.Empty,
+                ConnectionIndex = connectionIndex
+            };
         }
     }
 

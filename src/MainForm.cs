@@ -69,6 +69,7 @@ namespace DevSpaceControlPlatform
         private readonly CheckBox logShellCommandsBox = new CheckBox();
         private readonly TextBox diagnosticsBox = new TextBox();
         private readonly TextBox liveLogBox = new TextBox();
+        private readonly TextBox runtimeConsoleBox = new TextBox();
         private readonly TextBox conversationLogBox = new TextBox();
         private readonly ComboBox conversationLogSelector = new ComboBox();
         private readonly Label latestToolCallLabel = new Label();
@@ -90,6 +91,7 @@ namespace DevSpaceControlPlatform
         private readonly Label cloudflareServiceLabel = new Label();
         private readonly TextBox managedMcpUrlBox = new TextBox();
         private DateTime lastReviewHistoryRefreshUtc = DateTime.MinValue;
+        private DateTime lastRuntimeConsoleRefreshUtc = DateTime.MinValue;
         private bool updatingReviewWorkspaceBox;
         private bool updatingConversationLogSelector;
         private bool allowApplicationClose;
@@ -139,6 +141,7 @@ namespace DevSpaceControlPlatform
             tabs.TabPages.Add(BuildConnectionTab());
             tabs.TabPages.Add(BuildDevSpaceTab());
             tabs.TabPages.Add(BuildDiagnosticsTab());
+            tabs.TabPages.Add(BuildRuntimeConsoleTab());
             tabs.TabPages.Add(BuildReviewHistoryTab());
             tabs.TabPages.Add(BuildHistoryTab());
 
@@ -240,6 +243,27 @@ namespace DevSpaceControlPlatform
                 else MessageBox.Show("Owner password 尚未生成，请先启动 DevSpace。", "DevSpace Control Platform", MessageBoxButtons.OK, MessageBoxIcon.Information);
             };
 
+            return page;
+        }
+
+        private TabPage BuildRuntimeConsoleTab()
+        {
+            var page = NewPage("运行控制台");
+            runtimeConsoleBox.SetBounds(18, 18, 900, 525);
+            runtimeConsoleBox.Multiline = true;
+            runtimeConsoleBox.ScrollBars = ScrollBars.Both;
+            runtimeConsoleBox.ReadOnly = true;
+            runtimeConsoleBox.WordWrap = false;
+            runtimeConsoleBox.Font = new Font("Consolas", 9F);
+            page.Controls.Add(runtimeConsoleBox);
+
+            var refresh = AddButton(page, "刷新", 18, 555, 90);
+            refresh.Click += delegate { RefreshRuntimeConsole(true); };
+            var note = AddLabel(
+                page,
+                "本页只读现有 runtime/state/log，不占用 MCP/OAuth 端口，也不会显示 Tunnel token 或 Owner password。",
+                555, 122, 800);
+            note.ForeColor = Color.DimGray;
             return page;
         }
 
@@ -661,6 +685,29 @@ namespace DevSpaceControlPlatform
             cloudflareServiceLabel.Text = "状态：" + supervisor.CloudflareStatus;
             managedMcpUrlBox.Text = supervisor.McpUrl;
             RefreshLiveDiagnostics();
+            if (tabs.SelectedTab != null &&
+                string.Equals(tabs.SelectedTab.Text, "运行控制台", StringComparison.Ordinal) &&
+                (DateTime.UtcNow - lastRuntimeConsoleRefreshUtc).TotalSeconds >= 3)
+                RefreshRuntimeConsole(false);
+        }
+
+        private void RefreshRuntimeConsole(bool force)
+        {
+            if (!force && (DateTime.UtcNow - lastRuntimeConsoleRefreshUtc).TotalSeconds < 3) return;
+            lastRuntimeConsoleRefreshUtc = DateTime.UtcNow;
+            try
+            {
+                var snapshot = RuntimeConsoleReader.Read(platformRoot);
+                runtimeConsoleBox.Text = RuntimeConsoleReader.Format(
+                    snapshot,
+                    supervisor.DevSpaceStatus,
+                    supervisor.CloudflareStatus,
+                    supervisor.ReadinessStatus);
+            }
+            catch (Exception exception)
+            {
+                runtimeConsoleBox.Text = "Runtime Console unavailable: " + exception.Message;
+            }
         }
 
         private void RefreshLiveDiagnostics()

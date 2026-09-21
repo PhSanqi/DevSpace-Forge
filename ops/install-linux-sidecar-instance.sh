@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTANCE=""
 PORT="17677"
 PUBLIC_URL=""
@@ -91,9 +92,17 @@ WORKTREE_ROOT="$STATE_DIR/worktrees"
 AGENT_DIR="$STATE_DIR/agent-home"
 SERVICE="devspace-control-$INSTANCE.service"
 TUNNEL_SERVICE="devspace-$INSTANCE-cloudflared.service"
+TUNNEL_WATCHDOG_SERVICE="devspace-$INSTANCE-cloudflared-watchdog.service"
+TUNNEL_WATCHDOG_TIMER="devspace-$INSTANCE-cloudflared-watchdog.timer"
 
 mkdir -p "$INSTALL_ROOT/bin" "$CONFIG_DIR" "$STATE_DIR/devspace-state" "$WORKTREE_ROOT" "$AGENT_DIR"
 chmod 0700 "$CONFIG_DIR" "$STATE_DIR" "$AGENT_DIR" || true
+install -m 0755 "$SCRIPT_DIR/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
+cat > "$INSTALL_ROOT/runtime-console.env" <<EOF
+DEVSPACE_SERVICE=$SERVICE
+TUNNEL_SERVICE=$TUNNEL_SERVICE
+EOF
+chmod 0644 "$INSTALL_ROOT/runtime-console.env"
 
 INSTANCE_RUNTIME="$INSTALL_ROOT/runtime"
 if [[ ! -f "$INSTANCE_RUNTIME/node_modules/@waishnav/devspace/dist/cli.js" ]]; then
@@ -191,12 +200,85 @@ UMask=0077
 [Install]
 WantedBy=default.target
 EOF
+
+  BASE_PATH="${MCP_PATH%/mcp}"
+  HEALTH_PATH="${BASE_PATH}/healthz"
+  WATCHDOG_STATE="$STATE_DIR/cloudflared-watchdog-failures"
+  cat > "$INSTALL_ROOT/bin/check-cloudflared" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LOCAL_URL="http://127.0.0.1:${PORT}${HEALTH_PATH}"
+ORIGIN_URL="https://${ORIGIN_HOST}${HEALTH_PATH}"
+STATE_FILE="$WATCHDOG_STATE"
+TUNNEL_SERVICE="$TUNNEL_SERVICE"
+
+probe_200() {
+  local url="\$1"
+  local code
+  code="\$(curl -sS -o /dev/null --max-time 8 --connect-timeout 3 --max-redirs 0 -w '%{http_code}' "\$url" 2>/dev/null || true)"
+  [[ "\$code" == "200" ]]
+}
+
+if ! probe_200 "\$LOCAL_URL"; then
+  printf '0\n' > "\$STATE_FILE"
+  echo "watchdog: local DevSpace is not healthy; tunnel restart suppressed"
+  exit 0
+fi
+
+if probe_200 "\$ORIGIN_URL"; then
+  printf '0\n' > "\$STATE_FILE"
+  exit 0
+fi
+
+failures=0
+if [[ -f "\$STATE_FILE" ]]; then read -r failures < "\$STATE_FILE" || failures=0; fi
+[[ "\$failures" =~ ^[0-9]+$ ]] || failures=0
+failures=\$((failures + 1))
+printf '%s\n' "\$failures" > "\$STATE_FILE"
+echo "watchdog: origin health failed (\$failures/3): \$ORIGIN_URL"
+if (( failures >= 3 )); then
+  printf '0\n' > "\$STATE_FILE"
+  echo "watchdog: restarting \$TUNNEL_SERVICE after 3 consecutive origin failures"
+  systemctl --user restart "\$TUNNEL_SERVICE"
+fi
+EOF
+  chmod 0755 "$INSTALL_ROOT/bin/check-cloudflared"
+
+  cat > "$SYSTEMD_DIR/$TUNNEL_WATCHDOG_SERVICE" <<EOF
+[Unit]
+Description=DevSpace $INSTANCE Cloudflare Tunnel health watchdog
+After=network-online.target $SERVICE $TUNNEL_SERVICE
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$INSTALL_ROOT/bin/check-cloudflared
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
+EOF
+
+  cat > "$SYSTEMD_DIR/$TUNNEL_WATCHDOG_TIMER" <<EOF
+[Unit]
+Description=DevSpace $INSTANCE Cloudflare Tunnel health watchdog timer
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+Unit=$TUNNEL_WATCHDOG_SERVICE
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
 fi
 
 systemctl --user daemon-reload
 systemctl --user enable --now "$SERVICE"
 if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
   systemctl --user enable --now "$TUNNEL_SERVICE"
+  systemctl --user enable --now "$TUNNEL_WATCHDOG_TIMER"
 fi
 
 deadline=$((SECONDS+30))
@@ -218,6 +300,7 @@ echo "tunnel_route=${ORIGIN_HOST} -> http://127.0.0.1:${PORT}"
 if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
   echo "cloudflared=dedicated:$TUNNEL_SERVICE"
   echo "tunnel_protocol=$TUNNEL_PROTOCOL"
+  echo "tunnel_watchdog=$TUNNEL_WATCHDOG_TIMER"
 else
   echo "cloudflared=existing-tunnel-reused"
 fi

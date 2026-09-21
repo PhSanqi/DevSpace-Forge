@@ -15,6 +15,8 @@ internal static class DevSpaceConfigurationTests
         Run("parse 1.0.8", TestLegacyVersion);
         Run("parse 1.1 prerelease", TestModernVersion);
         Run("cloudflared protocol normalization", TestCloudflaredProtocolNormalization);
+        Run("cloudflared tunnel log classification", TestCloudflaredTunnelLogClassification);
+        Run("runtime console formats jobs workspaces and diagnostics", TestRuntimeConsoleFormatting);
         Run("read version from package json", TestPackageVersion);
         Run("reject unknown future major", TestUnknownMajor);
         Run("reject unverified 1.2", TestUnknownMinor);
@@ -72,12 +74,81 @@ internal static class DevSpaceConfigurationTests
     private static void TestCloudflaredProtocolNormalization()
     {
         AssertEqual("http2", CloudflareTunnelProtocol.Normalize(null, "http2"), "missing protocol fallback");
+        AssertEqual("auto", PlatformSettings.CreateDefault(Path.GetTempPath()).CloudflaredProtocol, "new install protocol default");
         AssertEqual("auto", CloudflareTunnelProtocol.Normalize(" AUTO ", "http2"), "auto protocol");
         AssertEqual("quic", CloudflareTunnelProtocol.Normalize("QUIC", "http2"), "quic protocol");
         AssertEqual("http2", CloudflareTunnelProtocol.Normalize("http2", "auto"), "http2 protocol");
         AssertEqual(string.Empty, CloudflareTunnelProtocol.CommandArgument("auto", "http2"), "auto argument omitted");
         AssertEqual(" --protocol quic", CloudflareTunnelProtocol.CommandArgument("quic", "http2"), "quic argument");
         AssertThrows<InvalidDataException>(delegate { CloudflareTunnelProtocol.Normalize("invalid", "http2"); });
+        var explicitRoot = TestRoot("explicit-tunnel-protocol");
+        var explicitPath = Path.Combine(explicitRoot, "settings.json");
+        var explicitSettings = PlatformSettings.CreateDefault(explicitRoot);
+        explicitSettings.CloudflaredProtocol = "http2";
+        PlatformSettingsStore.Save(explicitPath, explicitSettings);
+        AssertEqual("http2", PlatformSettingsStore.Load(explicitPath, explicitRoot).CloudflaredProtocol, "explicit protocol preserved");
+        var legacyRoot = TestRoot("legacy-missing-tunnel-protocol");
+        var legacyPath = Path.Combine(legacyRoot, "settings.json");
+        File.WriteAllText(legacyPath, "{\"SchemaVersion\":1,\"AllowedRoots\":[],\"LocalPort\":7677,\"TunnelMode\":\"Remote\"}");
+        AssertEqual("http2", PlatformSettingsStore.Load(legacyPath, legacyRoot).CloudflaredProtocol, "existing missing protocol preserves legacy http2 behavior");
+    }
+
+    private static void TestCloudflaredTunnelLogClassification()
+    {
+        var registered = CloudflareTunnelLogClassifier.Classify(
+            "INF Registered tunnel connection connIndex=2 connection=abc protocol=quic");
+        AssertEqual(true, registered.Registered, "registered event");
+        AssertEqual(2, registered.ConnectionIndex, "registered connection index");
+        AssertEqual("quic", registered.Protocol, "registered protocol");
+
+        var idle = CloudflareTunnelLogClassifier.Classify(
+            "ERR failed to accept QUIC stream error=\"timeout: no recent network activity\" connIndex=1");
+        AssertEqual(true, idle.IdleTimeout, "idle timeout event");
+
+        var tls = CloudflareTunnelLogClassifier.Classify(
+            "ERR TLS handshake with edge error: EOF connIndex=0");
+        AssertEqual(true, tls.TlsHandshakeError, "tls handshake event");
+
+        var quic = CloudflareTunnelLogClassifier.Classify(
+            "ERR Failed to dial a quic connection error=timeout");
+        AssertEqual(true, quic.QuicDialFailure, "quic dial event");
+
+        var precheck = CloudflareTunnelLogClassifier.Classify(
+            "ERR Connectivity precheck status=fail detail=HTTP/2 connection is blocked or unreachable");
+        AssertEqual(true, precheck.PrecheckFailure, "precheck event");
+    }
+
+    private static void TestRuntimeConsoleFormatting()
+    {
+        var snapshot = new RuntimeConsoleSnapshot
+        {
+            RuntimeVersion = "1.1.0-test",
+            ActiveSlot = "slot-a",
+            ServerHash = "abc123",
+            RuntimeSlots = new[] { "slot-a", "slot-b" },
+            Jobs = new[]
+            {
+                new RuntimeConsoleJob
+                {
+                    Id = "job_1",
+                    Status = "running",
+                    WorkspaceId = "ws_1",
+                    WorkspaceRoot = "C:\\work",
+                    Command = "echo ok"
+                }
+            },
+            Workspaces = new[]
+            {
+                new RuntimeConsoleWorkspace { Id = "ws_1", Root = "C:\\work" }
+            },
+            RecentRequests = new[] { "http_request requestId=req-1 firstByteMs=12" }
+        };
+        var text = RuntimeConsoleReader.Format(snapshot, "DevSpace OK", "Tunnel OK", "ready");
+        AssertTrue(text.IndexOf("DURABLE JOBS", StringComparison.Ordinal) >= 0, "jobs section");
+        AssertTrue(text.IndexOf("job_1", StringComparison.Ordinal) >= 0, "job listed");
+        AssertTrue(text.IndexOf("WORKSPACES / SESSIONS", StringComparison.Ordinal) >= 0, "workspace section");
+        AssertTrue(text.IndexOf("requestId=req-1", StringComparison.Ordinal) >= 0, "request diagnostics");
+        AssertTrue(text.IndexOf("abc123", StringComparison.Ordinal) >= 0, "runtime hash");
     }
 
     private static void TestUnknownMajor()
@@ -438,7 +509,7 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("codex", imported.Settings.ToolMode, "migrated tool mode");
         AssertEqual(7788, imported.Settings.LocalPort, "migrated port");
         AssertEqual("Named", imported.Settings.TunnelMode, "migrated tunnel mode");
-        AssertEqual("http2", imported.Settings.CloudflaredProtocol, "migrated tunnel protocol");
+        AssertEqual("auto", imported.Settings.CloudflaredProtocol, "migrated tunnel protocol");
         AssertEqual(true, imported.Settings.AutoStart, "migrated autostart");
         AssertEqual(false, imported.Settings.LogShellCommands, "new safe default retained");
     }

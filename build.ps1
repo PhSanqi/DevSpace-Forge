@@ -33,6 +33,7 @@ New-Item -ItemType Directory -Force (Split-Path $output) | Out-Null
     (Join-Path $PSScriptRoot 'src\ControlApplicationContext.cs') `
     (Join-Path $PSScriptRoot 'src\MainForm.cs') `
     (Join-Path $PSScriptRoot 'src\ServiceSupervisor.cs') `
+    (Join-Path $PSScriptRoot 'src\RuntimeConsole.cs') `
     (Join-Path $PSScriptRoot 'src\ConversationLogStore.cs') `
     (Join-Path $PSScriptRoot 'src\RuntimeResolver.cs') `
     (Join-Path $PSScriptRoot 'src\PlatformSettings.cs') `

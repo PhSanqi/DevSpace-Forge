@@ -15,11 +15,12 @@ CLOUDFLARED_SHA256="03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd
 
 trap 'rm -rf "$STAGE_PARENT"' EXIT
 rm -f "$DIST/$NAME.tar.gz" "$DIST/$NAME.tar.gz.sha256.txt"
-mkdir -p "$STAGE/runtime/devspace" "$DIST/.offline-cache/linux"
+mkdir -p "$STAGE/runtime/devspace" "$STAGE/ops" "$DIST/.offline-cache/linux"
 
 cp "$ROOT/setup-linux.sh" "$STAGE/setup-linux.sh"
+cp "$ROOT/ops/runtime-console.sh" "$STAGE/ops/runtime-console.sh"
 cp "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/LICENSE" "$STAGE/"
-chmod 0755 "$STAGE/setup-linux.sh"
+chmod 0755 "$STAGE/setup-linux.sh" "$STAGE/ops/runtime-console.sh"
 
 NODE_ARCHIVE="$DIST/.offline-cache/linux/node-v${NODE_VERSION}-linux-x64.tar.xz"
 if [[ ! -f "$NODE_ARCHIVE" ]] || [[ "$(sha256sum "$NODE_ARCHIVE" | awk '{print $1}')" != "$NODE_SHA256" ]]; then

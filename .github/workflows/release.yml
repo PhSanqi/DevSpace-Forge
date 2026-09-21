@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CANONICAL_RUNTIME_REF: runtime-1.1.0-beta.4.local.11
-  CANONICAL_RUNTIME_VERSION: 1.1.0-beta.4.local.11
+  CANONICAL_RUNTIME_REF: runtime-1.1.0-beta.4.local.12
+  CANONICAL_RUNTIME_VERSION: 1.1.0-beta.4.local.12
 
 jobs:
   windows:
@@ -67,7 +67,7 @@ jobs:
           .\test.ps1 -NodePath $node -DevSpacePackageRoot $package
 
           New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
-          $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local11.tar'
+          $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local12.tar'
           tar.exe -cf $payload -C dist\offline-windows-runtime runtime cloudflared.exe
           if ($LASTEXITCODE -ne 0) { throw 'Failed to create Windows runtime payload.' }
 
@@ -77,7 +77,7 @@ jobs:
           $version = '${{ github.ref_name }}'.TrimStart('v')
           .\package-release-windows-payload.ps1 `
             -Version $version `
-            -RuntimePayloadPath dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local11.tar
+            -RuntimePayloadPath dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local12.tar
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4

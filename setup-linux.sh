@@ -66,6 +66,8 @@ WORKTREE_ROOT="$STATE_DIR/worktrees"
 SERVICE_BASE="devspace-control${INSTANCE_SUFFIX}"
 DEVSPACE_SERVICE="$SERVICE_BASE.service"
 CLOUDFLARED_SERVICE="$SERVICE_BASE-cloudflared.service"
+CLOUDFLARED_WATCHDOG_SERVICE="$SERVICE_BASE-cloudflared-watchdog.service"
+CLOUDFLARED_WATCHDOG_TIMER="$SERVICE_BASE-cloudflared-watchdog.timer"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo 'setup-linux.sh only supports Linux.' >&2
@@ -121,6 +123,12 @@ fi
 ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd)"
 
 mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_DIR" "$WORKTREE_ROOT" "$INSTALL_ROOT/bin"
+install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
+cat > "$INSTALL_ROOT/runtime-console.env" <<EOF
+DEVSPACE_SERVICE=$DEVSPACE_SERVICE
+TUNNEL_SERVICE=$CLOUDFLARED_SERVICE
+EOF
+chmod 0644 "$INSTALL_ROOT/runtime-console.env"
 rm -rf "$INSTALL_ROOT/runtime/node" "$INSTALL_ROOT/runtime/devspace"
 cp -a "$ROOT/runtime/node" "$INSTALL_ROOT/runtime/node"
 cp -a "$ROOT/runtime/devspace" "$INSTALL_ROOT/runtime/devspace"
@@ -263,6 +271,87 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
+
+
+BASE_PATH="${MCP_PATH%/mcp}"
+HEALTH_PATH="${BASE_PATH}/healthz"
+WATCHDOG_TARGET=""
+if [[ -n "$ORIGIN_HOST" ]]; then
+  WATCHDOG_TARGET="https://${ORIGIN_HOST}${HEALTH_PATH}"
+elif [[ -n "$PUBLIC_URL" ]]; then
+  WATCHDOG_TARGET="${PUBLIC_URL%/}/healthz"
+fi
+if [[ -n "$WATCHDOG_TARGET" ]]; then
+  WATCHDOG_STATE="$STATE_DIR/cloudflared-watchdog-failures"
+  cat > "$INSTALL_ROOT/bin/check-cloudflared" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LOCAL_URL="http://127.0.0.1:${PORT}${HEALTH_PATH}"
+ORIGIN_URL="$WATCHDOG_TARGET"
+STATE_FILE="$WATCHDOG_STATE"
+TUNNEL_SERVICE="$CLOUDFLARED_SERVICE"
+
+probe_200() {
+  local url="\$1"
+  local code
+  code="\$(curl -sS -o /dev/null --max-time 8 --connect-timeout 3 --max-redirs 0 -w '%{http_code}' "\$url" 2>/dev/null || true)"
+  [[ "\$code" == "200" ]]
+}
+
+if ! probe_200 "\$LOCAL_URL"; then
+  printf '0\n' > "\$STATE_FILE"
+  echo "watchdog: local DevSpace is not healthy; tunnel restart suppressed"
+  exit 0
+fi
+
+if probe_200 "\$ORIGIN_URL"; then
+  printf '0\n' > "\$STATE_FILE"
+  exit 0
+fi
+
+failures=0
+if [[ -f "\$STATE_FILE" ]]; then read -r failures < "\$STATE_FILE" || failures=0; fi
+[[ "\$failures" =~ ^[0-9]+$ ]] || failures=0
+failures=\$((failures + 1))
+printf '%s\n' "\$failures" > "\$STATE_FILE"
+echo "watchdog: origin health failed (\$failures/3): \$ORIGIN_URL"
+if (( failures >= 3 )); then
+  printf '0\n' > "\$STATE_FILE"
+  echo "watchdog: restarting \$TUNNEL_SERVICE after 3 consecutive origin failures"
+  systemctl --user restart "\$TUNNEL_SERVICE"
+fi
+EOF
+  chmod 0755 "$INSTALL_ROOT/bin/check-cloudflared"
+
+  cat > "$SYSTEMD_DIR/$CLOUDFLARED_WATCHDOG_SERVICE" <<EOF
+[Unit]
+Description=DevSpace Control - Cloudflare Tunnel health watchdog
+After=network-online.target $DEVSPACE_SERVICE $CLOUDFLARED_SERVICE
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$INSTALL_ROOT/bin/check-cloudflared
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
+EOF
+
+  cat > "$SYSTEMD_DIR/$CLOUDFLARED_WATCHDOG_TIMER" <<EOF
+[Unit]
+Description=DevSpace Control - Cloudflare Tunnel health watchdog timer
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+Unit=$CLOUDFLARED_WATCHDOG_SERVICE
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+fi
 fi
 
 probe_endpoint() {
@@ -307,6 +396,9 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user enable --now "$DEVSPACE_SERVICE"
     if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
       systemctl --user enable --now "$CLOUDFLARED_SERVICE"
+      if [[ -f "$SYSTEMD_DIR/$CLOUDFLARED_WATCHDOG_TIMER" ]]; then
+        systemctl --user enable --now "$CLOUDFLARED_WATCHDOG_TIMER"
+      fi
     fi
 
     echo 'Verifying DevSpace and Cloudflare connectivity...'

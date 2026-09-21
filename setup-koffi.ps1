@@ -1,5 +1,5 @@
 param(
-    [string]$SlotName = 'windows-beta4-local11',
+    [string]$SlotName = 'windows-beta4-local12',
     [string]$SlotPath,
     [switch]$NoDownload
 )

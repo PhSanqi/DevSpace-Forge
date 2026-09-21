@@ -8,9 +8,9 @@ $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
 $cloudflaredVersion = '2026.9.1'
 $cloudflaredSha256 = '2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712'
-$devSpaceVersion = '1.1.0-beta.4.local.11'
-$devSpaceRuntimeTag = 'runtime-1.1.0-beta.4.local.11'
-$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.11.tgz'
+$devSpaceVersion = '1.1.0-beta.4.local.12'
+$devSpaceRuntimeTag = 'runtime-1.1.0-beta.4.local.12'
+$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.12.tgz'
 $devSpacePackageSha256 = '005b39efd927b06fef9c4c2bf676322318f3308e43d1491343fd2821fb4ee39e'
 
 $root = $PSScriptRoot
