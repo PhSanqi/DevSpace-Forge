@@ -216,11 +216,16 @@ exec "$NODE" "$DEVSPACE_PACKAGE/dist/cli.js" serve
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
 
+CLOUDFLARED_PROTOCOL="${DEVSPACE_CLOUDFLARED_PROTOCOL:-auto}"
+case "$CLOUDFLARED_PROTOCOL" in auto|quic|http2) ;; *) echo 'DEVSPACE_CLOUDFLARED_PROTOCOL must be auto, quic, or http2.' >&2; exit 1 ;; esac
+CLOUDFLARED_PROTOCOL_ARG=""
+[[ "$CLOUDFLARED_PROTOCOL" == "auto" ]] || CLOUDFLARED_PROTOCOL_ARG="--protocol $CLOUDFLARED_PROTOCOL"
+
 cat > "$INSTALL_ROOT/bin/run-cloudflared" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 source "$CLOUDFLARE_ENV"
-exec "$CLOUDFLARED" tunnel --protocol http2 --no-autoupdate run --token "\$CLOUDFLARED_TOKEN"
+exec "$CLOUDFLARED" tunnel $CLOUDFLARED_PROTOCOL_ARG --no-autoupdate run --token "\$CLOUDFLARED_TOKEN"
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-cloudflared"
 

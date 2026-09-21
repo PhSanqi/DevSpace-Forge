@@ -17,6 +17,7 @@ namespace DevSpaceControlPlatform
         public string NamedTunnelIdOrName { get; set; }
         public string CredentialsFilePath { get; set; }
         public string CloudflaredConfigPath { get; set; }
+        public string CloudflaredProtocol { get; set; }
         public bool AutoStart { get; set; }
         public string ToolMode { get; set; }
         public bool ReviewUiEnabled { get; set; }
@@ -41,6 +42,7 @@ namespace DevSpaceControlPlatform
                 NamedTunnelIdOrName = string.Empty,
                 CredentialsFilePath = string.Empty,
                 CloudflaredConfigPath = string.Empty,
+                CloudflaredProtocol = "http2",
                 AutoStart = false,
                 ToolMode = "codex",
                 ReviewUiEnabled = true,
@@ -67,6 +69,7 @@ namespace DevSpaceControlPlatform
                 NamedTunnelIdOrName = NamedTunnelIdOrName,
                 CredentialsFilePath = CredentialsFilePath,
                 CloudflaredConfigPath = CloudflaredConfigPath,
+                CloudflaredProtocol = CloudflaredProtocol,
                 AutoStart = AutoStart,
                 ToolMode = ToolMode,
                 ReviewUiEnabled = ReviewUiEnabled,
@@ -123,6 +126,7 @@ namespace DevSpaceControlPlatform
             settings.AllowedRoots = settings.AllowedRoots ?? new List<string>();
             settings.AllowedHosts = settings.AllowedHosts ?? new List<string>();
             settings.SkillPaths = settings.SkillPaths ?? new List<string>();
+            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
             return settings;
         }
 
@@ -130,6 +134,7 @@ namespace DevSpaceControlPlatform
         {
             if (settings == null) throw new ArgumentNullException("settings");
             if (settings.SchemaVersion != 1) throw new InvalidDataException("settings.json schema version 不受支持。");
+            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
             var serializer = new JavaScriptSerializer();
             AtomicWrite(path, serializer.Serialize(settings));
         }
@@ -150,6 +155,7 @@ namespace DevSpaceControlPlatform
             settings.AllowedRoots = settings.AllowedRoots ?? new List<string>();
             settings.AllowedHosts = settings.AllowedHosts ?? new List<string>();
             settings.SkillPaths = settings.SkillPaths ?? new List<string>();
+            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
             return settings;
         }
 
@@ -161,6 +167,24 @@ namespace DevSpaceControlPlatform
             File.WriteAllText(temporaryPath, text + Environment.NewLine, new UTF8Encoding(false));
             if (File.Exists(path)) File.Replace(temporaryPath, path, null, true);
             else File.Move(temporaryPath, path);
+        }
+    }
+
+    internal static class CloudflareTunnelProtocol
+    {
+        public static string Normalize(string value, string fallback)
+        {
+            var normalized = string.IsNullOrWhiteSpace(value)
+                ? (fallback ?? string.Empty).Trim().ToLowerInvariant()
+                : value.Trim().ToLowerInvariant();
+            if (normalized == "auto" || normalized == "quic" || normalized == "http2") return normalized;
+            throw new InvalidDataException("cloudflared protocol 必须是 auto、quic 或 http2。");
+        }
+
+        public static string CommandArgument(string value, string fallback)
+        {
+            var protocol = Normalize(value, fallback);
+            return protocol == "auto" ? string.Empty : " --protocol " + protocol;
         }
     }
 

@@ -8,6 +8,7 @@ ORIGIN_HOST=""
 ALLOWED_ROOT="$HOME/codex-workspace"
 RUNTIME_ROOT="$HOME/.local/share/devspace-control/runtime"
 TUNNEL_TOKEN_FILE=""
+TUNNEL_PROTOCOL="auto"
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,9 @@ Options:
   --tunnel-token-file PATH
                         Copy an existing remotely-managed Tunnel token and run
                         a dedicated devspace-INSTANCE-cloudflared.service
+  --tunnel-protocol MODE
+                        cloudflared edge protocol: auto, quic, or http2
+                        (default: auto)
   -h, --help            Show this help
 EOF
 }
@@ -39,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --allowed-root) ALLOWED_ROOT="${2:?missing allowed root}"; shift 2 ;;
     --runtime-root) RUNTIME_ROOT="${2:?missing runtime root}"; shift 2 ;;
     --tunnel-token-file) TUNNEL_TOKEN_FILE="${2:?missing token file}"; shift 2 ;;
+    --tunnel-protocol) TUNNEL_PROTOCOL="${2:?missing tunnel protocol}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -49,6 +54,7 @@ done
 [[ -n "$PUBLIC_URL" ]] || { echo '--public-url is required.' >&2; exit 1; }
 [[ -n "$ORIGIN_HOST" ]] || { echo '--origin-host is required.' >&2; exit 1; }
 [[ -d "$ALLOWED_ROOT" ]] || { echo "Allowed root does not exist: $ALLOWED_ROOT" >&2; exit 1; }
+case "$TUNNEL_PROTOCOL" in auto|quic|http2) ;; *) echo 'Tunnel protocol must be auto, quic, or http2.' >&2; exit 1 ;; esac
 
 NODE="$(command -v node)"
 SOURCE_DEVSPACE_PACKAGE="$RUNTIME_ROOT/node_modules/@waishnav/devspace"
@@ -164,6 +170,8 @@ if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
   [[ -x "$INSTANCE_CLOUDFLARED" ]] || { echo "cloudflared not found in isolated runtime: $INSTANCE_CLOUDFLARED" >&2; exit 1; }
   INSTANCE_TOKEN_FILE="$CONFIG_ROOT/cloudflare-tunnel-token.txt"
   install -m 0600 "$TUNNEL_TOKEN_FILE" "$INSTANCE_TOKEN_FILE"
+  TUNNEL_PROTOCOL_ARG=""
+  [[ "$TUNNEL_PROTOCOL" == "auto" ]] || TUNNEL_PROTOCOL_ARG="--protocol $TUNNEL_PROTOCOL"
   cat > "$SYSTEMD_DIR/$TUNNEL_SERVICE" <<EOF
 [Unit]
 Description=DevSpace $INSTANCE dedicated Cloudflare Tunnel
@@ -172,7 +180,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTANCE_CLOUDFLARED tunnel --no-autoupdate --loglevel info run --token-file $INSTANCE_TOKEN_FILE
+ExecStart=$INSTANCE_CLOUDFLARED tunnel $TUNNEL_PROTOCOL_ARG --no-autoupdate --loglevel info run --token-file $INSTANCE_TOKEN_FILE
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -209,6 +217,7 @@ echo "public_mcp=${PUBLIC_URL%/}/mcp"
 echo "tunnel_route=${ORIGIN_HOST} -> http://127.0.0.1:${PORT}"
 if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
   echo "cloudflared=dedicated:$TUNNEL_SERVICE"
+  echo "tunnel_protocol=$TUNNEL_PROTOCOL"
 else
   echo "cloudflared=existing-tunnel-reused"
 fi

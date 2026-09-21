@@ -14,6 +14,7 @@ internal static class DevSpaceConfigurationTests
     {
         Run("parse 1.0.8", TestLegacyVersion);
         Run("parse 1.1 prerelease", TestModernVersion);
+        Run("cloudflared protocol normalization", TestCloudflaredProtocolNormalization);
         Run("read version from package json", TestPackageVersion);
         Run("reject unknown future major", TestUnknownMajor);
         Run("reject unverified 1.2", TestUnknownMinor);
@@ -66,6 +67,17 @@ internal static class DevSpaceConfigurationTests
         AssertEqual(DevSpaceConfigFamily.Modern11, version.Family, "family");
         AssertEqual("1.1.0", version.ToString(), "version");
         AssertEqual("v1.1.0-beta.1", version.Raw, "raw version");
+    }
+
+    private static void TestCloudflaredProtocolNormalization()
+    {
+        AssertEqual("http2", CloudflareTunnelProtocol.Normalize(null, "http2"), "missing protocol fallback");
+        AssertEqual("auto", CloudflareTunnelProtocol.Normalize(" AUTO ", "http2"), "auto protocol");
+        AssertEqual("quic", CloudflareTunnelProtocol.Normalize("QUIC", "http2"), "quic protocol");
+        AssertEqual("http2", CloudflareTunnelProtocol.Normalize("http2", "auto"), "http2 protocol");
+        AssertEqual(string.Empty, CloudflareTunnelProtocol.CommandArgument("auto", "http2"), "auto argument omitted");
+        AssertEqual(" --protocol quic", CloudflareTunnelProtocol.CommandArgument("quic", "http2"), "quic argument");
+        AssertThrows<InvalidDataException>(delegate { CloudflareTunnelProtocol.Normalize("invalid", "http2"); });
     }
 
     private static void TestUnknownMajor()
@@ -417,6 +429,7 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("codex", imported.Settings.ToolMode, "migrated tool mode");
         AssertEqual(7788, imported.Settings.LocalPort, "migrated port");
         AssertEqual("Named", imported.Settings.TunnelMode, "migrated tunnel mode");
+        AssertEqual("http2", imported.Settings.CloudflaredProtocol, "migrated tunnel protocol");
         AssertEqual(true, imported.Settings.AutoStart, "migrated autostart");
         AssertEqual(false, imported.Settings.LogShellCommands, "new safe default retained");
     }

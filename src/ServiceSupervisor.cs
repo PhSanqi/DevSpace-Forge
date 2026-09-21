@@ -72,6 +72,9 @@ namespace DevSpaceControlPlatform
         private readonly Dictionary<string, string> conversationLatestTools = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ConversationDisplayMetadata> conversationMetadata = new Dictionary<string, ConversationDisplayMetadata>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<int> cloudflareConnections = new HashSet<int>();
+        private string cloudflareProtocol = "unknown";
+        private int cloudflareDisconnectCount;
+        private int cloudflareNetworkTimeoutCount;
         private bool devSpaceDesired;
         private bool cloudflareDesired;
         private bool devSpaceOriginHealthy;
@@ -130,7 +133,10 @@ namespace DevSpaceControlPlatform
                 lock (sync)
                 {
                     if (!IsAlive(cloudflareProcess)) return cloudflareMessage;
-                    return (cloudflareConnections.Count > 0 ? "链路健康 - " : "正在连接 - ") + cloudflareMessage;
+                    return (cloudflareConnections.Count > 0 ? "链路健康 - " : "正在连接 - ") + cloudflareMessage +
+                        " · protocol=" + cloudflareProtocol +
+                        " · reconnect=" + cloudflareDisconnectCount +
+                        " · idle-timeout=" + cloudflareNetworkTimeoutCount;
                 }
             }
         }
@@ -442,6 +448,7 @@ namespace DevSpaceControlPlatform
             lock (sync) if (IsAlive(cloudflareProcess)) return;
 
             var settings = LoadSettings();
+            var protocolArgument = CloudflareTunnelProtocol.CommandArgument(settings.CloudflaredProtocol, "http2");
             string arguments;
             if (string.Equals(settings.TunnelMode, "Remote", StringComparison.OrdinalIgnoreCase))
             {
@@ -449,19 +456,19 @@ namespace DevSpaceControlPlatform
                 var secretFile = CloudflareTunnelSecretStore.TokenPath(platformRoot);
                 if (!CloudflareTunnelSecretStore.HasToken(platformRoot))
                     throw new InvalidOperationException("Remote Tunnel 凭据尚未配置。");
-                arguments = "tunnel --protocol http2 run --token-file " + Quote(secretFile);
+                arguments = "tunnel" + protocolArgument + " run --token-file " + Quote(secretFile);
             }
             else if (string.Equals(settings.TunnelMode, "Named", StringComparison.OrdinalIgnoreCase))
             {
                 if (!IsDevSpaceRunning) throw new InvalidOperationException("请先启动 DevSpace，再连接 Named Tunnel。");
-                arguments = "tunnel --protocol http2 --config " + Quote(settings.CloudflaredConfigPath) +
+                arguments = "tunnel" + protocolArgument + " --config " + Quote(settings.CloudflaredConfigPath) +
                     " --credentials-file " + Quote(settings.CredentialsFilePath) +
                     " --no-autoupdate run " + Quote(settings.NamedTunnelIdOrName);
             }
             else if (string.Equals(settings.TunnelMode, "Quick", StringComparison.OrdinalIgnoreCase))
             {
                 dynamicPublicBaseUrl = null;
-                arguments = "tunnel --url " + Quote("http://127.0.0.1:" + settings.LocalPort) + " --no-autoupdate";
+                arguments = "tunnel" + protocolArgument + " --url " + Quote("http://127.0.0.1:" + settings.LocalPort) + " --no-autoupdate";
             }
             else
             {
@@ -492,6 +499,9 @@ namespace DevSpaceControlPlatform
                 cloudflareMessage = "PID " + process.Id;
                 cloudflareDesired = true;
                 cloudflareConnections.Clear();
+                cloudflareProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
+                cloudflareDisconnectCount = 0;
+                cloudflareNetworkTimeoutCount = 0;
                 cloudflareStartedUtc = DateTime.UtcNow;
             }
             process.BeginOutputReadLine();
@@ -593,15 +603,23 @@ namespace DevSpaceControlPlatform
                     line.IndexOf("connection registered", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     cloudflareMessage = "Tunnel 已连接";
+                    var protocolMatch = Regex.Match(line ?? string.Empty, @"protocol=([^\s]+)", RegexOptions.IgnoreCase);
+                    if (protocolMatch.Success) cloudflareProtocol = protocolMatch.Groups[1].Value.Trim();
                     var index = ConnectionIndex(line);
                     if (index >= 0) cloudflareConnections.Add(index);
                 }
                 else if (line.IndexOf("connection terminated", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
+                    cloudflareDisconnectCount += 1;
                     var index = ConnectionIndex(line);
                     if (index >= 0) cloudflareConnections.Remove(index);
                     if (cloudflareConnections.Count == 0) cloudflareMessage = "Tunnel 连接已中断，等待自动恢复";
                 }
+                if (line.IndexOf("timeout: no recent network activity", StringComparison.OrdinalIgnoreCase) >= 0)
+                    cloudflareNetworkTimeoutCount += 1;
+                if (line.IndexOf("precheck", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    line.IndexOf("status=fail", StringComparison.OrdinalIgnoreCase) >= 0)
+                    cloudflareMessage = "Tunnel 网络预检失败 - " + line;
                 else if (line.IndexOf("ERR", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     line.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
                     cloudflareMessage = line;
