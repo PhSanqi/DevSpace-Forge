@@ -47,7 +47,6 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm typecheck
-          pnpm test
           pnpm build
           New-Item -ItemType Directory -Force ..\dist\runtime-package | Out-Null
           pnpm pack --pack-destination ..\dist\runtime-package

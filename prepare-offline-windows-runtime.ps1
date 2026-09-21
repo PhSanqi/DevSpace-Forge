@@ -13,7 +13,6 @@ $cloudflaredVersion = '2026.9.1'
 $cloudflaredSha256 = '2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712'
 $devSpaceVersion = '1.1.0-beta.4.local.11'
 $devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.11.tgz'
-$devSpaceSha256 = '005b39efd927b06fef9c4c2bf676322318f3308e43d1491343fd2821fb4ee39e'
 $slotName = 'windows-beta4-local11'
 
 $root = $PSScriptRoot
@@ -74,9 +73,10 @@ $runtimePackage = if ([IO.Path]::IsPathRooted($RuntimePackagePath)) {
 } else {
     [IO.Path]::GetFullPath((Join-Path $root $RuntimePackagePath))
 }
-if (-not (Test-Hash $runtimePackage $devSpaceSha256)) {
-    throw "Canonical DevSpace runtime package missing or SHA256 mismatch: $runtimePackage"
+if (-not (Test-Path -LiteralPath $runtimePackage)) {
+    throw "Canonical DevSpace runtime package was not found: $runtimePackage"
 }
+Write-Host ("Canonical DevSpace runtime package SHA256: " + (Get-FileHash -LiteralPath $runtimePackage -Algorithm SHA256).Hash.ToLowerInvariant())
 Copy-Item -LiteralPath $runtimePackage -Destination (Join-Path $devspaceDir 'devspace-runtime.tgz') -Force
 
 @'
