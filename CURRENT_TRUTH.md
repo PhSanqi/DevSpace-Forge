@@ -35,23 +35,27 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 - DevSpace local port: 17677
 - Public base URL: https://dev.sanqi.org/group
 - ControlPlatform owns the local Windows lifecycle.
-- The on-disk active runtime pointer was directly verified as
-  `windows-beta4-local12`, and that slot's package version was directly read
-  as `1.1.0-beta.4.local.12` before the current outage.
-- Do not describe Group as currently serving local.12: the Control Platform /
-  managed DevSpace process is offline, so there is no live runtime to verify
-  until service recovery completes.
+- Active runtime slot: `windows-beta4-local12`.
+- Deployed DevSpace version: `1.1.0-beta.4.local.12`.
 - Deployed cloudflared version: `2026.9.1`.
-- As of the latest 2026-09-21 check, the Group public Tunnel is offline:
-  `https://dev.sanqi.org/group/healthz` returns Cloudflare 530 and the remote
-  Group MCP connection is unavailable. The outage occurred while attempting to
-  replace the Control Platform from a command executed through the very DevSpace
-  process managed by that Control Platform: stopping the parent also terminated
-  the in-flight deployment command before an independent recovery path could
-  complete. Recovery must therefore be performed out-of-band from Group MCP.
-- The current production Control Platform executable version is Unknown until
-  out-of-band access is restored. The new P0/P2 build is independently compiled
-  and visually/test validated, but must not be claimed deployed on Group yet.
+- The production Control Platform is the validated P0/P2 build with SHA256
+  `A52E13DF7678D636B8AE57DAAF8E99E3225124C8DCAD12E613AED594798C65D4`.
+- Group local health and `https://dev.sanqi.org/group/healthz` are verified
+  HTTP 200 after the local.12 cutover, and Group MCP reconnect is verified.
+- cloudflared runs with `--protocol http2` and token-file credentials.
+- The earlier HTTP 530 incident was not a Cloudflare path-routing failure.
+  cloudflared remained connected but logged repeated
+  `127.0.0.1:17677` connection-refused / forcibly-closed origin errors while
+  the managed DevSpace process was down. The failed in-band runtime/control
+  upgrade tied its recovery command to the DevSpace process tree it was
+  stopping.
+- Runtime cutover and Control Platform replacement were subsequently completed
+  through WMI-created out-of-band processes. The runtime switch produced only a
+  brief public 502 before returning to HTTP 200, and the Control Platform
+  updater completed with `update-ok` after local health recovery.
+- Future Control Platform replacement must use
+  `update-control-platform-out-of-band.ps1` rather than an in-band managed
+  DevSpace command.
 - The pre-convergence local8 slot and cloudflared 2026.8.2 binary are retained
   only as rollback material.
 
@@ -96,10 +100,9 @@ Windows and Linux should consume builds from the same canonical runtime source.
 Platform-specific packaging differences are expected; divergent source behavior
 under the same package version is not.
 
-Linux Server is deployed and serving local.12. Windows Group's on-disk active
-slot is local.12, but Group is currently offline and the live runtime cannot be
-verified. The runtime source and release asset are canonical; dual-platform
-production serving convergence is therefore temporarily incomplete.
+Linux Server and Windows Group are both deployed and serving local.12. Their
+runtime source and release asset are canonical, and dual-platform production
+serving convergence is verified.
 
 ## Source convergence
 

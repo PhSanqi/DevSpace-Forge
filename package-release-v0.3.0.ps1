@@ -30,6 +30,7 @@ foreach ($file in @(
     'test-runtime-slot.ps1',
     'activate-runtime-slot.ps1',
     'rollback-runtime-slot.ps1',
+    'update-control-platform-out-of-band.ps1',
     'switch-v0.3.0-offline.ps1',
     'rollback-v0.3.0-offline.ps1',
     'package.json',

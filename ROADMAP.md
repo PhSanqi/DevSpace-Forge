@@ -5,9 +5,8 @@
 - Canonical ControlPlatform source is `main`.
 - Canonical DevSpace runtime source is `runtime/beta4-unified`.
 - Canonical runtime release is `1.1.0-beta.4.local.12`.
-- Server runs local.12. Group's active-slot pointer and package were directly
-  verified as local.12 before the current Control Platform outage; Group is not
-  presently serving, so live/public local.12 verification remains pending.
+- Server and Group both run local.12 and have passed local/public health
+  verification after the Windows out-of-band recovery.
 - Group cloudflared is 2026.9.1.
 - Legacy Linux 7676/8787 control service is stopped and disabled; rollback
   material remains available without participating in the live path.
@@ -29,9 +28,9 @@ It also adds persisted recoverable mutation receipts via `operation_id` and
 reconnect-safe Job discovery by canonical workspace root. This borrows the
 useful part of WebCodex Jobs without introducing a central Runner service.
 
-Operational follow-up: Group no longer needs a slot switch; its local.12 pointer
-is already active on disk. It needs out-of-band Control Platform recovery and
-then local/public local.12 verification.
+Operational follow-up completed: the Group runtime switch was relaunched from a
+WMI-created process outside the managed DevSpace process tree, then the same
+out-of-band pattern safely replaced the Control Platform executable.
 
 ## Phase C — Workflow Session evidence
 
@@ -89,17 +88,14 @@ APIs. Local credential reveal must remain an explicit local-only action.
 
 ## Immediate operational follow-up
 
-1. Recover Windows Group out-of-band from Group MCP; the current public route
-   is HTTP 530 and Group MCP cannot recover its own stopped parent process.
-2. Confirm the production Control Platform executable state, then deploy the
-   validated P0/P2 build containing Runtime Console if it was not replaced.
-3. Re-run Group local readiness, Tunnel diagnostics and public MCP smoke against
-   the already-selected `windows-beta4-local12` runtime.
-4. Add a safe Control Platform self-update/restart helper that runs outside the
-   managed DevSpace Job Object so future upgrades cannot terminate their own
-   recovery command.
-5. Once both platforms are verified serving local.12, cut the next release
-   package/tag.
+1. Use the out-of-band Control Platform updater for future Windows upgrades.
+   It launches the replacement worker through WMI so the recovery command is
+   outside the managed DevSpace Job Object and can roll back the executable if
+   local health does not recover.
+2. Cut the next release package/tag from the now-converged local.12 baseline.
+3. Continue with Phase C Workflow Session evidence, then fold that evidence
+   into the existing Runtime Console rather than adding another management
+   surface.
 
 ## Deferred
 

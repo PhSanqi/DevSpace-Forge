@@ -51,6 +51,7 @@ Copy-Item -LiteralPath $payload -Destination (Join-Path $stage 'payload\runtime.
 foreach ($file in @('README.md', 'README.zh-CN.md', 'LICENSE')) {
     Copy-Item (Join-Path $root $file) $stage -Force
 }
+Copy-Item (Join-Path $root 'update-control-platform-out-of-band.ps1') $stage -Force
 
 $sevenZip = $null
 $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
