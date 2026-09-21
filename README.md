@@ -56,16 +56,19 @@ The Windows ZIP is a full offline runtime bundle. `Setup.exe` expands the bundle
 - the local project root ChatGPT may access;
 - the local DevSpace port, normally `7677`;
 - an optional Tunnel name used only as a local label;
-- the Cloudflare public hostname, for example `devspace.example.com`;
+- the Cloudflare Tunnel origin hostname, for example `personal-origin.sanqi.org`;
+- an optional unified public endpoint, for example `dev.sanqi.org/personal`. If omitted, the Tunnel origin hostname is used directly;
 - the Cloudflare Remote Tunnel token.
 
 Before saving, Setup shows the addresses you need:
 
 ```text
 Cloudflare local Origin   http://127.0.0.1:7677
-Local MCP                 http://127.0.0.1:7677/mcp
-Public MCP                https://devspace.example.com/mcp
+Local MCP                 http://127.0.0.1:7677/personal/mcp
+Public MCP                https://dev.sanqi.org/personal/mcp
 ```
+
+For path-routed multi-machine deployments, the Tunnel origin hostname and the unified public endpoint are intentionally different values. For example, the Cloudflare Published Application may use `personal-origin.sanqi.org -> http://127.0.0.1:7677`, while MCP clients use `https://dev.sanqi.org/personal/mcp`. Setup writes the origin hostname into DevSpace `allowedHosts` and uses the unified endpoint as the canonical public base.
 
 After setup, `DevSpaceControlPlatform.exe` manages DevSpace and cloudflared. The Tunnel token is stored separately from ordinary settings and project Git history.
 

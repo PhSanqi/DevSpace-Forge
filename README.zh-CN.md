@@ -56,16 +56,19 @@ Windows ZIP 是完整离线 Runtime 包。`Setup.exe` 会自动展开包内 Runt
 - ChatGPT 可以访问的本地项目目录；
 - 本地 DevSpace 端口，通常使用 `7677`；
 - Tunnel 名称，可选，只用于本地标记；
-- Cloudflare public hostname，例如 `devspace.example.com`；
+- Cloudflare Tunnel origin hostname，例如 `personal-origin.sanqi.org`；
+- 可选的统一公网 endpoint，例如 `dev.sanqi.org/personal`。留空时直接使用 Tunnel origin hostname；
 - Cloudflare Remote Tunnel token。
 
 保存之前，Setup 会直接显示：
 
 ```text
 Cloudflare 本地 Origin   http://127.0.0.1:7677
-本地 MCP                 http://127.0.0.1:7677/mcp
-公网 MCP                 https://devspace.example.com/mcp
+本地 MCP                 http://127.0.0.1:7677/personal/mcp
+公网 MCP                 https://dev.sanqi.org/personal/mcp
 ```
+
+多机器通过统一域名按路径暴露时，Tunnel origin hostname 与统一公网 endpoint 是两个值。例如 Cloudflare Published Application 使用 `personal-origin.sanqi.org -> http://127.0.0.1:7677`，而 MCP 客户端使用 `https://dev.sanqi.org/personal/mcp`。Setup 会自动把 origin hostname 写入 DevSpace `allowedHosts`，并把统一 endpoint 写成 canonical public base。
 
 配置完成后会启动 `DevSpaceControlPlatform.exe`，之后由 Control 统一管理 DevSpace 和 cloudflared。Tunnel token 独立保存，不进入普通 settings 历史和项目 Git。
 

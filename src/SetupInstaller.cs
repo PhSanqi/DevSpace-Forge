@@ -93,6 +93,42 @@ namespace DevSpaceControlPlatform
             return PublicEndpoint.NormalizeHostAndPath(value);
         }
 
+        public static string NormalizeOriginHostname(string value)
+        {
+            var normalized = PublicEndpoint.NormalizeHostAndPath(value);
+            if (normalized.Length == 0) return string.Empty;
+            if (normalized.IndexOf('/') >= 0)
+                throw new InvalidDataException("Cloudflare Tunnel origin hostname 只能填写域名，不能包含路径。");
+            return normalized;
+        }
+
+        public static string ResolvePublicEndpoint(string originHostname, string publicEndpoint)
+        {
+            var origin = NormalizeOriginHostname(originHostname);
+            if (origin.Length == 0)
+                throw new InvalidDataException("请填写 Cloudflare Tunnel origin hostname。");
+            return string.IsNullOrWhiteSpace(publicEndpoint)
+                ? origin
+                : NormalizeHostname(publicEndpoint);
+        }
+
+        public static string ConfigureRemoteEndpoints(
+            PlatformSettings settings,
+            string originHostname,
+            string publicEndpoint)
+        {
+            if (settings == null) throw new ArgumentNullException("settings");
+            var origin = NormalizeOriginHostname(originHostname);
+            if (origin.Length == 0)
+                throw new InvalidDataException("请填写 Cloudflare Tunnel origin hostname。");
+            var endpoint = ResolvePublicEndpoint(origin, publicEndpoint);
+            if (endpoint.Length == 0)
+                throw new InvalidDataException("统一公网 endpoint 无效。");
+            settings.AllowedHosts = new List<string> { origin };
+            settings.FixedHostname = endpoint;
+            return endpoint;
+        }
+
         public static string LocalOrigin(int port)
         {
             ValidatePort(port);
@@ -217,7 +253,8 @@ namespace DevSpaceControlPlatform
             string allowedRoot,
             int port,
             string tunnelName,
-            string hostname,
+            string originHostname,
+            string publicEndpoint,
             string tunnelToken,
             bool autoStart)
         {
@@ -229,9 +266,9 @@ namespace DevSpaceControlPlatform
             if (string.IsNullOrWhiteSpace(allowedRoot) || !Directory.Exists(allowedRoot))
                 throw new DirectoryNotFoundException("Allowed Root 不存在：" + allowedRoot);
             var normalizedAllowedRoot = Path.GetFullPath(allowedRoot);
-            var normalizedHostname = NormalizeHostname(hostname);
-            if (normalizedHostname.Length == 0)
-                throw new InvalidDataException("请填写 Cloudflare public hostname。");
+            var normalizedOriginHostname = NormalizeOriginHostname(originHostname);
+            if (normalizedOriginHostname.Length == 0)
+                throw new InvalidDataException("请填写 Cloudflare Tunnel origin hostname。");
 
             var token = (tunnelToken ?? string.Empty).Trim();
             if (token.Length == 0 && !CloudflareTunnelSecretStore.HasToken(root))
@@ -246,7 +283,10 @@ namespace DevSpaceControlPlatform
             settings.LocalPort = port;
             settings.TunnelMode = "Remote";
             settings.NamedTunnelIdOrName = (tunnelName ?? string.Empty).Trim();
-            settings.FixedHostname = normalizedHostname;
+            var normalizedPublicEndpoint = ConfigureRemoteEndpoints(
+                settings,
+                normalizedOriginHostname,
+                publicEndpoint);
             settings.AutoStart = autoStart;
             settings.ToolMode = "codex";
             settings.ReviewUiEnabled = true;
@@ -263,7 +303,7 @@ namespace DevSpaceControlPlatform
 
             var packageRoot = RuntimeResolver.ResolveDevSpacePackageRoot(root);
             var version = DevSpaceVersion.FromPackageJson(Path.Combine(packageRoot, "package.json"));
-            var publicBaseUrl = PublicEndpoint.BaseUrl(normalizedHostname);
+            var publicBaseUrl = PublicEndpoint.BaseUrl(normalizedPublicEndpoint);
             var configDirectory = Path.Combine(root, "state", "devspace-config");
             var plan = DevSpaceConfiguration.BuildPlan(
                 version,
@@ -279,8 +319,8 @@ namespace DevSpaceControlPlatform
             return new SetupInstallResult
             {
                 LocalOrigin = LocalOrigin(port),
-                LocalMcpUrl = LocalMcpUrl(port, normalizedHostname),
-                PublicMcpUrl = PublicMcpUrl(normalizedHostname),
+                LocalMcpUrl = LocalMcpUrl(port, normalizedPublicEndpoint),
+                PublicMcpUrl = PublicMcpUrl(normalizedPublicEndpoint),
                 OwnerPassword = EnsureOwnerAuth(configDirectory),
                 DevSpaceVersion = versionText
             };

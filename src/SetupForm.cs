@@ -13,6 +13,7 @@ namespace DevSpaceControlPlatform
         private readonly NumericUpDown portBox = new NumericUpDown();
         private readonly TextBox tunnelNameBox = new TextBox();
         private readonly TextBox hostnameBox = new TextBox();
+        private readonly TextBox publicEndpointBox = new TextBox();
         private readonly TextBox tokenBox = new TextBox();
         private readonly Label tokenHintLabel = new Label();
         private readonly CheckBox autoStartBox = new CheckBox();
@@ -33,7 +34,7 @@ namespace DevSpaceControlPlatform
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = true;
-            ClientSize = new Size(760, 770);
+            ClientSize = new Size(760, 880);
             Font = new Font("Microsoft YaHei UI", 9F);
 
             var title = new Label
@@ -48,66 +49,80 @@ namespace DevSpaceControlPlatform
             var intro = new Label
             {
                 Text = "这个 Release 已经包含 Node.js、DevSpace Runtime 和 cloudflared。\r\n" +
-                       "这里不再下载运行依赖；只需要填写项目目录、端口、Cloudflare hostname 和 Tunnel token。",
+                       "这里不再下载运行依赖；只需要填写项目目录、端口、Tunnel origin hostname 和 token。\r\n" +
+                       "统一公网 endpoint 可选；多机器路径路由时填写例如 dev.sanqi.org/personal。",
                 Location = new Point(26, 66),
-                Size = new Size(700, 52),
+                Size = new Size(700, 68),
                 ForeColor = Color.DimGray
             };
             Controls.Add(intro);
 
-            bundleStatus.SetBounds(26, 120, 700, 30);
+            bundleStatus.SetBounds(26, 136, 700, 30);
             Controls.Add(bundleStatus);
 
-            AddLabel("允许访问的项目目录", 26, 166);
-            rootBox.SetBounds(26, 192, 600, 27);
+            AddLabel("允许访问的项目目录", 26, 182);
+            rootBox.SetBounds(26, 208, 600, 27);
             Controls.Add(rootBox);
-            var browse = new Button { Text = "选择…", Location = new Point(638, 190), Size = new Size(92, 30) };
+            var browse = new Button { Text = "选择…", Location = new Point(638, 206), Size = new Size(92, 30) };
             browse.Click += delegate { BrowseRoot(); };
             Controls.Add(browse);
 
-            AddLabel("本地端口", 26, 238);
-            portBox.SetBounds(26, 264, 130, 27);
+            AddLabel("本地端口", 26, 254);
+            portBox.SetBounds(26, 280, 130, 27);
             portBox.Minimum = 1;
             portBox.Maximum = 65535;
             portBox.Value = 7677;
             portBox.ValueChanged += delegate { RefreshLinks(); };
             Controls.Add(portBox);
 
-            AddLabel("Cloudflare Tunnel 名称（可选，仅记录）", 190, 238);
-            tunnelNameBox.SetBounds(190, 264, 440, 27);
+            AddLabel("Cloudflare Tunnel 名称（可选，仅记录）", 190, 254);
+            tunnelNameBox.SetBounds(190, 280, 440, 27);
             Controls.Add(tunnelNameBox);
 
-            AddLabel("Cloudflare public hostname / 隧道域名", 26, 310);
-            hostnameBox.SetBounds(26, 336, 604, 27);
+            AddLabel("Cloudflare Tunnel origin hostname / 隧道域名", 26, 326);
+            hostnameBox.SetBounds(26, 352, 604, 27);
             hostnameBox.TextChanged += delegate { RefreshLinks(); };
             Controls.Add(hostnameBox);
             var hostNote = new Label
             {
-                Text = "例如 devspace.example.com。Remote Tunnel 的 Tunnel 名称不参与本机运行；实际需要的是 hostname + token。",
-                Location = new Point(26, 366),
-                Size = new Size(700, 38),
+                Text = "例如 personal-origin.sanqi.org；必须与 Cloudflare Published Application 的 hostname 一致。",
+                Location = new Point(26, 382),
+                Size = new Size(700, 28),
                 ForeColor = Color.DimGray
             };
             Controls.Add(hostNote);
 
-            AddLabel("Cloudflare Remote Tunnel token", 26, 410);
-            tokenBox.SetBounds(26, 436, 604, 27);
+            AddLabel("统一公网 endpoint（可选）", 26, 416);
+            publicEndpointBox.SetBounds(26, 442, 604, 27);
+            publicEndpointBox.TextChanged += delegate { RefreshLinks(); };
+            Controls.Add(publicEndpointBox);
+            var publicNote = new Label
+            {
+                Text = "例如 dev.sanqi.org/personal；留空则直接使用上面的 Tunnel origin hostname。",
+                Location = new Point(26, 472),
+                Size = new Size(700, 28),
+                ForeColor = Color.DimGray
+            };
+            Controls.Add(publicNote);
+
+            AddLabel("Cloudflare Remote Tunnel token", 26, 506);
+            tokenBox.SetBounds(26, 532, 604, 27);
             tokenBox.UseSystemPasswordChar = true;
             Controls.Add(tokenBox);
 
-            tokenHintLabel.SetBounds(26, 467, 700, 24);
+            tokenHintLabel.SetBounds(26, 563, 700, 24);
             tokenHintLabel.ForeColor = Color.DimGray;
             Controls.Add(tokenHintLabel);
 
             autoStartBox.Text = "登录 Windows 后自动启动 DevSpace Control";
-            autoStartBox.SetBounds(26, 495, 370, 28);
+            autoStartBox.SetBounds(26, 591, 370, 28);
             autoStartBox.Checked = true;
             Controls.Add(autoStartBox);
 
             var links = new GroupBox
             {
                 Text = "安装后使用的地址",
-                Location = new Point(26, 530),
+                Location = new Point(26, 626),
                 Size = new Size(704, 188)
             };
             AddReadOnlyRow(links, "Cloudflare 本地 Origin", localOriginBox, 26);
@@ -117,15 +132,15 @@ namespace DevSpaceControlPlatform
             Controls.Add(links);
 
             installButton.Text = "保存配置并启动 Control";
-            installButton.SetBounds(26, 724, 220, 38);
+            installButton.SetBounds(26, 820, 220, 38);
             installButton.Click += delegate { Install(); };
             Controls.Add(installButton);
 
-            var copyPublic = new Button { Text = "复制公网 MCP", Location = new Point(260, 724), Size = new Size(130, 38) };
+            var copyPublic = new Button { Text = "复制公网 MCP", Location = new Point(260, 820), Size = new Size(130, 38) };
             copyPublic.Click += delegate { CopyIfPresent(publicMcpBox.Text); };
             Controls.Add(copyPublic);
 
-            var copyOwner = new Button { Text = "复制 Owner password", Location = new Point(400, 724), Size = new Size(175, 38) };
+            var copyOwner = new Button { Text = "复制 Owner password", Location = new Point(400, 820), Size = new Size(175, 38) };
             copyOwner.Click += delegate { CopyIfPresent(ownerBox.Text); };
             Controls.Add(copyOwner);
 
@@ -162,7 +177,13 @@ namespace DevSpaceControlPlatform
                     : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                 portBox.Value = Math.Max(portBox.Minimum, Math.Min(portBox.Maximum, settings.LocalPort));
                 tunnelNameBox.Text = settings.NamedTunnelIdOrName ?? string.Empty;
-                hostnameBox.Text = settings.FixedHostname ?? string.Empty;
+                var origin = settings.AllowedHosts != null && settings.AllowedHosts.Count > 0
+                    ? settings.AllowedHosts[0]
+                    : (settings.FixedHostname ?? string.Empty);
+                hostnameBox.Text = origin;
+                publicEndpointBox.Text = string.Equals(origin, settings.FixedHostname ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : (settings.FixedHostname ?? string.Empty);
                 autoStartBox.Checked = exists ? settings.AutoStart : true;
                 if (CloudflareTunnelSecretStore.HasToken(platformRoot))
                     tokenHintLabel.Text = "已有受保护 Token；留空会继续使用现有 Token。";
@@ -216,7 +237,12 @@ namespace DevSpaceControlPlatform
             var port = Decimal.ToInt32(portBox.Value);
             localOriginBox.Text = SetupInstaller.LocalOrigin(port);
             localMcpBox.Text = SetupInstaller.LocalMcpUrl(port);
-            try { publicMcpBox.Text = SetupInstaller.PublicMcpUrl(hostnameBox.Text); }
+            var endpoint = string.IsNullOrWhiteSpace(publicEndpointBox.Text) ? hostnameBox.Text : publicEndpointBox.Text;
+            try
+            {
+                localMcpBox.Text = SetupInstaller.LocalMcpUrl(port, SetupInstaller.ResolvePublicEndpoint(hostnameBox.Text, publicEndpointBox.Text));
+                publicMcpBox.Text = SetupInstaller.PublicMcpUrl(endpoint);
+            }
             catch { publicMcpBox.Text = string.Empty; }
         }
 
@@ -235,6 +261,7 @@ namespace DevSpaceControlPlatform
                     Decimal.ToInt32(portBox.Value),
                     tunnelNameBox.Text,
                     hostnameBox.Text,
+                    publicEndpointBox.Text,
                     tokenBox.Text,
                     autoStartBox.Checked);
                 localOriginBox.Text = result.LocalOrigin;

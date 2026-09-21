@@ -133,6 +133,15 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("http://127.0.0.1:7677/group/mcp", SetupInstaller.LocalMcpUrl(7677, "devspace.example.com/group"), "path local MCP URL");
         AssertEqual("https://devspace.example.com/mcp", SetupInstaller.PublicMcpUrl("devspace.example.com"), "public MCP URL");
         AssertEqual("https://devspace.example.com/group/mcp", SetupInstaller.PublicMcpUrl("devspace.example.com/group"), "path public MCP URL");
+        AssertEqual("personal-origin.sanqi.org", SetupInstaller.NormalizeOriginHostname("https://personal-origin.sanqi.org"), "origin hostname");
+        AssertEqual("personal-origin.sanqi.org", SetupInstaller.ResolvePublicEndpoint("personal-origin.sanqi.org", ""), "simple public endpoint fallback");
+        AssertEqual("dev.sanqi.org/personal", SetupInstaller.ResolvePublicEndpoint("personal-origin.sanqi.org", "https://dev.sanqi.org/personal/mcp"), "gateway public endpoint");
+        var endpointSettings = PlatformSettings.CreateDefault(Path.GetTempPath());
+        AssertEqual("dev.sanqi.org/personal", SetupInstaller.ConfigureRemoteEndpoints(endpointSettings, "personal-origin.sanqi.org", "dev.sanqi.org/personal"), "configured public endpoint");
+        AssertEqual("dev.sanqi.org/personal", endpointSettings.FixedHostname, "configured fixed endpoint");
+        AssertEqual(1, endpointSettings.AllowedHosts.Count, "configured origin host count");
+        AssertEqual("personal-origin.sanqi.org", endpointSettings.AllowedHosts[0], "configured origin allow host");
+        AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeOriginHostname("personal-origin.sanqi.org/path"); });
         AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(200), "setup accepts HTTP 200");
         AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(302), "setup accepts Access redirect");
         AssertTrue(SetupInstaller.IsAcceptableEndpointStatus(401), "setup accepts auth challenge");

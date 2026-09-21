@@ -66,38 +66,30 @@ jobs:
         with:
           path: control
 
-      - name: Checkout Linux runtime
-        uses: actions/checkout@v4
-        with:
-          ref: linux/context-intelligence
-          path: linux-runtime
-
-      - name: Setup pnpm and Node
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.25.0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: linux-runtime/pnpm-lock.yaml
-
-      - name: Build validated Linux runtime package
-        working-directory: linux-runtime
+      - name: Download canonical Linux runtime package
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          pnpm install --frozen-lockfile
-          pnpm typecheck
-          pnpm test
-          pnpm build
-          mkdir -p ../control/dist/linux-runtime
-          pnpm pack --pack-destination ../control/dist/linux-runtime
+          mkdir -p control/dist/linux-runtime
+          gh release download runtime-1.1.0-beta.4.local.11 \
+            --repo '${{ github.repository }}' \
+            --pattern 'waishnav-devspace-1.1.0-beta.4.local.11.tgz' \
+            --pattern 'waishnav-devspace-1.1.0-beta.4.local.11.tgz.sha256.txt' \
+            --dir control/dist/linux-runtime
+
+      - name: Verify Linux runtime package
+        run: |
+          cd control/dist/linux-runtime
+          expected="$(awk '{print $1}' waishnav-devspace-1.1.0-beta.4.local.11.tgz.sha256.txt)"
+          actual="$(sha256sum waishnav-devspace-1.1.0-beta.4.local.11.tgz | awk '{print $1}')"
+          test "$actual" = "$expected"
+          echo "Linux runtime package SHA256 $actual"
 
       - name: Build Linux release package
         working-directory: control
         run: |
           version="${GITHUB_REF_NAME#v}"
-          runtime_package="$(find dist/linux-runtime -maxdepth 1 -type f -name '*.tgz' | head -n 1)"
+          runtime_package="dist/linux-runtime/waishnav-devspace-1.1.0-beta.4.local.11.tgz"
           test -n "$runtime_package"
           bash ./package-release-linux.sh "$version" "$runtime_package"
 
