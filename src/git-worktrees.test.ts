@@ -9,8 +9,10 @@ import { promisify } from "node:util";
 import { Result, type Result as BetterResult } from "better-result";
 import {
   cleanupManagedWorktrees,
+  inspectManagedWorktreeHygiene,
   ManagedWorktreeError,
   managedWorktreeRecoveryRef,
+  pruneManagedWorktreeHygiene,
   restoreManagedWorktree,
 } from "./git-worktrees.js";
 import {
@@ -127,6 +129,67 @@ test("non-ignored untracked files keep a stale worktree alive", async (t) => {
   assert.deepEqual(result.skipped, [{ workspaceId: "ws_untracked", reason: "untracked_files" }]);
   assert.equal(await pathExists(fixture.worktreePath), true);
   assert.ok(fixture.store.getSession("ws_untracked"));
+});
+
+test("explicit hygiene inspection blocks untracked work before prune", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_hygiene_untracked");
+  await writeFile(join(fixture.worktreePath, "important.txt"), "keep me\n");
+
+  const inspected = unwrap(await inspectManagedWorktreeHygiene({
+    workspaceId: "ws_hygiene_untracked",
+    store: fixture.store,
+    worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root],
+  }));
+  assert.equal(inspected.disposition, "blocked_untracked");
+  assert.equal(inspected.prunable, false);
+  assert.equal(inspected.hasUntrackedFiles, true);
+
+  const pruned = unwrap(await pruneManagedWorktreeHygiene({
+    workspaceId: "ws_hygiene_untracked",
+    store: fixture.store,
+    worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root],
+  }));
+  assert.equal(pruned.outcome, "blocked_untracked");
+  assert.equal(await pathExists(fixture.worktreePath), true);
+  assert.equal(fixture.store.getSession("ws_hygiene_untracked")?.status, "active");
+});
+
+test("explicit hygiene prune snapshots tracked work and is idempotent while pruned", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_hygiene_dirty");
+  await writeFile(join(fixture.worktreePath, "README.md"), "finish safely\n");
+
+  const inspected = unwrap(await inspectManagedWorktreeHygiene({
+    workspaceId: "ws_hygiene_dirty",
+    store: fixture.store,
+    worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root],
+  }));
+  assert.equal(inspected.disposition, "tracked_changes");
+  assert.equal(inspected.recoveryKind, "stash");
+  assert.equal(inspected.prunable, true);
+
+  const first = unwrap(await pruneManagedWorktreeHygiene({
+    workspaceId: "ws_hygiene_dirty",
+    store: fixture.store,
+    worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root],
+  }));
+  assert.equal(first.outcome, "removed");
+  assert.equal(first.recoveryKind, "stash");
+  assert.equal(first.recoveryRef, managedWorktreeRecoveryRef("ws_hygiene_dirty"));
+  assert.equal(await pathExists(fixture.worktreePath), false);
+
+  const replay = unwrap(await pruneManagedWorktreeHygiene({
+    workspaceId: "ws_hygiene_dirty",
+    store: fixture.store,
+    worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root],
+  }));
+  assert.equal(replay.outcome, "already_pruned");
+  assert.equal(replay.recoveryKind, "stash");
+  assert.equal(await pathExists(fixture.worktreePath), false);
 });
 
 test("ignored worktree files are discarded during cleanup", async (t) => {

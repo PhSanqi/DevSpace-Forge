@@ -28,6 +28,7 @@ import {
   waitForExpressMiddleware,
 } from "./server.js";
 import { closeDurableJobManager } from "./tool-surfaces/jobs.js";
+import { closeWorkflowSessionManager } from "./tool-surfaces/workflows.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
@@ -86,6 +87,12 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "job_cancel",
         "job_wait",
         "devspace_info",
+        "workspace_hygiene",
+        "workflow_start",
+        "workflow_list",
+        "workflow_status",
+        "workflow_record",
+        "workflow_finish",
       ],
     },
     {
@@ -106,6 +113,12 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "job_cancel",
         "job_wait",
         "devspace_info",
+        "workspace_hygiene",
+        "workflow_start",
+        "workflow_list",
+        "workflow_status",
+        "workflow_record",
+        "workflow_finish",
       ],
     },
   ];
@@ -155,6 +168,77 @@ test("Codex mutation operation_id safely replays an identical lost response", as
   assert.equal(structuredContent(replayed).operation_replayed, true);
   assert.equal(structuredContent(replayed).operation_id, operationId);
   assert.equal(await readFile(join(context.project, "replay.txt"), "utf8"), "once\n");
+});
+
+test("workspace hygiene prunes recoverably and replays a lost response", async (t) => {
+  const context = await fixture(t, { git: true, toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: context.project, mode: "worktree" },
+  }));
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const changed = await context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: "hygiene-edit-0001",
+      patch: [
+        "*** Begin Patch",
+        "*** Update File: README.md",
+        "@@",
+        "-hello",
+        "+hello from recoverable hygiene",
+        "*** End Patch",
+      ].join("\n"),
+    },
+  });
+  assert.notEqual(changed.isError, true);
+
+  const inspected = structuredContent(await context.client.callTool({
+    name: "workspace_hygiene",
+    arguments: { workspace_id: workspaceId, action: "inspect" },
+  }));
+  const inspection = JSON.parse(String(inspected.result)) as {
+    disposition: string;
+    prunable: boolean;
+    recoveryKind?: string;
+  };
+  assert.equal(inspection.disposition, "tracked_changes");
+  assert.equal(inspection.prunable, true);
+  assert.equal(inspection.recoveryKind, "stash");
+
+  const pruneRequest = {
+    name: "workspace_hygiene",
+    arguments: {
+      workspace_id: workspaceId,
+      action: "prune",
+      operation_id: "hygiene-prune-0001",
+    },
+  };
+  const first = structuredContent(await context.client.callTool(pruneRequest));
+  const replay = structuredContent(await context.client.callTool(pruneRequest));
+  assert.equal(first.operation_replayed, false);
+  assert.equal(replay.operation_replayed, true);
+  assert.equal(first.result, replay.result);
+  const result = JSON.parse(String(first.result)) as {
+    outcome: string;
+    recoveryKind?: string;
+    recoveryRef?: string;
+  };
+  assert.equal(result.outcome, "removed");
+  assert.equal(result.recoveryKind, "stash");
+  assert.match(result.recoveryRef ?? "", /^refs\/devspace\/recovery\/ws_/);
+
+  const restored = await context.client.callTool({
+    name: "read",
+    arguments: { workspace_id: workspaceId, path: "README.md" },
+  });
+  assert.notEqual(restored.isError, true);
+  const restoredText = (restored.content as Array<{ type: string; text?: string }>)
+    .find((item) => item.type === "text")?.text ?? "";
+  assert.match(restoredText, /hello from recoverable hygiene/);
 });
 
 test("durable job_start operation_id replays the same job after a lost response", async (t) => {
@@ -261,6 +345,81 @@ test("durable job_cancel operation_id safely replays an identical lost response"
   assert.equal(first.operation_replayed, false);
   assert.equal(replay.operation_replayed, true);
   assert.equal(first.result, replay.result);
+});
+
+test("workflow evidence survives reconnect by canonical workspace root", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const first = structuredContent(
+    await callOpen(context.client, context.project, "workflow-before"),
+  );
+  const second = structuredContent(
+    await callOpen(context.client, context.project, "workflow-after"),
+  );
+  assert.notEqual(first.workspace_id, second.workspace_id);
+
+  const startRequest = {
+    name: "workflow_start",
+    arguments: {
+      workspace_id: first.workspace_id,
+      operation_id: "workflow-start-retry-0001",
+      task_intent: "Prove reconnect-safe workflow evidence.",
+    },
+  };
+  const started = structuredContent(await context.client.callTool(startRequest));
+  const startReplay = structuredContent(await context.client.callTool(startRequest));
+  assert.equal(started.operation_replayed, false);
+  assert.equal(startReplay.operation_replayed, true);
+  assert.equal(started.result, startReplay.result);
+  const workflow = JSON.parse(String(started.result)) as { id: string };
+
+  const recordRequest = {
+    name: "workflow_record",
+    arguments: {
+      workspace_id: second.workspace_id,
+      workflow_id: workflow.id,
+      operation_id: "workflow-record-retry-0001",
+      validation_status: "pass",
+      validation_summary: "Reconnected workspace can append validation evidence.",
+      validation_run_id: "run_reconnect_workflow",
+      review_ref: "refs/devspace/review/test",
+    },
+  };
+  const recorded = structuredContent(await context.client.callTool(recordRequest));
+  const recordReplay = structuredContent(await context.client.callTool(recordRequest));
+  assert.equal(recorded.operation_replayed, false);
+  assert.equal(recordReplay.operation_replayed, true);
+  assert.equal(recorded.result, recordReplay.result);
+  const recordedWorkflow = JSON.parse(String(recorded.result)) as {
+    validation: Array<{ runId?: string }>;
+    reviewRef?: string;
+  };
+  assert.equal(recordedWorkflow.validation.length, 1);
+  assert.equal(recordedWorkflow.validation.at(-1)?.runId, "run_reconnect_workflow");
+  assert.equal(recordedWorkflow.reviewRef, "refs/devspace/review/test");
+
+  const finishRequest = {
+    name: "workflow_finish",
+    arguments: {
+      workspace_id: second.workspace_id,
+      workflow_id: workflow.id,
+      operation_id: "workflow-finish-retry-0001",
+      handoff_summary: "Reconnect-safe workflow evidence is complete.",
+    },
+  };
+  const finished = structuredContent(await context.client.callTool(finishRequest));
+  const finishReplay = structuredContent(await context.client.callTool(finishRequest));
+  assert.equal(finished.operation_replayed, false);
+  assert.equal(finishReplay.operation_replayed, true);
+  assert.equal(finished.result, finishReplay.result);
+  const finishedWorkflow = JSON.parse(String(finished.result)) as {
+    status: string;
+    handoffSummary?: string;
+  };
+  assert.equal(finishedWorkflow.status, "completed");
+  assert.equal(
+    finishedWorkflow.handoffSummary,
+    "Reconnect-safe workflow evidence is complete.",
+  );
 });
 
 test("model-facing tool schemas use snake_case recursively", async (t) => {
@@ -1405,6 +1564,7 @@ async function fixture(
     await client.close();
     await server.close();
     closeDurableJobManager(config.stateDir);
+    closeWorkflowSessionManager(config.stateDir);
     closeOperationReceiptManager(config.stateDir);
     store.close();
   };

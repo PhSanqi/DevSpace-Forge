@@ -14,8 +14,12 @@ import type { ServerConfig } from "./config.js";
 import {
   createManagedWorktree,
   discardRestoredManagedWorktree,
+  inspectManagedWorktreeHygiene as inspectManagedWorktree,
   ManagedWorktreeError,
+  pruneManagedWorktreeHygiene as pruneManagedWorktree,
   restoreManagedWorktree,
+  type ManagedWorktreeHygieneInspection,
+  type ManagedWorktreeHygieneResult,
   type ManagedWorktreeFeatureError,
 } from "./git-worktrees.js";
 import {
@@ -391,6 +395,55 @@ export class WorkspaceRegistry {
     this.rememberWorkspace(restoredWorkspace);
 
     return restoredWorkspace;
+  }
+
+  async inspectManagedWorktreeHygiene(
+    workspaceId: string,
+  ): Promise<BetterResult<ManagedWorktreeHygieneInspection, ManagedWorktreeFeatureError>> {
+    if (!this.store) {
+      return Result.err(new ManagedWorktreeError({
+        code: "WORKTREE_INVALID_STATE",
+        workspaceId,
+        operation: "inspect_hygiene",
+        message: "Managed worktree hygiene requires persistent workspace state.",
+      }));
+    }
+    return inspectManagedWorktree({
+      workspaceId,
+      store: this.store,
+      worktreeRoot: this.config.worktreeRoot,
+      allowedRoots: this.config.allowedRoots,
+    });
+  }
+
+  async pruneManagedWorktreeHygiene(
+    workspaceId: string,
+  ): Promise<BetterResult<ManagedWorktreeHygieneResult, ManagedWorktreeFeatureError>> {
+    if (!this.store) {
+      return Result.err(new ManagedWorktreeError({
+        code: "WORKTREE_INVALID_STATE",
+        workspaceId,
+        operation: "prune_hygiene",
+        message: "Managed worktree hygiene requires persistent workspace state.",
+      }));
+    }
+    const result = await pruneManagedWorktree({
+      workspaceId,
+      store: this.store,
+      worktreeRoot: this.config.worktreeRoot,
+      allowedRoots: this.config.allowedRoots,
+    });
+    if (
+      result.isOk()
+      && (
+        result.value.outcome === "removed"
+        || result.value.outcome === "missing"
+        || result.value.outcome === "already_pruned"
+      )
+    ) {
+      this.workspaces.delete(workspaceId);
+    }
+    return result;
   }
 
   private async ensurePrunedWorkspaceRestored(

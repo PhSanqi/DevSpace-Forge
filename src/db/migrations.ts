@@ -47,6 +47,11 @@ const migrations: Migration[] = [
     name: "local-agent-turns",
     up: migrateLocalAgentTurns,
   },
+  {
+    version: 9,
+    name: "workflow-sessions",
+    up: migrateWorkflowSessions,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -286,6 +291,35 @@ function migrateLocalAgentTurns(sqlite: Database.Database): void {
 
     create index if not exists local_agent_turns_status_idx
       on local_agent_turns(status);
+  `);
+}
+
+function migrateWorkflowSessions(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists workflow_sessions (
+      id text primary key,
+      workspace_session_id text not null,
+      workspace_root text not null,
+      workspace_mode text not null,
+      source_root text,
+      base_ref text,
+      base_sha text,
+      managed_worktree text not null default 'false',
+      task_intent text not null,
+      status text not null default 'active',
+      validation_json text not null default '[]',
+      review_ref text,
+      handoff_summary text,
+      created_at text not null,
+      updated_at text not null,
+      completed_at text
+    );
+
+    create index if not exists workflow_sessions_workspace_root_idx
+      on workflow_sessions(workspace_root, updated_at desc);
+
+    create index if not exists workflow_sessions_status_idx
+      on workflow_sessions(status, updated_at desc);
   `);
 }
 

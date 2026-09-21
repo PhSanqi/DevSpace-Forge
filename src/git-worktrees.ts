@@ -80,6 +80,42 @@ export interface ManagedWorktreeCleanupResult {
   }>;
 }
 
+export type ManagedWorktreeHygieneDisposition =
+  | "not_managed"
+  | "already_pruned"
+  | "missing"
+  | "blocked_untracked"
+  | "clean"
+  | "tracked_changes"
+  | "diverged_head";
+
+export interface ManagedWorktreeHygieneInspection {
+  workspaceId: string;
+  workspaceRoot: string;
+  status: WorkspaceSession["status"];
+  disposition: ManagedWorktreeHygieneDisposition;
+  prunable: boolean;
+  hasTrackedChanges: boolean;
+  hasUntrackedFiles: boolean;
+  headSha?: string;
+  baseSha?: string;
+  recoveryKind?: WorkspaceRecoveryKind;
+}
+
+export interface ManagedWorktreeHygieneResult {
+  workspaceId: string;
+  workspaceRoot: string;
+  outcome:
+    | "not_managed"
+    | "already_pruned"
+    | "removed"
+    | "missing"
+    | "blocked_untracked";
+  recoveryRef?: string;
+  recoverySha?: string;
+  recoveryKind?: WorkspaceRecoveryKind;
+}
+
 export async function createManagedWorktree(input: {
   sourcePath: string;
   baseRef?: string;
@@ -177,6 +213,230 @@ export async function cleanupManagedWorktrees(input: {
   }
 
   return Result.ok(result);
+}
+
+export async function inspectManagedWorktreeHygiene(input: {
+  workspaceId: string;
+  store: WorkspaceStore;
+  worktreeRoot: string;
+  allowedRoots: string[];
+}): Promise<BetterResult<ManagedWorktreeHygieneInspection, ManagedWorktreeFeatureError>> {
+  const lookup = input.store.getSessionResult(input.workspaceId);
+  if (lookup.isErr()) return Result.err(lookup.error);
+  const session = lookup.value;
+  if (!session) {
+    return Result.err(worktreeError(
+      input.workspaceId,
+      "WORKTREE_INVALID_STATE",
+      "inspect_hygiene",
+      `Workspace session not found: ${input.workspaceId}`,
+    ));
+  }
+
+  if (session.mode !== "worktree" || !session.managed) {
+    return Result.ok({
+      workspaceId: session.id,
+      workspaceRoot: session.root,
+      status: session.status,
+      disposition: "not_managed",
+      prunable: false,
+      hasTrackedChanges: false,
+      hasUntrackedFiles: false,
+      ...(session.baseSha ? { baseSha: session.baseSha } : {}),
+    });
+  }
+
+  if (session.status === "pruned") {
+    return Result.ok({
+      workspaceId: session.id,
+      workspaceRoot: session.root,
+      status: session.status,
+      disposition: "already_pruned",
+      prunable: false,
+      hasTrackedChanges: false,
+      hasUntrackedFiles: false,
+      ...(session.baseSha ? { baseSha: session.baseSha } : {}),
+      ...(session.recoveryKind ? { recoveryKind: session.recoveryKind } : {}),
+    });
+  }
+
+  if (session.status !== "active") {
+    return Result.err(worktreeError(
+      session.id,
+      "WORKTREE_INVALID_STATE",
+      "inspect_hygiene",
+      `Workspace ${session.id} is not active.`,
+    ));
+  }
+
+  return captureManagedWorktreeResult(session.id, "inspect_hygiene", async () => {
+    const worktreePath = assertAllowedPath(session.root, [input.worktreeRoot]);
+    if (!(await isDirectory(worktreePath))) {
+      return {
+        workspaceId: session.id,
+        workspaceRoot: session.root,
+        status: session.status,
+        disposition: "missing",
+        prunable: true,
+        hasTrackedChanges: false,
+        hasUntrackedFiles: false,
+        ...(session.baseSha ? { baseSha: session.baseSha } : {}),
+      } satisfies ManagedWorktreeHygieneInspection;
+    }
+    if (!session.sourceRoot) {
+      throw new Error(`Stored managed worktree is missing sourceRoot: ${session.id}`);
+    }
+
+    await assertCleanupSourceRootAllowed(session.sourceRoot, input.allowedRoots);
+    await assertManagedWorktreePath(worktreePath, input.worktreeRoot);
+    const status = await git(
+      ["status", "--porcelain=v1", "--untracked-files=normal", "--ignored=no"],
+      worktreePath,
+    );
+    const lines = status.split("\n").filter(Boolean);
+    const hasUntrackedFiles = lines.some((line) => line.startsWith("?? "));
+    const hasTrackedChanges = lines.some((line) => !line.startsWith("?? "));
+    const headSha = (await git(["rev-parse", "HEAD"], worktreePath)).trim();
+
+    if (hasUntrackedFiles) {
+      return {
+        workspaceId: session.id,
+        workspaceRoot: session.root,
+        status: session.status,
+        disposition: "blocked_untracked",
+        prunable: false,
+        hasTrackedChanges,
+        hasUntrackedFiles: true,
+        headSha,
+        ...(session.baseSha ? { baseSha: session.baseSha } : {}),
+      } satisfies ManagedWorktreeHygieneInspection;
+    }
+
+    if (hasTrackedChanges) {
+      return {
+        workspaceId: session.id,
+        workspaceRoot: session.root,
+        status: session.status,
+        disposition: "tracked_changes",
+        prunable: true,
+        hasTrackedChanges: true,
+        hasUntrackedFiles: false,
+        headSha,
+        ...(session.baseSha ? { baseSha: session.baseSha } : {}),
+        recoveryKind: "stash",
+      } satisfies ManagedWorktreeHygieneInspection;
+    }
+
+    if (!session.baseSha || headSha !== session.baseSha) {
+      return {
+        workspaceId: session.id,
+        workspaceRoot: session.root,
+        status: session.status,
+        disposition: "diverged_head",
+        prunable: true,
+        hasTrackedChanges: false,
+        hasUntrackedFiles: false,
+        headSha,
+        ...(session.baseSha ? { baseSha: session.baseSha } : {}),
+        recoveryKind: "head",
+      } satisfies ManagedWorktreeHygieneInspection;
+    }
+
+    return {
+      workspaceId: session.id,
+      workspaceRoot: session.root,
+      status: session.status,
+      disposition: "clean",
+      prunable: true,
+      hasTrackedChanges: false,
+      hasUntrackedFiles: false,
+      headSha,
+      baseSha: session.baseSha,
+    } satisfies ManagedWorktreeHygieneInspection;
+  });
+}
+
+export async function pruneManagedWorktreeHygiene(input: {
+  workspaceId: string;
+  store: WorkspaceStore;
+  worktreeRoot: string;
+  allowedRoots: string[];
+}): Promise<BetterResult<ManagedWorktreeHygieneResult, ManagedWorktreeFeatureError>> {
+  const inspection = await inspectManagedWorktreeHygiene(input);
+  if (inspection.isErr()) return Result.err(inspection.error);
+
+  if (inspection.value.disposition === "not_managed") {
+    return Result.ok({
+      workspaceId: inspection.value.workspaceId,
+      workspaceRoot: inspection.value.workspaceRoot,
+      outcome: "not_managed",
+    });
+  }
+  if (inspection.value.disposition === "already_pruned") {
+    return Result.ok({
+      workspaceId: inspection.value.workspaceId,
+      workspaceRoot: inspection.value.workspaceRoot,
+      outcome: "already_pruned",
+      ...(inspection.value.recoveryKind
+        ? {
+            recoveryKind: inspection.value.recoveryKind,
+            recoveryRef: managedWorktreeRecoveryRef(inspection.value.workspaceId),
+          }
+        : {}),
+    });
+  }
+  if (inspection.value.disposition === "blocked_untracked") {
+    return Result.ok({
+      workspaceId: inspection.value.workspaceId,
+      workspaceRoot: inspection.value.workspaceRoot,
+      outcome: "blocked_untracked",
+    });
+  }
+
+  const sessionLookup = input.store.getSessionResult(input.workspaceId);
+  if (sessionLookup.isErr()) return Result.err(sessionLookup.error);
+  const session = sessionLookup.value;
+  if (!session) {
+    return Result.err(worktreeError(
+      input.workspaceId,
+      "WORKTREE_INVALID_STATE",
+      "prune_hygiene",
+      `Workspace session not found: ${input.workspaceId}`,
+    ));
+  }
+
+  const cleaned = await cleanupManagedWorktree({ ...input, session });
+  if (cleaned.isErr()) return Result.err(cleaned.error);
+  if (cleaned.value.kind === "missing") {
+    return Result.ok({
+      workspaceId: session.id,
+      workspaceRoot: session.root,
+      outcome: "missing",
+    });
+  }
+  if (cleaned.value.kind === "skipped") {
+    return Result.ok({
+      workspaceId: session.id,
+      workspaceRoot: session.root,
+      outcome: "blocked_untracked",
+    });
+  }
+
+  const persisted = input.store.getSessionResult(session.id);
+  if (persisted.isErr()) return Result.err(persisted.error);
+  const recoveryKind = persisted.value?.recoveryKind;
+  return Result.ok({
+    workspaceId: session.id,
+    workspaceRoot: session.root,
+    outcome: "removed",
+    ...(cleaned.value.entry.recoveryRef
+      ? { recoveryRef: cleaned.value.entry.recoveryRef }
+      : {}),
+    ...(cleaned.value.entry.recoverySha
+      ? { recoverySha: cleaned.value.entry.recoverySha }
+      : {}),
+    ...(recoveryKind ? { recoveryKind } : {}),
+  });
 }
 
 export async function restoreManagedWorktree(input: {

@@ -71,6 +71,7 @@ import {
 } from "./local-agent-catalog.js";
 import { getToolSurface } from "./tool-surfaces/index.js";
 import { closeDurableJobManager } from "./tool-surfaces/jobs.js";
+import { closeWorkflowSessionManager } from "./tool-surfaces/workflows.js";
 import {
   contentText,
   logFailedToolResponse,
@@ -1404,6 +1405,7 @@ export function createServer(
         processSessions.shutdown();
         await semantic?.close();
         closeDurableJobManager(config.stateDir);
+        closeWorkflowSessionManager(config.stateDir);
         closeOperationReceiptManager(config.stateDir);
         oauthProvider.close();
         workspaceStore.close?.();

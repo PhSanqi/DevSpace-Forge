@@ -33,6 +33,7 @@ import {
   textBlock,
 } from "./shared.js";
 import { registerDurableJobTools } from "./jobs.js";
+import { registerWorkflowSessionTools } from "./workflows.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
@@ -76,6 +77,7 @@ const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerContextPackTool,
   registerCodexProcessTools,
   registerDurableJobTools,
+  registerWorkflowSessionTools,
 ];
 
 const semanticReadActionSchema = z.enum([
