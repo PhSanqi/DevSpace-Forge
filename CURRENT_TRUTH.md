@@ -37,7 +37,13 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 - ControlPlatform owns the local Windows lifecycle.
 - Active runtime slot: `windows-beta4-local11`.
 - Deployed DevSpace version: `1.1.0-beta.4.local.11`.
+- Prepared and validated next slot: `windows-beta4-local12`, but it is not
+  active yet.
 - Deployed cloudflared version: `2026.9.1`.
+- As of the latest 2026-09-21 check, the Group public Tunnel is offline:
+  `https://dev.sanqi.org/group/healthz` returns Cloudflare 530 and the remote
+  Group MCP connection is unavailable. Do not claim the Windows local.12
+  cutover complete until the Tunnel recovers and public MCP is re-verified.
 - The pre-convergence local8 slot and cloudflared 2026.8.2 binary are retained
   only as rollback material.
 
@@ -47,14 +53,21 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 - Public base URL: https://dev.sanqi.org/server
 - devspace-control-server.service owns DevSpace.
 - devspace-server-cloudflared.service owns the Tunnel connector.
-- Deployed DevSpace version: `1.1.0-beta.4.local.11`.
+- Deployed DevSpace version: `1.1.0-beta.4.local.12`.
+- The live runtime is `runtime-local12`; its deployed `dist/server.js`
+  SHA256 is
+  `c1ac694e6067ea54d9a7035382e7ef0ef62976ca80a6bc53a2d99fe8ae75351b`.
+- `devspace-server-cloudflared-watchdog.timer` is enabled and active.
+- Runtime Console is installed and resolves the live runtime from the systemd
+  main process rather than assuming a fixed package directory.
 - Legacy devspace-control.service, port 7676, management page 8787 and its
   legacy Tunnel connector are stopped and disabled. Their runtime/state are
   retained only for rollback; `/server` and `/group` no longer depend on them.
 
 ## Runtime baseline
 
-The deployed canonical runtime line is 1.1.0-beta.4.local.11.
+The canonical runtime line is `1.1.0-beta.4.local.12` from
+`runtime/beta4-unified`.
 
 It is based on the beta4 image/context runtime and includes:
 
@@ -64,16 +77,21 @@ It is based on the beta4 image/context runtime and includes:
 - image-aware context runtime;
 - path-based MCP/OAuth public bases such as /group and /server;
 - the upstream Codex empty-turn fallback fix from 2026-09-18;
-- Serena stderr handling that avoids an unread-pipe deadlock.
+- Serena stderr handling that avoids an unread-pipe deadlock;
+- bounded Serena warm/fallback behavior for first-call latency;
+- first-class durable Jobs with persisted status/logs/cancellation;
+- recoverable mutation receipts via `operation_id`;
+- reconnect-safe Job discovery by canonical workspace root;
+- request lifecycle/first-byte diagnostics.
 
 Windows and Linux should consume builds from the same canonical runtime source.
 Platform-specific packaging differences are expected; divergent source behavior
 under the same package version is not.
 
-The Linux Server and Windows Group currently load the same packaged runtime;
-their deployed `dist/server.js` hashes are identical. Both public MCP paths
-were re-verified after the legacy 7676/8787 service was disabled, including
-repeated calls and long-call-followed-by-short-call coverage.
+Linux Server is deployed on local.12. Windows Group has a validated local.12
+slot ready but remains on local.11 while its public Tunnel is offline. The
+runtime source and release asset are canonical; dual-platform production
+convergence is therefore temporarily incomplete.
 
 ## Source convergence
 
@@ -108,11 +126,14 @@ Those foundations do not mean the WebCodex absorption roadmap is complete.
 
 Still-open mechanisms to absorb:
 
-1. durable Job identity/observation/cancellation;
-2. bounded Workflow Session evidence and handoff;
-3. a fully explicit managed worktree finish/hygiene lifecycle;
-4. structured validation plus an explicit finish contract;
-5. Runtime Console views for jobs, sessions and recent activity.
+1. bounded Workflow Session evidence and handoff;
+2. a fully explicit managed worktree finish/hygiene lifecycle;
+3. structured validation plus an explicit finish contract.
+
+Durable Job identity/observation/cancellation is implemented in local.12.
+Runtime Console now exposes runtime/Tunnel state, Jobs, workspaces and recent
+request diagnostics; first-class Workflow Session rows depend on the remaining
+Workflow Session work.
 
 Do not adopt WebCodex's centralized Server/Runner topology by default. The
 current per-machine DevSpace model remains simpler and fits the deployment.

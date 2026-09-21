@@ -4,20 +4,19 @@
 
 - Canonical ControlPlatform source is `main`.
 - Canonical DevSpace runtime source is `runtime/beta4-unified`.
-- Group and Server both run packaged `1.1.0-beta.4.local.11` from that runtime
-  line rather than divergent per-machine source copies.
+- Canonical runtime release is `1.1.0-beta.4.local.12`.
+- Server runs local.12. Group has a validated local.12 slot ready but remains
+  on local.11 until its currently offline public Tunnel recovers and the live
+  switch can be independently verified.
 - Group cloudflared is 2026.9.1.
 - Legacy Linux 7676/8787 control service is stopped and disabled; rollback
   material remains available without participating in the live path.
 - Both public MCP/OAuth paths were verified after convergence and again after
   legacy shutdown, including repeated and long-running tool calls.
 
-## Phase B — Durable Jobs
+## Phase B — Durable Jobs — Implemented 2026-09-21
 
-Status: not complete. Existing `run_id` plus bounded log storage is the base,
-not yet a first-class durable Job contract.
-
-Evolve the existing compact run_id implementation into a first-class Job:
+local.12 evolves the compact run_id base into a first-class durable Job:
 
 - stable job_id across the request boundary;
 - process continues without keeping one MCP request open;
@@ -26,8 +25,12 @@ Evolve the existing compact run_id implementation into a first-class Job:
 - queued/running/exited/cancelled terminal states;
 - bounded retention.
 
-This borrows the useful part of WebCodex Jobs without introducing a central
-Runner service.
+It also adds persisted recoverable mutation receipts via `operation_id` and
+reconnect-safe Job discovery by canonical workspace root. This borrows the
+useful part of WebCodex Jobs without introducing a central Runner service.
+
+Operational follow-up: Group must still switch from local.11 to its prepared
+local.12 slot after the Group Tunnel recovers.
 
 ## Phase C — Workflow Session evidence
 
@@ -63,10 +66,12 @@ Status: not complete.
 - shell remains available as an escape hatch, not the default for routine
   validation.
 
-## Phase F — Runtime Console
+## Phase F — Runtime Console — Core implemented 2026-09-21
 
-Status: partially present. Current management/readiness surfaces cover instance
-and runtime status, but first-class Jobs and Workflow Sessions do not yet exist.
+Windows Control Platform and Linux now have a read-only Runtime Console that
+reports instance/runtime identity, Tunnel/readiness state, durable Jobs,
+workspace sessions and recent MCP/request diagnostics without revealing
+credentials.
 
 Expose one management surface for:
 
@@ -77,8 +82,18 @@ Expose one management surface for:
 - runtime/update state;
 - diagnostics and safe restart.
 
-Credentials are never returned by general status APIs. Local credential reveal
-must remain an explicit local-only action.
+The Workflow Session portion remains blocked on Phase C rather than requiring a
+second console architecture. Credentials are never returned by general status
+APIs. Local credential reveal must remain an explicit local-only action.
+
+## Immediate operational follow-up
+
+1. Recover the Windows Group Cloudflare Tunnel (currently HTTP 530).
+2. Switch Group to the already prepared `windows-beta4-local12` slot.
+3. Deploy the current Control Platform build containing Runtime Console.
+4. Re-run Group local/public readiness and MCP smoke after the switch.
+5. Once both platforms are verified on local.12, update Current Truth and cut
+   the next release package/tag.
 
 ## Deferred
 
