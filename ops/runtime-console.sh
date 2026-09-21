@@ -45,6 +45,18 @@ fi
 
 PACKAGE_ROOT=""
 NODE=""
+MAIN_PID="$(systemctl --user show "$DEVSPACE_SERVICE" -p MainPID --value 2>/dev/null || true)"
+if [[ "$MAIN_PID" =~ ^[1-9][0-9]*$ && -r "/proc/$MAIN_PID/cmdline" ]]; then
+  while IFS= read -r -d '' arg; do
+    if [[ "$arg" == */node_modules/@waishnav/devspace/dist/cli.js ]]; then
+      PACKAGE_ROOT="${arg%/dist/cli.js}"
+      break
+    fi
+  done < "/proc/$MAIN_PID/cmdline"
+  if [[ -x "/proc/$MAIN_PID/exe" ]]; then
+    NODE="$(readlink -f "/proc/$MAIN_PID/exe" 2>/dev/null || true)"
+  fi
+fi
 if [[ -n "$ACTIVE_SLOT" ]]; then
   SLOT="$RUNTIME/slots/$ACTIVE_SLOT"
   [[ -f "$SLOT/READY" ]] || SLOT=""
@@ -62,6 +74,12 @@ fi
 if [[ -z "$PACKAGE_ROOT" && -d "$RUNTIME/node_modules/@waishnav/devspace" ]]; then
   PACKAGE_ROOT="$RUNTIME/node_modules/@waishnav/devspace"
 fi
+if [[ -z "$ACTIVE_SLOT" && -n "$PACKAGE_ROOT" ]]; then
+  LIVE_RUNTIME_ROOT="$(dirname "$(dirname "$(dirname "$PACKAGE_ROOT")")")"
+  if [[ "$LIVE_RUNTIME_ROOT" == "$ROOT"/runtime-* ]]; then
+    ACTIVE_SLOT="$(basename "$LIVE_RUNTIME_ROOT")"
+  fi
+fi
 
 version="unknown"
 server_hash="unavailable"
@@ -76,6 +94,7 @@ echo "INSTANCE / RUNTIME"
 echo "  root: $ROOT"
 echo "  version: $version"
 echo "  active-slot: ${ACTIVE_SLOT:-legacy/default}"
+echo "  package-root: ${PACKAGE_ROOT:-unavailable}"
 echo "  dist/server.js sha256: $server_hash"
 echo "  slots:"
 if [[ -d "$RUNTIME/slots" ]]; then
