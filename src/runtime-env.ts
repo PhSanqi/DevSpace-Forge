@@ -4,7 +4,9 @@ import { execFileSync } from "node:child_process";
 
 export function resolveProjectEnvironment(workspaceRoot?: string): NodeJS.ProcessEnv {
   const isWindows = process.platform === "win32";
-  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const home = isWindows
+    ? (process.env.USERPROFILE || process.env.HOME || "")
+    : (process.env.HOME || process.env.USERPROFILE || "");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
