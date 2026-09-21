@@ -1,8 +1,8 @@
-# DevSpace Control Platform
+# DevSpace-Forge
 
 [中文说明](README.zh-CN.md)
 
-DevSpace Control Platform turns a Windows or Linux machine into a persistent coding workspace that ChatGPT can use through MCP. Download one release, configure the folders you want to expose, connect one Cloudflare Tunnel, and use your own machine's files, Git repositories, terminal, build tools, and local runtime from ChatGPT.
+DevSpace-Forge is the project and release line. Its DevSpace Control Platform turns a Windows or Linux machine into a persistent coding workspace that ChatGPT can use through MCP. Download one release, configure the folders you want to expose, connect one Cloudflare Tunnel, and use your own machine's files, Git repositories, terminal, build tools, and local runtime from ChatGPT.
 
 Project data stays on your machine. The public surface is the MCP endpoint you explicitly expose through your tunnel.
 

@@ -1,8 +1,8 @@
-# DevSpace Control Platform
+# DevSpace-Forge
 
 [English](README.md)
 
-DevSpace Control Platform 用来把一台 Windows 或 Linux 电脑变成 ChatGPT 可以长期使用的本地 Coding Workspace。下载一个 Release，指定允许访问的项目目录，接一个 Cloudflare Tunnel，就可以让 ChatGPT 通过 MCP 使用你自己的文件、Git 仓库、终端、构建工具和本地运行环境。
+DevSpace-Forge 是项目与 Release 的统一名称；其中的 DevSpace Control Platform 用来把一台 Windows 或 Linux 电脑变成 ChatGPT 可以长期使用的本地 Coding Workspace。下载一个 Release，指定允许访问的项目目录，接一个 Cloudflare Tunnel，就可以让 ChatGPT 通过 MCP 使用你自己的文件、Git 仓库、终端、构建工具和本地运行环境。
 
 项目文件和运行数据仍然保存在你的电脑上。真正暴露到公网的，是你主动通过 Tunnel 提供的 MCP Endpoint。
 
