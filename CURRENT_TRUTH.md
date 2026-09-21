@@ -35,15 +35,23 @@ DevSpace owns OAuth. Cloudflare Access OAuth is not stacked in front of it.
 - DevSpace local port: 17677
 - Public base URL: https://dev.sanqi.org/group
 - ControlPlatform owns the local Windows lifecycle.
-- Active runtime slot: `windows-beta4-local11`.
-- Deployed DevSpace version: `1.1.0-beta.4.local.11`.
-- Prepared and validated next slot: `windows-beta4-local12`, but it is not
-  active yet.
+- The on-disk active runtime pointer was directly verified as
+  `windows-beta4-local12`, and that slot's package version was directly read
+  as `1.1.0-beta.4.local.12` before the current outage.
+- Do not describe Group as currently serving local.12: the Control Platform /
+  managed DevSpace process is offline, so there is no live runtime to verify
+  until service recovery completes.
 - Deployed cloudflared version: `2026.9.1`.
 - As of the latest 2026-09-21 check, the Group public Tunnel is offline:
   `https://dev.sanqi.org/group/healthz` returns Cloudflare 530 and the remote
-  Group MCP connection is unavailable. Do not claim the Windows local.12
-  cutover complete until the Tunnel recovers and public MCP is re-verified.
+  Group MCP connection is unavailable. The outage occurred while attempting to
+  replace the Control Platform from a command executed through the very DevSpace
+  process managed by that Control Platform: stopping the parent also terminated
+  the in-flight deployment command before an independent recovery path could
+  complete. Recovery must therefore be performed out-of-band from Group MCP.
+- The current production Control Platform executable version is Unknown until
+  out-of-band access is restored. The new P0/P2 build is independently compiled
+  and visually/test validated, but must not be claimed deployed on Group yet.
 - The pre-convergence local8 slot and cloudflared 2026.8.2 binary are retained
   only as rollback material.
 
@@ -88,10 +96,10 @@ Windows and Linux should consume builds from the same canonical runtime source.
 Platform-specific packaging differences are expected; divergent source behavior
 under the same package version is not.
 
-Linux Server is deployed on local.12. Windows Group has a validated local.12
-slot ready but remains on local.11 while its public Tunnel is offline. The
-runtime source and release asset are canonical; dual-platform production
-convergence is therefore temporarily incomplete.
+Linux Server is deployed and serving local.12. Windows Group's on-disk active
+slot is local.12, but Group is currently offline and the live runtime cannot be
+verified. The runtime source and release asset are canonical; dual-platform
+production serving convergence is therefore temporarily incomplete.
 
 ## Source convergence
 
