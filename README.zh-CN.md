@@ -42,7 +42,7 @@ DevSpace Control Platform 用来把一台 Windows 或 Linux 电脑变成 ChatGPT
 下载：
 
 ```text
-DevSpaceControlPlatform-vX.Y.Z-win-x64.zip
+DevSpace-Forge-vX.Y.Z-win-x64.zip
 ```
 
 解压后直接运行：
@@ -90,7 +90,7 @@ Cloudflare 本地 Origin   http://127.0.0.1:7677
 下载并解压：
 
 ```text
-DevSpaceControlPlatform-vX.Y.Z-linux-x64.tar.gz
+DevSpace-Forge-vX.Y.Z-linux-x64.tar.gz
 ```
 
 然后运行：

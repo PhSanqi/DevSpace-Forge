@@ -42,7 +42,7 @@ You do **not** need a Cloudflare API key. DevSpace Control Platform does not cre
 Download:
 
 ```text
-DevSpaceControlPlatform-vX.Y.Z-win-x64.zip
+DevSpace-Forge-vX.Y.Z-win-x64.zip
 ```
 
 Extract it and run:
@@ -90,7 +90,7 @@ Current packaged target: **Linux x86_64**.
 Download and extract:
 
 ```text
-DevSpaceControlPlatform-vX.Y.Z-linux-x64.tar.gz
+DevSpace-Forge-vX.Y.Z-linux-x64.tar.gz
 ```
 
 Then run:

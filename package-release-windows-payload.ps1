@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $dist = Join-Path $root 'dist'
-$packageName = "DevSpaceControlPlatform-v$Version-win-x64"
+$packageName = "DevSpace-Forge-v$Version-win-x64"
 $stage = Join-Path $dist $packageName
 $zip = Join-Path $dist "$packageName.zip"
 $hashFile = $zip + '.sha256.txt'

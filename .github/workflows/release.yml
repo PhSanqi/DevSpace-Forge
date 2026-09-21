@@ -12,35 +12,67 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CANONICAL_RUNTIME_REF: runtime-1.1.0-beta.4.local.11
+  CANONICAL_RUNTIME_VERSION: 1.1.0-beta.4.local.11
+
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout DevSpace-Forge control plane
+        uses: actions/checkout@v4
 
-      - name: Download validated Windows runtime payload
+      - name: Checkout canonical DevSpace runtime
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANONICAL_RUNTIME_REF }}
+          path: runtime-src
+
+      - name: Setup pnpm and Node
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: runtime-src/pnpm-lock.yaml
+
+      - name: Build and validate canonical runtime
         shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
+        working-directory: runtime-src
         run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+          pnpm build
+          New-Item -ItemType Directory -Force ..\dist\runtime-package | Out-Null
+          pnpm pack --pack-destination ..\dist\runtime-package
+
+      - name: Prepare validated Windows offline runtime
+        shell: powershell
+        run: |
+          $runtimePackage = (Get-ChildItem dist\runtime-package\*.tgz | Select-Object -First 1).FullName
+          if ([string]::IsNullOrWhiteSpace($runtimePackage)) { throw 'Canonical runtime package was not produced.' }
+          .\prepare-offline-windows-runtime.ps1 `
+            -OutputRoot dist\offline-windows-runtime `
+            -RuntimePackagePath $runtimePackage `
+            -Force
+
+          $slot = (Get-Content -Raw dist\offline-windows-runtime\runtime\active-slot.txt).Trim()
+          $node = "dist\offline-windows-runtime\runtime\slots\$slot\node\node.exe"
+          $package = "dist\offline-windows-runtime\runtime\slots\$slot\devspace\node_modules\@waishnav\devspace"
+          .\test.ps1 -NodePath $node -DevSpacePackageRoot $package
+
           New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
-          gh release download runtime-1.1.0-beta.4.local.11 `
-            --repo '${{ github.repository }}' `
-            --pattern 'DevSpaceControlRuntime-windows-beta4-local11.tar' `
-            --pattern 'DevSpaceControlRuntime-windows-beta4-local11.tar.sha256.txt' `
-            --dir dist\runtime-payload
-
-      - name: Verify Windows runtime payload
-        shell: powershell
-        run: |
           $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local11.tar'
-          $expected = ((Get-Content -Raw ($payload + '.sha256.txt')).Trim() -split '\s+')[0].ToLowerInvariant()
-          $actual = (Get-FileHash -Algorithm SHA256 $payload).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Windows runtime payload SHA256 mismatch: $actual != $expected" }
-          Write-Host "Windows runtime payload SHA256 $actual"
+          tar.exe -cf $payload -C dist\offline-windows-runtime runtime cloudflared.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to create Windows runtime payload.' }
 
-      - name: Build Windows release package
+      - name: Build Windows product package
         shell: powershell
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
@@ -55,42 +87,51 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           path: |
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip.sha256.txt
+            dist/DevSpace-Forge-${{ github.ref_name }}-win-x64.zip
+            dist/DevSpace-Forge-${{ github.ref_name }}-win-x64.zip.sha256.txt
 
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Checkout control platform
+      - name: Checkout DevSpace-Forge control plane
         uses: actions/checkout@v4
         with:
           path: control
 
-      - name: Download canonical Linux runtime package
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p control/dist/linux-runtime
-          gh release download runtime-1.1.0-beta.4.local.11 \
-            --repo '${{ github.repository }}' \
-            --pattern 'waishnav-devspace-1.1.0-beta.4.local.11.tgz' \
-            --pattern 'waishnav-devspace-1.1.0-beta.4.local.11.tgz.sha256.txt' \
-            --dir control/dist/linux-runtime
+      - name: Checkout canonical DevSpace runtime
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANONICAL_RUNTIME_REF }}
+          path: runtime-src
 
-      - name: Verify Linux runtime package
-        run: |
-          cd control/dist/linux-runtime
-          expected="$(awk '{print $1}' waishnav-devspace-1.1.0-beta.4.local.11.tgz.sha256.txt)"
-          actual="$(sha256sum waishnav-devspace-1.1.0-beta.4.local.11.tgz | awk '{print $1}')"
-          test "$actual" = "$expected"
-          echo "Linux runtime package SHA256 $actual"
+      - name: Setup pnpm and Node
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
 
-      - name: Build Linux release package
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: runtime-src/pnpm-lock.yaml
+
+      - name: Build and validate canonical runtime
+        working-directory: runtime-src
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+          pnpm build
+          mkdir -p ../control/dist/linux-runtime
+          pnpm pack --pack-destination ../control/dist/linux-runtime
+
+      - name: Build Linux product package
         working-directory: control
         run: |
           version="${GITHUB_REF_NAME#v}"
-          runtime_package="dist/linux-runtime/waishnav-devspace-1.1.0-beta.4.local.11.tgz"
-          test -n "$runtime_package"
+          runtime_package="dist/linux-runtime/waishnav-devspace-${CANONICAL_RUNTIME_VERSION}.tgz"
+          test -f "$runtime_package"
           bash ./package-release-linux.sh "$version" "$runtime_package"
 
       - name: Upload Linux package
@@ -100,8 +141,8 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           path: |
-            control/dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz
-            control/dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt
+            control/dist/DevSpace-Forge-${{ github.ref_name }}-linux-x64.tar.gz
+            control/dist/DevSpace-Forge-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt
 
   release:
     needs: [windows, linux]
@@ -109,26 +150,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download release packages
+      - name: Download product packages
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Publish GitHub Release
+      - name: Publish DevSpace-Forge release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=(
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-win-x64.zip.sha256.txt
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz
-            dist/DevSpaceControlPlatform-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt
+            dist/DevSpace-Forge-${{ github.ref_name }}-win-x64.zip
+            dist/DevSpace-Forge-${{ github.ref_name }}-win-x64.zip.sha256.txt
+            dist/DevSpace-Forge-${{ github.ref_name }}-linux-x64.tar.gz
+            dist/DevSpace-Forge-${{ github.ref_name }}-linux-x64.tar.gz.sha256.txt
           )
           if gh release view '${{ github.ref_name }}' >/dev/null 2>&1; then
             gh release upload '${{ github.ref_name }}' "${files[@]}" --clobber
+            gh release edit '${{ github.ref_name }}' --title 'DevSpace-Forge ${{ github.ref_name }}'
           else
             gh release create '${{ github.ref_name }}' "${files[@]}" \
-              --title '${{ github.ref_name }}' \
+              --title 'DevSpace-Forge ${{ github.ref_name }}' \
               --generate-notes
           fi
