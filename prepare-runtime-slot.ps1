@@ -37,8 +37,22 @@ function Get-ResumableFile([string]$Url, [string]$Path, [string]$Sha256) {
 New-Item -ItemType Directory -Force $slots, $cache | Out-Null
 
 $nodeZip = Join-Path $runtime "node-v$nodeVersion-win-x64.zip"
-if (-not (Assert-Hash $nodeZip $nodeSha256)) {
-    throw "Node 缓存 ZIP 缺失或校验失败。不会重新下载大文件：$nodeZip"
+$activeSlot = ''
+$activePointer = Join-Path $runtime 'active-slot.txt'
+if (Test-Path -LiteralPath $activePointer) {
+    $activeSlot = (Get-Content -Raw -LiteralPath $activePointer).Trim()
+}
+$activeSlotRoot = if ([string]::IsNullOrWhiteSpace($activeSlot)) {
+    $null
+} else {
+    Join-Path $slots $activeSlot
+}
+$activeNode = if ($activeSlotRoot) { Join-Path $activeSlotRoot 'node\node.exe' } else { $null }
+$activeDevSpace = if ($activeSlotRoot) { Join-Path $activeSlotRoot 'devspace' } else { $null }
+
+if (-not (Assert-Hash $nodeZip $nodeSha256) -and
+    ([string]::IsNullOrWhiteSpace($activeNode) -or -not (Test-Path -LiteralPath $activeNode))) {
+    throw "Node 缓存 ZIP 不可用，且当前 active slot 没有可复用 Node：$nodeZip"
 }
 
 $asset = Join-Path $cache $assetName
@@ -48,18 +62,28 @@ Remove-Item -LiteralPath $preparing -Recurse -Force -ErrorAction SilentlyContinu
 New-Item -ItemType Directory -Force $preparing | Out-Null
 
 try {
-    Write-Host '1/4 Extract cached Node into isolated slot...'
-    $nodeExtract = Join-Path $preparing '_node'
-    Expand-Archive -LiteralPath $nodeZip -DestinationPath $nodeExtract -Force
-    $nodeSource = Join-Path $nodeExtract "node-v$nodeVersion-win-x64"
-    if (-not (Test-Path -LiteralPath (Join-Path $nodeSource 'node.exe'))) { throw 'Node extraction incomplete.' }
-    Move-Item -LiteralPath $nodeSource -Destination (Join-Path $preparing 'node')
-    Remove-Item -LiteralPath $nodeExtract -Recurse -Force
+    if (Assert-Hash $nodeZip $nodeSha256) {
+        Write-Host '1/4 Extract cached Node into isolated slot...'
+        $nodeExtract = Join-Path $preparing '_node'
+        Expand-Archive -LiteralPath $nodeZip -DestinationPath $nodeExtract -Force
+        $nodeSource = Join-Path $nodeExtract "node-v$nodeVersion-win-x64"
+        if (-not (Test-Path -LiteralPath (Join-Path $nodeSource 'node.exe'))) { throw 'Node extraction incomplete.' }
+        Move-Item -LiteralPath $nodeSource -Destination (Join-Path $preparing 'node')
+        Remove-Item -LiteralPath $nodeExtract -Recurse -Force
+    } else {
+        Write-Host "1/4 Reuse Node from active slot $activeSlot..."
+        & robocopy.exe (Split-Path $activeNode) (Join-Path $preparing 'node') /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -gt 7) { throw "robocopy Node reuse failed with code $LASTEXITCODE" }
+    }
 
     Write-Host '2/4 Reuse current dependency tree locally (no npm install)...'
-    $legacyDevSpace = Join-Path $runtime 'devspace'
-    if (-not (Test-Path -LiteralPath (Join-Path $legacyDevSpace 'node_modules'))) {
-        throw "Existing dependency tree not found: $legacyDevSpace"
+    $dependencySource = $activeDevSpace
+    if ([string]::IsNullOrWhiteSpace($dependencySource) -or
+        -not (Test-Path -LiteralPath (Join-Path $dependencySource 'node_modules'))) {
+        $dependencySource = Join-Path $runtime 'devspace'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $dependencySource 'node_modules'))) {
+        throw "Existing dependency tree not found in active slot or legacy runtime."
     }
     $stagedDevSpace = Join-Path $preparing 'devspace'
     New-Item -ItemType Directory -Force $stagedDevSpace | Out-Null
@@ -67,8 +91,8 @@ try {
     # ControlPlatform package root. Its historical target no longer exists and
     # it is not a DevSpace runtime dependency, so do not reproduce the broken
     # junction inside an otherwise self-contained slot.
-    $brokenSelfLink = Join-Path $legacyDevSpace 'node_modules\devspace-control-platform-runtime'
-    & robocopy.exe $legacyDevSpace $stagedDevSpace /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /XD $brokenSelfLink /NFL /NDL /NJH /NJS /NP | Out-Null
+    $brokenSelfLink = Join-Path $dependencySource 'node_modules\devspace-control-platform-runtime'
+    & robocopy.exe $dependencySource $stagedDevSpace /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /XD $brokenSelfLink /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -gt 7) { throw "robocopy dependency reuse failed with code $LASTEXITCODE" }
 
     Write-Host '3/4 Replace only @waishnav/devspace with the verified local.12 unified package...'

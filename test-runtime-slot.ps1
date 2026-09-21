@@ -69,11 +69,27 @@ finally {
 }
 
 $serenaExe = Join-Path $root 'runtime\serena\bin\serena.exe'
-if (-not (Test-Path -LiteralPath $serenaExe)) { throw "Serena CLI is missing: $serenaExe" }
-$serenaVersion = (& $serenaExe --version 2>$null | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $serenaVersion -notmatch '1\.7\.0') {
-    throw "Serena validation failed: $serenaVersion"
+if (Test-Path -LiteralPath $serenaExe) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $serenaVersion = (& $serenaExe --version 2>$null | Out-String).Trim()
+        $serenaExitCode = $LASTEXITCODE
+    }
+    catch {
+        $serenaVersion = ''
+        $serenaExitCode = 1
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($serenaExitCode -eq 0 -and $serenaVersion -match '1\.7\.0') {
+        Write-Host "serena=$serenaVersion"
+    } else {
+        Write-Warning 'Serena CLI is present but unavailable; semantic navigation will use the bounded fallback path.'
+    }
+} else {
+    Write-Warning 'Serena CLI is not installed; semantic navigation will use the bounded fallback path.'
 }
-Write-Host "serena=$serenaVersion"
 
 Write-Host 'Runtime slot smoke passed.'

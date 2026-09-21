@@ -37,10 +37,21 @@ function Set-ActiveSlotName([string]$Name) {
 
 function Test-LocalHealth {
     try {
-        $configPath = Join-Path $root 'bin\state\devspace-config\config.jsonc'
+        $configPath = Join-Path $root 'state\devspace-config\config.jsonc'
+        if (-not (Test-Path -LiteralPath $configPath)) {
+            $configPath = Join-Path $root 'bin\state\devspace-config\config.jsonc'
+        }
         $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
         $port = [int]$config.server.port
-        $response = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:{0}/healthz" -f $port) -TimeoutSec 2
+        $healthPath = '/healthz'
+        if (-not [string]::IsNullOrWhiteSpace([string]$config.server.publicBaseUrl)) {
+            $baseUri = [Uri]([string]$config.server.publicBaseUrl)
+            $basePath = $baseUri.AbsolutePath.TrimEnd('/')
+            if (-not [string]::IsNullOrWhiteSpace($basePath) -and $basePath -ne '/') {
+                $healthPath = $basePath + '/healthz'
+            }
+        }
+        $response = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:{0}{1}" -f $port, $healthPath) -TimeoutSec 2
         return $response.StatusCode -eq 200
     } catch {
         return $false
