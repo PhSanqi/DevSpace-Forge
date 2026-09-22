@@ -72,6 +72,12 @@ For path-routed multi-machine deployments, the Tunnel origin hostname and the un
 
 After setup, `DevSpaceControlPlatform.exe` manages DevSpace and cloudflared. The Tunnel token is stored separately from ordinary settings and project Git history.
 
+### Updating an existing Windows install
+
+Starting with v0.6.0, a newly extracted `Setup.exe` looks for an existing Control installation in the current directory, the running Control process, and the current-user startup entry. When one is found, Setup switches to **update existing installation** mode instead of asking you to configure the machine again.
+
+The update keeps the existing `settings.json`, Tunnel token, Owner password, state database, worktrees, and project configuration. It replaces the Control binaries, bundled Runtime, and cloudflared, then restarts Control. Legacy installs pinned to `http2` are migrated to `auto`, allowing cloudflared to choose QUIC or HTTP/2 according to the network instead of forcing TCP/7844 on every start.
+
 ### Windows daily use
 
 Open the Control Platform when you want to inspect or manage the service. From the UI you can:
@@ -127,7 +133,7 @@ systemctl --user restart devspace-control.service
 systemctl --user restart devspace-control-cloudflared.service
 ```
 
-`setup-linux.sh` is idempotent, so rerunning it updates the local configuration and installed service files.
+If an existing Linux configuration is detected and no configuration-changing flags are supplied, rerunning `./setup-linux.sh` performs an in-place update: it preserves `config.jsonc`, `auth.json`, the Tunnel token, state, and worktrees while replacing the bundled Runtime, cloudflared, launch scripts, and service definitions. The regenerated Tunnel launcher uses `auto` instead of carrying forward a legacy fixed HTTP/2 launch. Use `--reconfigure` when you intentionally want to enter configuration mode again.
 
 ## Cloudflare: exactly what to enter
 

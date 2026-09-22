@@ -11,9 +11,9 @@ $nodeVersion = '22.22.3'
 $nodeSha256 = '6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33'
 $cloudflaredVersion = '2026.9.1'
 $cloudflaredSha256 = '2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712'
-$devSpaceVersion = '1.1.0-beta.4.local.12'
-$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.12.tgz'
-$slotName = 'windows-beta4-local12'
+$devSpaceVersion = '1.1.0-beta.4.local.13'
+$devSpacePackageName = 'waishnav-devspace-1.1.0-beta.4.local.13.tgz'
+$slotName = 'windows-beta4-local13'
 
 $root = $PSScriptRoot
 $output = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
@@ -155,3 +155,4 @@ New-Item -ItemType Directory -Force $runtime | Out-Null
 Set-Content -LiteralPath (Join-Path $runtime 'active-slot.txt') -Encoding ASCII -Value $slotName
 
 Write-Host "Offline Windows runtime ready: $output"
+exit 0

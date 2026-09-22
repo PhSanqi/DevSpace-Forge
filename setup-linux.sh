@@ -11,6 +11,9 @@ INSTANCE=""
 REUSE_EXISTING_TUNNEL=0
 START_SERVICES=1
 NON_INTERACTIVE=0
+CONFIG_OVERRIDE=0
+FORCE_RECONFIGURE=0
+UPGRADE_EXISTING=0
 
 usage() {
   cat <<'EOF'
@@ -29,6 +32,7 @@ Options:
   --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
   --reuse-existing-tunnel
                         Start only DevSpace; reuse an already-running Tunnel on this machine
+  --reconfigure         Ignore an existing local configuration and configure again
   --no-start            Install and configure without starting user services
   --non-interactive     Do not prompt for missing Cloudflare values
   -h, --help            Show this help
@@ -38,12 +42,13 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --instance) INSTANCE="${2:?missing instance name}"; shift 2 ;;
-    --allowed-root) ALLOWED_ROOT="${2:?missing path}"; shift 2 ;;
-    --port) PORT="${2:?missing port}"; shift 2 ;;
-    --public-url) PUBLIC_URL="${2:?missing URL}"; shift 2 ;;
-    --origin-host) ORIGIN_HOST="${2:?missing hostname}"; shift 2 ;;
-    --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; shift 2 ;;
-    --reuse-existing-tunnel) REUSE_EXISTING_TUNNEL=1; shift ;;
+    --allowed-root) ALLOWED_ROOT="${2:?missing path}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --port) PORT="${2:?missing port}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --public-url) PUBLIC_URL="${2:?missing URL}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --origin-host) ORIGIN_HOST="${2:?missing hostname}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --reuse-existing-tunnel) REUSE_EXISTING_TUNNEL=1; CONFIG_OVERRIDE=1; shift ;;
+    --reconfigure) FORCE_RECONFIGURE=1; shift ;;
     --no-start) START_SERVICES=0; shift ;;
     --non-interactive) NON_INTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -98,6 +103,58 @@ if [[ ! -x "$BUNDLED_CLOUDFLARED" ]]; then
   exit 1
 fi
 
+EXISTING_CONFIG="$DEVSPACE_CONFIG_DIR/config.jsonc"
+CLOUDFLARE_ENV="$CONFIG_ROOT/cloudflare.env"
+if [[ -f "$EXISTING_CONFIG" && "$CONFIG_OVERRIDE" -eq 0 && "$FORCE_RECONFIGURE" -eq 0 ]]; then
+  JSONC_PARSER="$ROOT/runtime/devspace/node_modules/jsonc-parser"
+  mapfile -t existing_values < <("$BUNDLED_NODE" - "$EXISTING_CONFIG" "$JSONC_PARSER" <<'NODE'
+const fs = require('node:fs');
+const file = process.argv[2];
+const parserRoot = process.argv[3];
+const text = fs.readFileSync(file, 'utf8');
+let config;
+try {
+  config = JSON.parse(text);
+} catch (error) {
+  try {
+    const { parse } = require(parserRoot);
+    const errors = [];
+    config = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
+    if (errors.length) throw new Error(`JSONC parse errors: ${errors.map(e => e.error).join(',')}`);
+  } catch (jsoncError) {
+    console.error(`Existing DevSpace config cannot be read safely: ${jsoncError.message}`);
+    process.exit(2);
+  }
+}
+const port = Number(config?.server?.port || 7677);
+const publicBaseUrl = String(config?.server?.publicBaseUrl || '');
+const roots = Array.isArray(config?.workspaces?.allowedRoots) ? config.workspaces.allowedRoots : [];
+const allowedRoot = String(roots[0] || process.env.HOME || '');
+const hosts = Array.isArray(config?.server?.allowedHosts) ? config.server.allowedHosts.map(String) : [];
+let publicHost = '';
+try { if (publicBaseUrl) publicHost = new URL(publicBaseUrl).hostname; } catch {}
+const local = new Set(['localhost', '127.0.0.1', '::1', publicHost].filter(Boolean));
+const originHost = hosts.find(host => !local.has(host)) || publicHost || '';
+console.log(port);
+console.log(publicBaseUrl);
+console.log(allowedRoot);
+console.log(originHost);
+NODE
+  )
+  if [[ "${#existing_values[@]}" -ne 4 ]]; then
+    echo 'Existing DevSpace configuration did not provide the expected update metadata.' >&2
+    exit 1
+  fi
+  PORT="${existing_values[0]}"
+  PUBLIC_URL="${existing_values[1]}"
+  ALLOWED_ROOT="${existing_values[2]}"
+  ORIGIN_HOST="${existing_values[3]}"
+  UPGRADE_EXISTING=1
+  NON_INTERACTIVE=1
+  if [[ ! -f "$CLOUDFLARE_ENV" ]]; then REUSE_EXISTING_TUNNEL=1; fi
+  echo "Existing DevSpace configuration detected; updating runtime in place without reconfiguration."
+fi
+
 if [[ "$NON_INTERACTIVE" -eq 0 && -t 0 ]]; then
   read -r -p "Allowed project root [$ALLOWED_ROOT]: " answer
   [[ -n "$answer" ]] && ALLOWED_ROOT="$answer"
@@ -116,11 +173,11 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   echo 'Port must be between 1 and 65535.' >&2
   exit 1
 fi
-if [[ ! -d "$ALLOWED_ROOT" ]]; then
+if [[ "$UPGRADE_EXISTING" -eq 0 && ! -d "$ALLOWED_ROOT" ]]; then
   echo "Allowed root does not exist: $ALLOWED_ROOT" >&2
   exit 1
 fi
-ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd)"
+if [[ "$UPGRADE_EXISTING" -eq 0 ]]; then ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd)"; fi
 
 mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_DIR" "$WORKTREE_ROOT" "$INSTALL_ROOT/bin"
 install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
@@ -168,6 +225,7 @@ if [[ -z "$PUBLIC_URL" && "$NON_INTERACTIVE" -eq 0 ]]; then
   exit 1
 fi
 
+if [[ "$UPGRADE_EXISTING" -eq 0 ]]; then
 "$NODE" - "$DEVSPACE_CONFIG_DIR/config.jsonc" "$ALLOWED_ROOT" "$PUBLIC_URL" "$PORT" "$STATE_DIR" "$WORKTREE_ROOT" "$CONFIG_ROOT/agent-home" "$ORIGIN_HOST" <<'NODE'
 const fs = require('node:fs');
 const file = process.argv[2];
@@ -196,6 +254,7 @@ const config = {
 };
 fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
 NODE
+fi
 
 if [[ ! -f "$DEVSPACE_CONFIG_DIR/auth.json" ]]; then
   OWNER_TOKEN="$("$NODE" -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))")"
@@ -205,8 +264,9 @@ else
   OWNER_TOKEN="$("$NODE" -e "const a=require(process.argv[1]); console.log(a.ownerToken||'')" "$DEVSPACE_CONFIG_DIR/auth.json")"
 fi
 
-CLOUDFLARE_ENV="$CONFIG_ROOT/cloudflare.env"
-if [[ "$REUSE_EXISTING_TUNNEL" -eq 1 ]]; then
+if [[ "$UPGRADE_EXISTING" -eq 1 ]]; then
+  :
+elif [[ "$REUSE_EXISTING_TUNNEL" -eq 1 ]]; then
   :
 elif [[ -n "$TUNNEL_TOKEN" ]]; then
   printf 'CLOUDFLARED_TOKEN=%q\n' "$TUNNEL_TOKEN" > "$CLOUDFLARE_ENV"
@@ -225,6 +285,7 @@ EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
 
 CLOUDFLARED_PROTOCOL="${DEVSPACE_CLOUDFLARED_PROTOCOL:-auto}"
+if [[ "$UPGRADE_EXISTING" -eq 1 ]]; then CLOUDFLARED_PROTOCOL="auto"; fi
 case "$CLOUDFLARED_PROTOCOL" in auto|quic|http2) ;; *) echo 'DEVSPACE_CLOUDFLARED_PROTOCOL must be auto, quic, or http2.' >&2; exit 1 ;; esac
 CLOUDFLARED_PROTOCOL_ARG=""
 [[ "$CLOUDFLARED_PROTOCOL" == "auto" ]] || CLOUDFLARED_PROTOCOL_ARG="--protocol $CLOUDFLARED_PROTOCOL"

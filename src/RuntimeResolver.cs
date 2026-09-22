@@ -39,6 +39,11 @@ namespace DevSpaceControlPlatform
             throw new DirectoryNotFoundException("找不到独立 DevSpace runtime package。");
         }
 
+        public static string ResolveControlPagePackageRoot(string platformRoot)
+        {
+            return ResolveDevSpacePackageRoot(platformRoot);
+        }
+
         public static string ResolveCloudflaredPath(string platformRoot)
         {
             var root = Path.GetFullPath(platformRoot);

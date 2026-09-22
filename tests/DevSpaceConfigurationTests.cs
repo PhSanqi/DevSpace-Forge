@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Web.Script.Serialization;
 using DevSpaceControlPlatform;
 
@@ -29,6 +30,8 @@ internal static class DevSpaceConfigurationTests
         Run("managed CLI isolates modern DevSpace env", TestModernCliEnvironmentIsolation);
         Run("managed CLI applies legacy effective env", TestLegacyCliEnvironment);
         Run("setup normalizes tunnel hostname and MCP links", TestSetupHostnameNormalization);
+        Run("setup detects existing configuration in place", TestSetupExistingConfiguration);
+        Run("setup updates existing installation without reconfiguration", TestSetupUpdateExisting);
         Run("setup expands offline runtime payload", TestSetupOfflinePayload);
         Run("runtime PATH exposes project Serena and uv tools", TestRuntimeToolPath);
         Run("runtime slot pointer selects isolated node and DevSpace", TestRuntimeSlotSelection);
@@ -86,11 +89,15 @@ internal static class DevSpaceConfigurationTests
         var explicitSettings = PlatformSettings.CreateDefault(explicitRoot);
         explicitSettings.CloudflaredProtocol = "http2";
         PlatformSettingsStore.Save(explicitPath, explicitSettings);
-        AssertEqual("http2", PlatformSettingsStore.Load(explicitPath, explicitRoot).CloudflaredProtocol, "explicit protocol preserved");
+        AssertEqual("http2", PlatformSettingsStore.Load(explicitPath, explicitRoot).CloudflaredProtocol, "explicit protocol remains readable before update migration");
+        var aliasRoot = TestRoot("legacy-cloudflare-protocol-alias");
+        var aliasPath = Path.Combine(aliasRoot, "settings.json");
+        File.WriteAllText(aliasPath, "{\"SchemaVersion\":1,\"AllowedRoots\":[],\"LocalPort\":7677,\"TunnelMode\":\"Remote\",\"CloudflareProtocol\":\"quic\"}");
+        AssertEqual("quic", PlatformSettingsStore.Load(aliasPath, aliasRoot).CloudflaredProtocol, "legacy CloudflareProtocol alias is honored");
         var legacyRoot = TestRoot("legacy-missing-tunnel-protocol");
         var legacyPath = Path.Combine(legacyRoot, "settings.json");
         File.WriteAllText(legacyPath, "{\"SchemaVersion\":1,\"AllowedRoots\":[],\"LocalPort\":7677,\"TunnelMode\":\"Remote\"}");
-        AssertEqual("http2", PlatformSettingsStore.Load(legacyPath, legacyRoot).CloudflaredProtocol, "existing missing protocol preserves legacy http2 behavior");
+        AssertEqual("auto", PlatformSettingsStore.Load(legacyPath, legacyRoot).CloudflaredProtocol, "existing missing protocol uses auto");
     }
 
     private static void TestCloudflaredTunnelLogClassification()
@@ -273,6 +280,126 @@ internal static class DevSpaceConfigurationTests
         AssertTrue(File.Exists(Path.Combine(install, "runtime", "active-slot.txt")), "runtime pointer expanded from payload");
     }
 
+    private static void TestSetupExistingConfiguration()
+    {
+        var root = TestRoot("setup-existing-configuration");
+        var settings = PlatformSettings.CreateDefault(root);
+        settings.AllowedRoots = new List<string> { root };
+        settings.CloudflaredProtocol = "http2";
+        PlatformSettingsStore.Save(Path.Combine(root, "settings.json"), settings);
+
+        AssertTrue(SetupInstaller.HasExistingConfiguration(root), "existing settings detected");
+        AssertEqual(
+            Path.GetFullPath(root),
+            SetupInstaller.FindExistingInstallationRoot(root),
+            "current release root wins when it already contains a valid configuration");
+        AssertEqual(
+            "http2",
+            PlatformSettingsStore.Load(Path.Combine(root, "settings.json"), root).CloudflaredProtocol,
+            "existing explicit protocol remains readable until update migration");
+    }
+
+    private static void TestSetupUpdateExisting()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-control-update-existing-" + Guid.NewGuid().ToString("N"));
+        var install = Path.Combine(root, "install");
+        var bundle = Path.Combine(root, "bundle");
+        var payloadSource = Path.Combine(root, "payload-source");
+        Directory.CreateDirectory(install);
+        Directory.CreateDirectory(bundle);
+
+        var settings = PlatformSettings.CreateDefault(install);
+        settings.AllowedRoots = new List<string> { install };
+        settings.AllowedHosts = new List<string> { "group-origin.example.test" };
+        settings.LocalPort = 17677;
+        settings.TunnelMode = "Remote";
+        settings.FixedHostname = "dev.example.test/group";
+        settings.NamedTunnelIdOrName = "existing-tunnel";
+        settings.CloudflaredProtocol = "http2";
+        settings.AutoStart = false;
+        PlatformSettingsStore.Save(Path.Combine(install, "settings.json"), settings);
+
+        const string token = "test-cloudflare-token-abcdefghijklmnopqrstuvwxyz-0123456789";
+        CloudflareTunnelSecretStore.SaveToken(install, token);
+        var tokenPath = CloudflareTunnelSecretStore.TokenPath(install);
+        var tokenBefore = File.ReadAllText(tokenPath, Encoding.UTF8);
+
+        var stateSentinel = Path.Combine(install, "state", "keep", "sentinel.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(stateSentinel));
+        File.WriteAllText(stateSentinel, "keep-state", Encoding.UTF8);
+
+        var authPath = Path.Combine(install, "state", "devspace-config", "auth.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(authPath));
+        const string owner = "existing-owner-token-1234567890";
+        File.WriteAllText(authPath, "{\"ownerToken\":\"" + owner + "\"}\n", Encoding.UTF8);
+        var managedConfigPath = Path.Combine(install, "state", "devspace-config", "config.jsonc");
+        const string managedConfig = "// keep-existing-managed-config\n{\"server\":{\"port\":17677}}\n";
+        File.WriteAllText(managedConfigPath, managedConfig, Encoding.UTF8);
+
+        var oldSlot = Path.Combine(install, "runtime", "slots", "old-slot");
+        Directory.CreateDirectory(Path.Combine(oldSlot, "node"));
+        Directory.CreateDirectory(Path.Combine(oldSlot, "devspace", "node_modules", "@waishnav", "devspace"));
+        File.WriteAllText(Path.Combine(install, "runtime", "active-slot.txt"), "old-slot\n", Encoding.ASCII);
+        File.WriteAllText(Path.Combine(oldSlot, "READY"), "ready\n");
+        File.WriteAllBytes(Path.Combine(oldSlot, "node", "node.exe"), new byte[] { 1 });
+        File.WriteAllText(
+            Path.Combine(oldSlot, "devspace", "node_modules", "@waishnav", "devspace", "package.json"),
+            "{\"version\":\"1.1.0-beta.4.local.12\"}");
+        File.WriteAllBytes(Path.Combine(install, "cloudflared.exe"), new byte[] { 1 });
+        File.WriteAllText(Path.Combine(install, "README.md"), "old-readme");
+
+        var newSlot = Path.Combine(payloadSource, "runtime", "slots", "new-slot");
+        Directory.CreateDirectory(Path.Combine(newSlot, "node"));
+        Directory.CreateDirectory(Path.Combine(newSlot, "devspace", "node_modules", "@waishnav", "devspace"));
+        File.WriteAllText(Path.Combine(payloadSource, "runtime", "active-slot.txt"), "new-slot\n", Encoding.ASCII);
+        File.WriteAllText(Path.Combine(newSlot, "READY"), "ready\n");
+        File.WriteAllBytes(Path.Combine(newSlot, "node", "node.exe"), new byte[] { 2 });
+        File.WriteAllText(
+            Path.Combine(newSlot, "devspace", "node_modules", "@waishnav", "devspace", "package.json"),
+            "{\"version\":\"1.1.0-beta.4.local.13\"}");
+        File.WriteAllBytes(Path.Combine(payloadSource, "cloudflared.exe"), new byte[] { 2 });
+
+        Directory.CreateDirectory(Path.Combine(bundle, "payload"));
+        File.WriteAllText(Path.Combine(bundle, "README.md"), "new-readme");
+        var payload = Path.Combine(bundle, "payload", "runtime.tar");
+        var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = tar,
+            Arguments = "-cf \"" + payload + "\" runtime cloudflared.exe",
+            WorkingDirectory = payloadSource,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using (var process = Process.Start(startInfo))
+        {
+            var stderr = process.StandardError.ReadToEnd();
+            process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0) throw new Exception("update payload fixture failed: " + stderr);
+        }
+
+        var result = SetupInstaller.UpdateExisting(bundle, install, false);
+        var updated = PlatformSettingsStore.Load(Path.Combine(install, "settings.json"), install);
+
+        AssertEqual("1.1.0-beta.4.local.13", result.DevSpaceVersion, "runtime upgraded");
+        AssertEqual("auto", updated.CloudflaredProtocol, "legacy HTTP/2 migrated to auto");
+        AssertEqual(17677, updated.LocalPort, "port preserved");
+        AssertEqual("dev.example.test/group", updated.FixedHostname, "public endpoint preserved");
+        AssertEqual("existing-tunnel", updated.NamedTunnelIdOrName, "tunnel identity preserved");
+        AssertEqual(Path.GetFullPath(install), Path.GetFullPath(updated.AllowedRoots[0]), "allowed root preserved");
+        AssertEqual(tokenBefore, File.ReadAllText(tokenPath, Encoding.UTF8), "tunnel token preserved");
+        AssertEqual("keep-state", File.ReadAllText(stateSentinel, Encoding.UTF8), "state preserved");
+        AssertEqual(owner, result.OwnerPassword, "owner password preserved");
+        AssertEqual(managedConfig, File.ReadAllText(managedConfigPath, Encoding.UTF8), "managed config preserved");
+        AssertEqual("new-slot", File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(), "active slot upgraded");
+        AssertTrue(Directory.Exists(oldSlot), "previous runtime slot retained for recovery");
+        AssertEqual(2, (int)File.ReadAllBytes(Path.Combine(install, "cloudflared.exe"))[0], "cloudflared upgraded");
+        AssertEqual("new-readme", File.ReadAllText(Path.Combine(install, "README.md")), "product files upgraded");
+    }
+
     private static void TestModernPlan()
     {
         var root = TestRoot("modern");
@@ -446,6 +573,7 @@ internal static class DevSpaceConfigurationTests
 
         AssertEqual(Path.GetFullPath(node), RuntimeResolver.ResolveNodePath(root), "slot node path");
         AssertEqual(Path.GetFullPath(packageRoot), RuntimeResolver.ResolveDevSpacePackageRoot(root), "slot package root");
+        AssertEqual(Path.GetFullPath(packageRoot), RuntimeResolver.ResolveControlPagePackageRoot(root), "DevSpace page package detection follows active slot");
         AssertEqual("slot-a", RuntimeResolver.ActiveRuntimeSlot(root), "active slot name");
         AssertEqual(Path.GetFullPath(sharedSerena), RuntimeResolver.ResolveSerenaBinDirectory(root), "shared Serena remains visible outside slot");
     }

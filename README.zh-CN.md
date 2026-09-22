@@ -72,6 +72,12 @@ Cloudflare 本地 Origin   http://127.0.0.1:7677
 
 配置完成后会启动 `DevSpaceControlPlatform.exe`，之后由 Control 统一管理 DevSpace 和 cloudflared。Tunnel token 独立保存，不进入普通 settings 历史和项目 Git。
 
+### Windows 已有安装直接更新
+
+从 v0.6.0 开始，新版本解压后的 `Setup.exe` 会依次检查当前目录、正在运行的 Control 进程以及当前用户启动项，自动定位已有安装。检测到已有配置后会直接进入**更新现有安装**模式，不再要求重新填写 Allowed Root、端口、Tunnel hostname 或 token。
+
+更新会保留原来的 `settings.json`、Tunnel token、Owner password、状态数据库、worktree 和项目配置，只替换 Control 程序、Bundled Runtime 与 cloudflared，然后重新启动 Control。历史版本若固定使用 `http2`，更新时会迁移为 `auto`，让 cloudflared 根据当前网络自动选择 QUIC 或 HTTP/2，而不是每次启动都强制走 TCP/7844。
+
 ### Windows 日常怎么用
 
 平时打开 Control Platform 就可以查看和管理：
@@ -127,7 +133,7 @@ systemctl --user restart devspace-control.service
 systemctl --user restart devspace-control-cloudflared.service
 ```
 
-`setup-linux.sh` 可以重复运行，用于更新本机配置和 service 文件。
+如果检测到已有 Linux 配置，并且本次没有传入会修改配置的参数，直接再次运行 `./setup-linux.sh` 会自动进入原地更新模式：保留 `config.jsonc`、`auth.json`、Tunnel token、state 和 worktree，只替换 Bundled Runtime、cloudflared、启动脚本与 user service 定义。更新后的 Tunnel 启动器统一使用 `auto`，不会继续继承旧版固定 HTTP/2。只有确实需要重新配置时才使用 `--reconfigure`。
 
 ## Cloudflare 到底要填什么
 

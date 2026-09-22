@@ -119,7 +119,8 @@ namespace DevSpaceControlPlatform
         {
             if (!File.Exists(path)) return PlatformSettings.CreateDefault(platformRoot);
             var serializer = new JavaScriptSerializer();
-            var settings = serializer.Deserialize<PlatformSettings>(File.ReadAllText(path, Encoding.UTF8));
+            var text = File.ReadAllText(path, Encoding.UTF8);
+            var settings = serializer.Deserialize<PlatformSettings>(text);
             if (settings == null || settings.SchemaVersion != 1)
             {
                 throw new InvalidDataException("settings.json schema version 不受支持。");
@@ -127,7 +128,7 @@ namespace DevSpaceControlPlatform
             settings.AllowedRoots = settings.AllowedRoots ?? new List<string>();
             settings.AllowedHosts = settings.AllowedHosts ?? new List<string>();
             settings.SkillPaths = settings.SkillPaths ?? new List<string>();
-            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
+            settings.CloudflaredProtocol = ResolveCloudflaredProtocol(serializer, text, settings.CloudflaredProtocol);
             return settings;
         }
 
@@ -148,7 +149,8 @@ namespace DevSpaceControlPlatform
 
         public static PlatformSettings Deserialize(string text)
         {
-            var settings = new JavaScriptSerializer().Deserialize<PlatformSettings>(text);
+            var serializer = new JavaScriptSerializer();
+            var settings = serializer.Deserialize<PlatformSettings>(text);
             if (settings == null || settings.SchemaVersion != 1)
             {
                 throw new InvalidDataException("历史 settings schema version 不受支持。");
@@ -156,8 +158,30 @@ namespace DevSpaceControlPlatform
             settings.AllowedRoots = settings.AllowedRoots ?? new List<string>();
             settings.AllowedHosts = settings.AllowedHosts ?? new List<string>();
             settings.SkillPaths = settings.SkillPaths ?? new List<string>();
-            settings.CloudflaredProtocol = CloudflareTunnelProtocol.Normalize(settings.CloudflaredProtocol, "http2");
+            settings.CloudflaredProtocol = ResolveCloudflaredProtocol(serializer, text, settings.CloudflaredProtocol);
             return settings;
+        }
+
+        private static string ResolveCloudflaredProtocol(
+            JavaScriptSerializer serializer,
+            string text,
+            string currentValue)
+        {
+            var value = currentValue;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                try
+                {
+                    var raw = serializer.DeserializeObject(text) as Dictionary<string, object>;
+                    object legacy;
+                    if (raw != null && raw.TryGetValue("CloudflareProtocol", out legacy))
+                        value = Convert.ToString(legacy);
+                }
+                catch
+                {
+                }
+            }
+            return CloudflareTunnelProtocol.Normalize(value, "auto");
         }
 
         private static void AtomicWrite(string path, string text)

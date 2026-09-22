@@ -43,10 +43,17 @@ cat > "$STAGE/runtime/devspace/package.json" <<'EOF'
   }
 }
 EOF
+pushd "$STAGE/runtime/devspace" >/dev/null
 PATH="$STAGE/runtime/node/bin:$PATH" \
   "$STAGE/runtime/node/bin/node" \
   "$STAGE/runtime/node/lib/node_modules/npm/bin/npm-cli.js" \
-  install --omit=dev --no-fund --no-audit --prefix "$STAGE/runtime/devspace"
+  install --omit=dev --no-fund --no-audit
+popd >/dev/null
+
+if [[ -e "$STAGE/runtime/devspace/node_modules/devspace-control-platform-runtime" ]]; then
+  echo 'Linux offline runtime unexpectedly linked the Control repository into node_modules.' >&2
+  exit 1
+fi
 
 # Keep the Linux bundle aligned with the Windows Control runtime. Subagents are
 # disabled in the current product scope, so the Claude Agent SDK payload is not

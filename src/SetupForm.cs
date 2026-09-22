@@ -8,6 +8,7 @@ namespace DevSpaceControlPlatform
 {
     internal sealed class SetupForm : Form
     {
+        private readonly string bundleRoot;
         private readonly string platformRoot;
         private readonly TextBox rootBox = new TextBox();
         private readonly NumericUpDown portBox = new NumericUpDown();
@@ -24,10 +25,12 @@ namespace DevSpaceControlPlatform
         private readonly TextBox ownerBox = new TextBox();
         private readonly Button installButton = new Button();
         private readonly Label statusLabel = new Label();
+        private bool existingConfiguration;
 
         public SetupForm()
         {
-            platformRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+            bundleRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+            platformRoot = SetupInstaller.FindExistingInstallationRoot(bundleRoot);
             Text = "DevSpace Control Platform Setup";
             Icon = AppVisuals.CreateApplicationIcon();
             StartPosition = FormStartPosition.CenterScreen;
@@ -172,6 +175,7 @@ namespace DevSpaceControlPlatform
             {
                 var exists = File.Exists(settingsPath);
                 var settings = PlatformSettingsStore.Load(settingsPath, platformRoot);
+                existingConfiguration = exists;
                 rootBox.Text = settings.AllowedRoots != null && settings.AllowedRoots.Count > 0
                     ? settings.AllowedRoots[0]
                     : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
@@ -189,9 +193,16 @@ namespace DevSpaceControlPlatform
                     tokenHintLabel.Text = "已有受保护 Token；留空会继续使用现有 Token。";
                 else
                     tokenHintLabel.Text = "Token 只写入当前用户可访问的本地 secrets 文件。";
+                if (existingConfiguration)
+                {
+                    installButton.Text = "读取已有配置并直接更新";
+                    tokenHintLabel.Text = "已检测现有安装：" + platformRoot +
+                        "；直接更新会保留配置、Token、Owner password 和状态数据，并将 Tunnel 协议迁移为 auto。";
+                }
             }
             catch
             {
+                existingConfiguration = false;
                 rootBox.Text = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             }
         }
@@ -200,14 +211,14 @@ namespace DevSpaceControlPlatform
         {
             try
             {
-                var version = SetupInstaller.ValidateBundle(platformRoot);
+                var version = SetupInstaller.ValidateBundle(bundleRoot);
                 bundleStatus.Text = "离线 Runtime：READY · DevSpace " + version;
                 bundleStatus.ForeColor = Color.DarkGreen;
                 installButton.Enabled = true;
             }
             catch (Exception exception)
             {
-                if (SetupInstaller.HasOfflinePayload(platformRoot))
+                if (SetupInstaller.HasOfflinePayload(bundleRoot))
                 {
                     bundleStatus.Text = "离线 Runtime payload：READY · 点击安装后自动展开（安装过程不联网）";
                     bundleStatus.ForeColor = Color.DarkGreen;
@@ -255,15 +266,17 @@ namespace DevSpaceControlPlatform
             Application.DoEvents();
             try
             {
-                var result = SetupInstaller.Configure(
-                    platformRoot,
-                    rootBox.Text,
-                    Decimal.ToInt32(portBox.Value),
-                    tunnelNameBox.Text,
-                    hostnameBox.Text,
-                    publicEndpointBox.Text,
-                    tokenBox.Text,
-                    autoStartBox.Checked);
+                var result = existingConfiguration
+                    ? SetupInstaller.UpdateExisting(bundleRoot, platformRoot)
+                    : SetupInstaller.Configure(
+                        platformRoot,
+                        rootBox.Text,
+                        Decimal.ToInt32(portBox.Value),
+                        tunnelNameBox.Text,
+                        hostnameBox.Text,
+                        publicEndpointBox.Text,
+                        tokenBox.Text,
+                        autoStartBox.Checked);
                 localOriginBox.Text = result.LocalOrigin;
                 localMcpBox.Text = result.LocalMcpUrl;
                 publicMcpBox.Text = result.PublicMcpUrl;
@@ -275,7 +288,7 @@ namespace DevSpaceControlPlatform
 
                 Text = "DevSpace Control Platform Setup - 已完成";
                 MessageBox.Show(
-                    "配置完成并已启动 Control。\r\n\r\n" +
+                    (existingConfiguration ? "现有配置已保留并完成更新。\r\n\r\n" : "配置完成并已启动 Control。\r\n\r\n") +
                     "Cloudflare Origin：" + result.LocalOrigin + "\r\n" +
                     "本地 MCP：" + result.LocalMcpUrl + "\r\n" +
                     "公网 MCP：" + result.PublicMcpUrl + "\r\n\r\n" +

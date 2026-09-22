@@ -1096,17 +1096,8 @@ namespace DevSpaceControlPlatform
         private void DetectDefaultPackageRoot()
         {
             if (!string.IsNullOrWhiteSpace(packageRootBox.Text)) return;
-            var candidates = new[]
-            {
-                Path.Combine(platformRoot, "runtime", "devspace", "node_modules", "@waishnav", "devspace"),
-                Path.Combine(Directory.GetParent(platformRoot).FullName, "runtime", "devspace", "node_modules", "@waishnav", "devspace")
-            };
-            foreach (var runtimePackage in candidates)
-            {
-                if (!File.Exists(Path.Combine(runtimePackage, "package.json"))) continue;
-                packageRootBox.Text = runtimePackage;
-                return;
-            }
+            try { packageRootBox.Text = RuntimeResolver.ResolveControlPagePackageRoot(platformRoot); }
+            catch { }
         }
 
         private void DetectVersion(bool showError)

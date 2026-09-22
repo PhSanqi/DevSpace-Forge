@@ -29,6 +29,8 @@ namespace DevSpaceControlPlatform
 
     internal static class SetupInstaller
     {
+        private const string ProductRegistryPath = @"Software\DevSpaceControlPlatform";
+
         public static string OfflinePayloadPath(string platformRoot)
         {
             return Path.Combine(Path.GetFullPath(platformRoot), "payload", "runtime.tar");
@@ -40,19 +42,139 @@ namespace DevSpaceControlPlatform
             return File.Exists(path) && new FileInfo(path).Length > 0;
         }
 
-        public static void EnsureOfflinePayload(string platformRoot)
+        public static bool HasExistingConfiguration(string platformRoot)
         {
             var root = Path.GetFullPath(platformRoot);
+            var settingsPath = Path.Combine(root, "settings.json");
+            if (!File.Exists(settingsPath)) return false;
             try
             {
-                ValidateBundle(root);
-                return;
+                PlatformSettingsStore.Load(settingsPath, root);
+                return true;
             }
             catch
             {
-                if (!HasOfflinePayload(root)) throw;
+                return false;
+            }
+        }
+
+        public static string FindExistingInstallationRoot(string bundleRoot)
+        {
+            var releaseRoot = Path.GetFullPath(bundleRoot);
+            if (HasExistingConfiguration(releaseRoot)) return releaseRoot;
+
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(ProductRegistryPath))
+                {
+                    var remembered = key == null ? string.Empty : Convert.ToString(key.GetValue("InstallRoot"));
+                    if (!string.IsNullOrWhiteSpace(remembered) && HasExistingConfiguration(remembered))
+                        return Path.GetFullPath(remembered);
+                }
+            }
+            catch
+            {
             }
 
+            foreach (var process in Process.GetProcessesByName("DevSpaceControlPlatform"))
+            {
+                try
+                {
+                    var module = process.MainModule;
+                    var executable = module == null ? string.Empty : module.FileName;
+                    if (string.IsNullOrWhiteSpace(executable)) continue;
+                    var candidate = Path.GetDirectoryName(Path.GetFullPath(executable));
+                    if (!string.IsNullOrWhiteSpace(candidate) && HasExistingConfiguration(candidate))
+                        return candidate;
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    var command = key == null
+                        ? string.Empty
+                        : Convert.ToString(key.GetValue("DevSpaceControlPlatform"));
+                    var executable = ExecutableFromCommand(command);
+                    var candidate = string.IsNullOrWhiteSpace(executable)
+                        ? string.Empty
+                        : Path.GetDirectoryName(Path.GetFullPath(executable));
+                    if (!string.IsNullOrWhiteSpace(candidate) && HasExistingConfiguration(candidate))
+                        return candidate;
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var parent = Directory.GetParent(releaseRoot);
+                if (parent != null)
+                {
+                    var candidates = new List<string>();
+                    foreach (var directory in parent.GetDirectories("DevSpace*"))
+                    {
+                        var candidate = directory.FullName;
+                        if (string.Equals(candidate, releaseRoot, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (HasExistingConfiguration(candidate)) candidates.Add(candidate);
+                    }
+                    if (candidates.Count == 1) return Path.GetFullPath(candidates[0]);
+                }
+            }
+            catch
+            {
+            }
+
+            return releaseRoot;
+        }
+
+        private static void RememberInstallationRoot(string platformRoot)
+        {
+            using (var key = Registry.CurrentUser.CreateSubKey(ProductRegistryPath))
+            {
+                if (key == null) throw new InvalidOperationException("无法保存 DevSpace 安装目录。");
+                key.SetValue("InstallRoot", Path.GetFullPath(platformRoot), RegistryValueKind.String);
+            }
+        }
+
+        public static void EnsureOfflinePayload(string platformRoot)
+        {
+            ApplyOfflinePayload(platformRoot, platformRoot, false);
+        }
+
+        private static void ApplyOfflinePayload(string bundleRoot, string targetRoot, bool force)
+        {
+            var sourceRoot = Path.GetFullPath(bundleRoot);
+            var root = Path.GetFullPath(targetRoot);
+            if (force)
+            {
+                if (!HasOfflinePayload(sourceRoot))
+                    throw new FileNotFoundException("更新包缺少离线 Runtime payload。", OfflinePayloadPath(sourceRoot));
+                ApplyOfflinePayloadUpgrade(sourceRoot, root);
+                return;
+            }
+
+            if (!force)
+            {
+                try
+                {
+                    ValidateBundle(root);
+                    return;
+                }
+                catch
+                {
+                    if (!HasOfflinePayload(sourceRoot)) throw;
+                }
+            }
             try
             {
                 var runtime = Path.Combine(root, "runtime");
@@ -64,14 +186,74 @@ namespace DevSpaceControlPlatform
             {
                 throw new IOException("无法替换旧 Runtime。请先退出正在运行的 DevSpace Control，再重新运行 Setup。", exception);
             }
+            ExtractOfflinePayload(sourceRoot, root);
+            ValidateBundle(root);
+        }
 
+        private static void ApplyOfflinePayloadUpgrade(string sourceRoot, string targetRoot)
+        {
+            Directory.CreateDirectory(targetRoot);
+            var runtime = Path.Combine(targetRoot, "runtime");
+            var activePointer = Path.Combine(runtime, "active-slot.txt");
+            var previousActiveSlot = File.Exists(activePointer)
+                ? File.ReadAllText(activePointer, Encoding.ASCII)
+                : null;
+            var cloudflared = Path.Combine(targetRoot, "cloudflared.exe");
+            var cloudflaredBackup = cloudflared + ".update-backup";
+
+            if (File.Exists(cloudflared))
+                File.Copy(cloudflared, cloudflaredBackup, true);
+            else if (File.Exists(cloudflaredBackup))
+                File.Delete(cloudflaredBackup);
+
+            try
+            {
+                ExtractOfflinePayload(sourceRoot, targetRoot);
+                ValidateBundle(targetRoot);
+                if (File.Exists(cloudflaredBackup)) File.Delete(cloudflaredBackup);
+            }
+            catch
+            {
+                try
+                {
+                    Directory.CreateDirectory(runtime);
+                    if (previousActiveSlot == null)
+                    {
+                        if (File.Exists(activePointer)) File.Delete(activePointer);
+                    }
+                    else
+                    {
+                        File.WriteAllText(activePointer, previousActiveSlot, Encoding.ASCII);
+                    }
+                    if (File.Exists(cloudflaredBackup))
+                        File.Copy(cloudflaredBackup, cloudflared, true);
+                }
+                catch
+                {
+                }
+                throw;
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(cloudflaredBackup)) File.Delete(cloudflaredBackup);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static void ExtractOfflinePayload(string sourceRoot, string targetRoot)
+        {
             var systemTar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
             var tar = File.Exists(systemTar) ? systemTar : "tar.exe";
             var startInfo = new ProcessStartInfo
             {
                 FileName = tar,
-                Arguments = "-xf " + Quote(OfflinePayloadPath(root)) + " -C " + Quote(root),
-                WorkingDirectory = root,
+                Arguments = "-xf " + Quote(OfflinePayloadPath(sourceRoot)) + " -C " + Quote(targetRoot),
+                WorkingDirectory = targetRoot,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -85,7 +267,6 @@ namespace DevSpaceControlPlatform
                 if (process.ExitCode != 0)
                     throw new InvalidDataException("离线 Runtime 展开失败：" + stderr.Trim() + " " + stdout.Trim());
             }
-            ValidateBundle(root);
         }
 
         public static string NormalizeHostname(string value)
@@ -296,14 +477,150 @@ namespace DevSpaceControlPlatform
             settings.LogRequests = true;
             settings.LogToolCalls = true;
             settings.LogShellCommands = false;
+            settings.CloudflaredProtocol = "auto";
             PlatformSettingsStore.Save(settingsPath, settings);
 
             if (token.Length > 0) CloudflareTunnelSecretStore.SaveToken(root, token);
             ApplyWindowsAutoStart(root, autoStart);
 
+            var result = FinalizeConfiguration(root, settings, versionText, false);
+            RememberInstallationRoot(root);
+            return result;
+        }
+
+        public static SetupInstallResult UpdateExisting(string bundleRoot, string platformRoot)
+        {
+            return UpdateExisting(bundleRoot, platformRoot, true);
+        }
+
+        internal static SetupInstallResult UpdateExisting(
+            string bundleRoot,
+            string platformRoot,
+            bool applySystemIntegration)
+        {
+            var root = Path.GetFullPath(platformRoot);
+            var sourceRoot = Path.GetFullPath(bundleRoot);
+            var settingsPath = Path.Combine(root, "settings.json");
+            if (!File.Exists(settingsPath))
+                throw new FileNotFoundException("未找到现有 settings.json，不能执行直接更新。", settingsPath);
+
+            var settings = PlatformSettingsStore.Load(settingsPath, root);
+            if (string.Equals(settings.TunnelMode, "Remote", StringComparison.OrdinalIgnoreCase) &&
+                !CloudflareTunnelSecretStore.HasToken(root))
+            {
+                throw new InvalidDataException("现有 Remote Tunnel 配置缺少本地 Token，无法无交互更新。");
+            }
+
+            StopManagedRuntimeProcesses(root);
+            ApplyOfflinePayload(sourceRoot, root, true);
+            CopyProductFiles(sourceRoot, root);
+            var versionText = ValidateBundle(root);
+
+            // Previous releases could persist http2 as the compatibility fallback.
+            // Auto lets cloudflared select QUIC or HTTP/2 according to the current
+            // network instead of pinning every restart to TCP/7844.
+            settings.CloudflaredProtocol = "auto";
+            PlatformSettingsStore.Save(settingsPath, settings);
+            if (applySystemIntegration) ApplyWindowsAutoStart(root, settings.AutoStart);
+
+            var result = FinalizeConfiguration(root, settings, versionText, true);
+            if (applySystemIntegration) RememberInstallationRoot(root);
+            return result;
+        }
+
+        private static void CopyProductFiles(string bundleRoot, string targetRoot)
+        {
+            var source = Path.GetFullPath(bundleRoot);
+            var target = Path.GetFullPath(targetRoot);
+            if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase)) return;
+
+            Directory.CreateDirectory(target);
+            foreach (var fileName in new[]
+            {
+                "DevSpaceControlPlatform.exe",
+                "Setup.exe",
+                "README.md",
+                "README.zh-CN.md",
+                "LICENSE",
+                "update-control-platform-out-of-band.ps1"
+            })
+            {
+                var from = Path.Combine(source, fileName);
+                if (!File.Exists(from)) continue;
+                File.Copy(from, Path.Combine(target, fileName), true);
+            }
+
+            var sourcePayload = OfflinePayloadPath(source);
+            if (File.Exists(sourcePayload))
+            {
+                var targetPayload = OfflinePayloadPath(target);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPayload));
+                File.Copy(sourcePayload, targetPayload, true);
+            }
+        }
+
+        private static void StopManagedRuntimeProcesses(string platformRoot)
+        {
+            var root = Path.GetFullPath(platformRoot).TrimEnd(Path.DirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            foreach (var processName in new[] { "DevSpaceControlPlatform", "node", "cloudflared" })
+            {
+                foreach (var process in Process.GetProcessesByName(processName))
+                {
+                    try
+                    {
+                        var module = process.MainModule;
+                        var executable = module == null ? string.Empty : module.FileName;
+                        if (string.IsNullOrWhiteSpace(executable)) continue;
+                        var fullPath = Path.GetFullPath(executable);
+                        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (process.Id == Process.GetCurrentProcess().Id) continue;
+                        try
+                        {
+                            if (process.CloseMainWindow() && process.WaitForExit(2500)) continue;
+                        }
+                        catch { }
+                        process.Kill();
+                        process.WaitForExit(5000);
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+        }
+
+        private static string ExecutableFromCommand(string command)
+        {
+            var value = (command ?? string.Empty).Trim();
+            if (value.Length == 0) return string.Empty;
+            if (value[0] == '"')
+            {
+                var end = value.IndexOf('"', 1);
+                return end > 1 ? value.Substring(1, end - 1) : string.Empty;
+            }
+            var separator = value.IndexOf(' ');
+            return separator < 0 ? value : value.Substring(0, separator);
+        }
+
+        private static SetupInstallResult FinalizeConfiguration(
+            string root,
+            PlatformSettings settings,
+            string versionText,
+            bool preserveExistingManagedConfig)
+        {
+            ValidatePort(settings.LocalPort);
+
             var packageRoot = RuntimeResolver.ResolveDevSpacePackageRoot(root);
             var version = DevSpaceVersion.FromPackageJson(Path.Combine(packageRoot, "package.json"));
-            var publicBaseUrl = PublicEndpoint.BaseUrl(normalizedPublicEndpoint);
+            var normalizedPublicEndpoint = NormalizeHostname(settings.FixedHostname);
+            var publicBaseUrl = normalizedPublicEndpoint.Length == 0
+                ? null
+                : PublicEndpoint.BaseUrl(normalizedPublicEndpoint);
             var configDirectory = Path.Combine(root, "state", "devspace-config");
             var plan = DevSpaceConfiguration.BuildPlan(
                 version,
@@ -313,13 +630,14 @@ namespace DevSpaceControlPlatform
             var report = DevSpaceEffectiveStateVerifier.Verify(plan, root);
             if (!report.IsSafe)
                 throw new InvalidDataException(string.Join(Environment.NewLine, report.Errors.ToArray()));
-            DevSpaceConfiguration.WritePlan(plan);
+            if (!preserveExistingManagedConfig || !File.Exists(plan.ConfigPath))
+                DevSpaceConfiguration.WritePlan(plan);
             ManagedAgentInstructions.Ensure(root);
 
             return new SetupInstallResult
             {
-                LocalOrigin = LocalOrigin(port),
-                LocalMcpUrl = LocalMcpUrl(port, normalizedPublicEndpoint),
+                LocalOrigin = LocalOrigin(settings.LocalPort),
+                LocalMcpUrl = LocalMcpUrl(settings.LocalPort, normalizedPublicEndpoint),
                 PublicMcpUrl = PublicMcpUrl(normalizedPublicEndpoint),
                 OwnerPassword = EnsureOwnerAuth(configDirectory),
                 DevSpaceVersion = versionText
