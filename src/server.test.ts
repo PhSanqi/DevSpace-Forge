@@ -65,6 +65,117 @@ test("HTTP response start timing records only the first writeHead", () => {
   assert.equal(typeof timing.startedAt, "number");
 });
 
+test("origin logs correlate response start, MCP tool completion and response finish", async (t) => {
+  const { root, localBaseUrl, accessToken } = await httpServerFixture(
+    t,
+    "devspace-origin-lifecycle-test-",
+    true,
+  );
+  const events: Array<Record<string, unknown>> = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => {
+    for (const argument of args) {
+      if (typeof argument !== "string" || !argument.startsWith("{")) continue;
+      try {
+        const entry = JSON.parse(argument) as Record<string, unknown>;
+        if (typeof entry.event === "string") events.push(entry);
+      } catch { /* Other test output is not a structured DevSpace event. */ }
+    }
+  };
+  try {
+    const response = await postModernMcp(localBaseUrl, accessToken, "tools/call", {
+      name: "open_workspace",
+      arguments: { path: root },
+    }, { headers: { "cf-ray": "test-edge-request-123" } });
+    assert.equal(response.status, 200, await response.clone().text());
+    await response.text();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    console.log = originalLog;
+  }
+  const request = events.find((entry) => entry.event === "http_request_start"
+    && entry.path === "/mcp" && entry.method === "POST" && entry.toolStartedCount === 0
+    && events.some((other) => other.requestId === entry.requestId && other.event === "mcp_request_complete"
+      && other.rpcToolName === "open_workspace"));
+  assert.ok(request, "the origin must log a correlated MCP request");
+  assert.equal(request.cfRay, "test-edge-request-123");
+  const matching = events.filter((entry) => entry.requestId === request.requestId);
+  const responseStart = matching.find((entry) => entry.event === "http_response_start");
+  const complete = matching.find((entry) => entry.event === "mcp_request_complete");
+  const finished = matching.find((entry) => entry.event === "http_request");
+  assert.equal(responseStart?.transport_established, true);
+  assert.equal(responseStart?.firstByteObservation, "origin_write_head_not_client_receipt");
+  assert.equal(typeof responseStart?.response_start_ms, "number");
+  assert.equal(complete?.toolStartedCount, 1);
+  assert.equal(complete?.toolResolvedCount, 1);
+  assert.equal(complete?.activeToolCount, 0);
+  assert.equal(finished?.outcome, "response_finished");
+  assert.equal(finished?.toolResolvedCount, 1);
+});
+
+test("origin distinguishes a disconnected request with an in-flight MCP tool", async (t) => {
+  const { root, localBaseUrl, accessToken } = await httpServerFixture(
+    t,
+    "devspace-origin-abort-test-",
+    true,
+  );
+  const opened = await postModernMcp(localBaseUrl, accessToken, "tools/call", {
+    name: "open_workspace",
+    arguments: { path: root },
+  });
+  const openedBody = await opened.json() as {
+    result?: { structuredContent?: { workspace_id?: string } };
+  };
+  const workspaceId = openedBody.result?.structuredContent?.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const events: Array<Record<string, unknown>> = [];
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const capture = (...args: unknown[]) => {
+    for (const argument of args) {
+      if (typeof argument !== "string" || !argument.startsWith("{")) continue;
+      try {
+        const entry = JSON.parse(argument) as Record<string, unknown>;
+        if (typeof entry.event === "string") events.push(entry);
+      } catch { /* Ignore non-JSON log output. */ }
+    }
+  };
+  console.log = capture;
+  console.warn = capture;
+  try {
+    const controller = new AbortController();
+    const pending = postModernMcp(localBaseUrl, accessToken, "tools/call", {
+      name: "exec_command",
+      arguments: {
+        workspace_id: workspaceId,
+        cmd: "node -e \"require('node:fs').writeFileSync('abort-started','');setTimeout(()=>{},1800)\"",
+        yield_time_ms: 12_000,
+      },
+    }, { signal: controller.signal }).then(
+      () => false,
+      (error: unknown) => error instanceof Error && error.name === "AbortError",
+    );
+    await waitForFile(join(root, "abort-started"));
+    controller.abort();
+    assert.equal(await pending, true);
+    for (let attempt = 0; attempt < 40 && !events.some((entry) => entry.event === "http_request_aborted"); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+  }
+  const rpc = events.find((entry) => entry.event === "mcp_request" && entry.rpcToolName === "exec_command");
+  assert.ok(rpc, "expected origin MCP request evidence");
+  const closed = events.find((entry) => entry.event === "http_request_aborted" && entry.requestId === rpc.requestId);
+  assert.equal(closed?.outcome, "connection_closed_before_finish");
+  assert.equal(closed?.disconnectPhase, "while_tool_running_before_response");
+  assert.equal(closed?.responseStarted, false);
+  assert.equal(closed?.transport_established, true);
+  assert.equal(closed?.activeToolCount, 1);
+});
+
 test("tool modes expose the expected host-facing tool surface", async (t) => {
   const cases: Array<{
     mode: ToolMode;
@@ -74,6 +185,11 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
       mode: "claude",
       expected: [
         "open_workspace",
+        "payload_begin",
+        "payload_chunk",
+        "payload_status",
+        "payload_commit",
+        "payload_read",
         "read",
         "read_image",
         "write",
@@ -99,6 +215,11 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
       mode: "codex",
       expected: [
         "open_workspace",
+        "payload_begin",
+        "payload_chunk",
+        "payload_status",
+        "payload_commit",
+        "payload_read",
         "read",
         "read_image",
         "apply_patch",
@@ -168,6 +289,149 @@ test("Codex mutation operation_id safely replays an identical lost response", as
   assert.equal(structuredContent(replayed).operation_replayed, true);
   assert.equal(structuredContent(replayed).operation_id, operationId);
   assert.equal(await readFile(join(context.project, "replay.txt"), "utf8"), "once\n");
+});
+
+test("payload spool completes an MCP upload and feeds exec_command and apply_patch only after commit", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "payload-e2e"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const upload = async (label: string, bytes: Buffer) => {
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const begun = structuredContent(await context.client.callTool({
+      name: "payload_begin",
+      arguments: {
+        workspace_id: workspaceId,
+        operation_id: `payload-begin-${label}-0001`,
+        total_bytes: bytes.length,
+        sha256,
+      },
+    }));
+    const payloadRef = begun.payload_ref;
+    assert.equal(typeof payloadRef, "string");
+    assert.equal(begun.committed, false);
+
+    const chunkBytes = Number(begun.chunk_bytes);
+    assert.ok(chunkBytes > 0);
+    const totalChunks = Number(begun.total_chunks);
+    for (let sequence = 0; sequence < totalChunks; sequence += 1) {
+      const chunkStart = sequence * chunkBytes;
+      const chunkBuffer = bytes.subarray(
+        chunkStart,
+        Math.min(bytes.length, chunkStart + chunkBytes),
+      );
+      const chunk = structuredContent(await context.client.callTool({
+        name: "payload_chunk",
+        arguments: {
+          workspace_id: workspaceId,
+          operation_id: `payload-chunk-${label}-${String(sequence).padStart(4, "0")}`,
+          payload_ref: payloadRef,
+          sequence,
+          chunk_sha256: createHash("sha256").update(chunkBuffer).digest("hex"),
+          data_base64: chunkBuffer.toString("base64"),
+        },
+      }));
+      assert.equal(chunk.chunk_replayed, false);
+    }
+
+    const status = structuredContent(await context.client.callTool({
+      name: "payload_status",
+      arguments: { workspace_id: workspaceId, payload_ref: payloadRef },
+    }));
+    assert.equal(status.committed, false);
+    assert.equal((status.received_sequences as unknown[]).length, totalChunks);
+    assert.deepEqual(status.missing_sequences, []);
+
+    const committed = structuredContent(await context.client.callTool({
+      name: "payload_commit",
+      arguments: {
+        workspace_id: workspaceId,
+        operation_id: `payload-commit-${label}-0001`,
+        payload_ref: payloadRef,
+      },
+    }));
+    assert.equal(committed.committed, true);
+    return payloadRef as string;
+  };
+
+  const command = Buffer.from(
+    `node -e "require('node:fs').writeFileSync('payload-command.txt','from-payload')"`,
+    "utf8",
+  );
+  const commandSha = createHash("sha256").update(command).digest("hex");
+  const begunCommand = structuredContent(await context.client.callTool({
+    name: "payload_begin",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: "payload-begin-command-uncommitted",
+      total_bytes: command.length,
+      sha256: commandSha,
+    },
+  }));
+  const uncommitted = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: "payload-exec-uncommitted-0001",
+      payload_ref: begunCommand.payload_ref,
+      yield_time_ms: 2_000,
+    },
+  });
+  assert.equal(uncommitted.isError, true);
+
+  const commandRef = await upload("command", command);
+  const read = structuredContent(await context.client.callTool({
+    name: "payload_read",
+    arguments: {
+      workspace_id: workspaceId,
+      payload_ref: commandRef,
+      offset: 0,
+      length: 12,
+      encoding: "utf8",
+    },
+  }));
+  assert.equal(read.data, command.subarray(0, 12).toString("utf8"));
+  assert.equal(read.length, 12);
+
+  const executed = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: "payload-exec-command-0001",
+      payload_ref: commandRef,
+      yield_time_ms: 2_000,
+    },
+  });
+  assert.notEqual(executed.isError, true);
+  assert.equal(await readFile(join(context.project, "payload-command.txt"), "utf8"), "from-payload");
+
+  const largePatchLines = Array.from(
+    { length: 4_000 },
+    (_, index) => `+payload-line-${String(index).padStart(4, "0")}-xxxxxxxx`,
+  );
+  const patchBytes = Buffer.from([
+    "*** Begin Patch",
+    "*** Add File: payload-patch.txt",
+    ...largePatchLines,
+    "*** End Patch",
+  ].join("\n"), "utf8");
+  assert.ok(patchBytes.length > 48 * 1024);
+  const patchRef = await upload("patch", patchBytes);
+  const patched = await context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspace_id: workspaceId,
+      operation_id: "payload-apply-patch-0001",
+      payload_ref: patchRef,
+    },
+  });
+  assert.notEqual(patched.isError, true);
+  const patchedText = await readFile(join(context.project, "payload-patch.txt"), "utf8");
+  assert.match(patchedText, /^payload-line-0000-/);
+  assert.match(patchedText, /payload-line-3999-xxxxxxxx\n$/);
 });
 
 test("workspace hygiene prunes recoverably and replays a lost response", async (t) => {
@@ -454,6 +718,9 @@ test("Codex process tools bound model-facing yield windows to 12 seconds", async
 
     assert.equal(yieldSchema?.maximum, 12_000);
     assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
+    if (toolName === "exec_command") {
+      assert.match(yieldSchema?.description ?? "", /defaults to 3000/i);
+    }
   }
 });
 
@@ -1424,6 +1691,7 @@ interface HttpServerFixture {
 async function httpServerFixture(
   t: TestContext,
   prefix: string,
+  lifecycleLogging = false,
 ): Promise<HttpServerFixture> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const ownerToken = "test-owner-token-that-is-long-enough";
@@ -1438,6 +1706,11 @@ async function httpServerFixture(
     },
     storage: { stateDir: join(root, ".state") },
   }));
+  if (lifecycleLogging) {
+    config.logging.level = "debug";
+    config.logging.format = "json";
+    config.logging.requests = true;
+  }
   const running = createServer(config, { incomingArtifactAdapters: [] });
   const httpServer = running.app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => httpServer.once("listening", resolve));
@@ -1666,6 +1939,7 @@ function postModernMcp(
   accessToken: string | undefined,
   method: string,
   params: Record<string, unknown>,
+  options: { signal?: AbortSignal; headers?: Record<string, string> } = {},
 ): Promise<Response> {
   const mcpName = typeof params.name === "string"
     ? params.name
@@ -1680,7 +1954,9 @@ function postModernMcp(
       "mcp-method": method,
       "mcp-protocol-version": "2026-07-28",
       ...(mcpName ? { "mcp-name": mcpName } : {}),
+      ...options.headers,
     },
+    signal: options.signal,
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: `modern-${method}`,

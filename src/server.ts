@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import type { Server as HttpServer } from "node:http";
@@ -32,6 +33,7 @@ import {
   createOpenAIIncomingArtifactAdapter,
   type IncomingArtifactAdapter,
 } from "./incoming-artifacts.js";
+import { registerPayloadTools } from "./payload-tools.js";
 import { readImageFile } from "./image-read.js";
 import {
   logEvent,
@@ -50,6 +52,11 @@ import { ProcessSessionManager } from "./process-sessions.js";
 import { closeOperationReceiptManager } from "./operation-receipts.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
+import {
+  originRequestTimingFields,
+  requestDisconnectPhase,
+  type RequestLifecycle,
+} from "./request-lifecycle.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
@@ -59,7 +66,10 @@ import {
   WorkspaceRegistry,
   type LoadedAgentsFile,
 } from "./workspaces.js";
-import { SerenaSemanticManager } from "./serena-semantic.js";
+import {
+  SerenaSemanticManager,
+  serenaWarmPathForWorkspace,
+} from "./serena-semantic.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
@@ -257,8 +267,10 @@ function serverInstructions(
   const agents = `Follow root/global instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered automatically when a concrete path is read or packed, so do not recursively scan the repository for instruction files. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
   const imageInstruction = ` Use ${toolNames.readImage} when the model needs to inspect a local JPG/PNG image; it returns image pixels directly and must not be replaced by reading binary files as text.`;
+  const payloadInstruction =
+    " For tool arguments too large for one MCP request, use payload_begin, payload_chunk, and payload_commit, then pass the committed payload_ref to a tool that explicitly accepts it; never execute or consume uncommitted chunks.";
 
-  return `${common}${imageInstruction} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
+  return `${common}${imageInstruction}${payloadInstruction} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -394,6 +406,8 @@ function requestLogFields(req: Request, config: ServerConfig): Record<string, un
     origin: req.header("origin"),
     referer: req.header("referer"),
     contentLength: req.header("content-length"),
+    // Correlation hint for Cloudflare edge logs, not a trusted authorization field.
+    cfRay: req.header("cf-ray")?.slice(0, 128),
   };
 }
 
@@ -652,18 +666,23 @@ function registerMcpSurface(
         { conversationScopeId },
       );
       if (semantic?.available) {
-        const warmStartedAt = performance.now();
-        void semantic.warm(workspace.root).then(
-          () => logEvent(config.logging, "debug", "serena_warm_ready", {
-            workspaceId: workspace.id,
-            durationMs: Math.round(performance.now() - warmStartedAt),
-          }),
-          (error) => logEvent(config.logging, "debug", "serena_warm_failed", {
-            workspaceId: workspace.id,
-            durationMs: Math.round(performance.now() - warmStartedAt),
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
+        const warmPath = serenaWarmPathForWorkspace(workspace.root);
+        if (warmPath) {
+          const warmStartedAt = performance.now();
+          void semantic.warm(workspace.root, warmPath).then(
+            () => logEvent(config.logging, "debug", "serena_warm_ready", {
+              workspaceId: workspace.id,
+              warmPath,
+              durationMs: Math.round(performance.now() - warmStartedAt),
+            }),
+            (error) => logEvent(config.logging, "debug", "serena_warm_failed", {
+              workspaceId: workspace.id,
+              warmPath,
+              durationMs: Math.round(performance.now() - warmStartedAt),
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        }
       }
       const review = await reviewCheckpoints.initializeWorkspace({
         workspaceId: workspace.id,
@@ -1033,6 +1052,11 @@ function registerMcpSurface(
     semantic,
   });
 
+  registerPayloadTools(registrationTarget, {
+    config,
+    workspaces,
+  });
+
   registerAppTool(
     registrationTarget,
     "show_changes",
@@ -1164,6 +1188,33 @@ export function createServer(
     ? new SerenaSemanticManager()
     : undefined;
   const toolActivities = new ToolActivityTracker();
+  const requestActivity = new AsyncLocalStorage<RequestLifecycle>();
+  const trackRequestTool: TrackToolActivity = <T>(operation: () => Promise<T>): Promise<T> => {
+    const lifecycle = requestActivity.getStore();
+    if (!lifecycle) return toolActivities.track(operation);
+    lifecycle.toolStartedCount += 1;
+    lifecycle.activeToolCount += 1;
+    let result: Promise<T>;
+    try {
+      result = toolActivities.track(operation);
+    } catch (error) {
+      lifecycle.activeToolCount -= 1;
+      lifecycle.toolRejectedCount += 1;
+      throw error;
+    }
+    return result.then(
+      (value) => {
+        lifecycle.activeToolCount -= 1;
+        lifecycle.toolResolvedCount += 1;
+        return value;
+      },
+      (error: unknown) => {
+        lifecycle.activeToolCount -= 1;
+        lifecycle.toolRejectedCount += 1;
+        throw error;
+      },
+    );
+  };
   const localAgentProviders = buildLocalAgentProviderStatuses(
     config.subagents,
     getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
@@ -1182,7 +1233,7 @@ export function createServer(
       processSessions,
       resolveLocalAgentProviders,
       incomingArtifactAdapters,
-      toolActivities.track,
+      trackRequestTool,
       semantic,
     );
   });
@@ -1219,16 +1270,24 @@ export function createServer(
       && (config.logging.assets || !path.startsWith("/mcp-app-assets"));
     let finished = false;
     res.locals.requestId = requestId;
+    res.locals.originRequestStartedAt = startedAt;
+    const lifecycle: RequestLifecycle = {
+      toolStartedCount: 0,
+      toolResolvedCount: 0,
+      toolRejectedCount: 0,
+      activeToolCount: 0,
+    };
+    res.locals.requestLifecycle = lifecycle;
 
     const responseTiming = observeHttpResponseStart(res, (responseStartedAt) => {
+      lifecycle.responseStartedAt = responseStartedAt;
       if (!shouldLogRequest) return;
       logEvent(config.logging, "debug", "http_response_start", {
         requestId,
         method: req.method,
         path,
         status: res.statusCode,
-        firstByteMs: Math.round(responseStartedAt - startedAt),
-        transportEstablished: true,
+        ...originRequestTimingFields(lifecycle, startedAt, responseStartedAt),
         ...requestLogFields(req, config),
       });
     });
@@ -1239,7 +1298,7 @@ export function createServer(
         requestId,
         method: req.method,
         path,
-        transportEstablished: true,
+        ...originRequestTimingFields(lifecycle, startedAt, startedAt),
         ...requestLogFields(req, config),
       });
     }
@@ -1253,12 +1312,8 @@ export function createServer(
         method: req.method,
         path,
         status: res.statusCode,
-        durationMs: Math.round(performance.now() - startedAt),
-        responseStarted: responseTiming.startedAt !== undefined,
-        firstByteMs: responseTiming.startedAt === undefined
-          ? undefined
-          : Math.round(responseTiming.startedAt - startedAt),
-        transportEstablished: true,
+        outcome: "response_finished",
+        ...originRequestTimingFields(lifecycle, startedAt, performance.now()),
         ...requestLogFields(req, config),
       });
     });
@@ -1270,12 +1325,9 @@ export function createServer(
         method: req.method,
         path,
         status: res.statusCode,
-        durationMs: Math.round(performance.now() - startedAt),
-        responseStarted: responseTiming.startedAt !== undefined,
-        firstByteMs: responseTiming.startedAt === undefined
-          ? undefined
-          : Math.round(responseTiming.startedAt - startedAt),
-        transportEstablished: true,
+        outcome: "connection_closed_before_finish",
+        disconnectPhase: requestDisconnectPhase(lifecycle),
+        ...originRequestTimingFields(lifecycle, startedAt, performance.now()),
         ...requestLogFields(req, config),
       });
     });
@@ -1367,19 +1419,26 @@ export function createServer(
     });
 
     const handlerStartedAt = performance.now();
+    const lifecycle = res.locals.requestLifecycle as RequestLifecycle;
+    const requestStartedAt = res.locals.originRequestStartedAt as number;
+    lifecycle.handlerStartedAt = handlerStartedAt;
     try {
-      await mcpNodeHandler(req, res, req.body);
+      await requestActivity.run(lifecycle, () => mcpNodeHandler(req, res, req.body));
+      lifecycle.handlerCompletedAt = performance.now();
       const responseTiming = res.locals.httpResponseTiming as HttpResponseTiming | undefined;
       logEvent(config.logging, "debug", "mcp_request_complete", {
         requestId,
         handlerDurationMs: Math.round(performance.now() - handlerStartedAt),
         responseStarted: responseTiming?.startedAt !== undefined,
+        ...originRequestTimingFields(lifecycle, requestStartedAt, lifecycle.handlerCompletedAt),
         ...rpcRequestLogFields(req.body),
       });
     } catch (error) {
+      lifecycle.handlerCompletedAt = performance.now();
       logEvent(config.logging, "error", "mcp_request_error", {
         requestId,
         error: error instanceof Error ? error.message : String(error),
+        ...originRequestTimingFields(lifecycle, requestStartedAt, lifecycle.handlerCompletedAt),
       });
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");

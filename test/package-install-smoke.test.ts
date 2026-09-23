@@ -30,7 +30,6 @@ function testPackedPackageLaunchers(): void {
       "--no-fund",
       "--no-package-lock",
       "--no-save",
-      "--omit=optional",
       join(root, archive),
     ], {
       cwd: installRoot,
@@ -59,7 +58,12 @@ function testPackedPackageLaunchers(): void {
       DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS: "1000",
     });
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 10 : 0,
+      retryDelay: 100,
+    });
   }
 }
 

@@ -16,6 +16,10 @@ import {
   OPERATION_ID_PATTERN,
   runOptionalRecoverableOperation,
 } from "../operation-receipts.js";
+import {
+  PAYLOAD_REF_PATTERN,
+  payloadSpoolManager,
+} from "../payload-spool.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
@@ -59,6 +63,27 @@ function operationOutput(
   return operationId
     ? { operation_id: operationId, operation_replayed: replayed }
     : {};
+}
+
+async function inlineOrPayloadText(input: {
+  workspaceId: string;
+  inline?: string;
+  payloadRef?: string;
+  stateDir: string;
+  field: string;
+}): Promise<string> {
+  const hasInline = input.inline !== undefined;
+  const hasPayload = input.payloadRef !== undefined;
+  if (hasInline === hasPayload) {
+    throw new Error(
+      `Provide exactly one of ${input.field} or payload_ref.`,
+    );
+  }
+  if (input.inline !== undefined) return input.inline;
+  return payloadSpoolManager(input.stateDir).resolveText(
+    input.workspaceId,
+    input.payloadRef!,
+  );
 }
 
 export function codexInstructions(): string {
@@ -463,6 +488,9 @@ function registerContextPackTool(context: ToolRegistrationContext): void {
         tool: "context_pack",
         workspaceId,
         path,
+        semantic: packed.semantic,
+        backendAgeMs: packed.backendAgeMs,
+        semanticSections: packed.sections.filter((section) => /symbol|reference|implementation|diagnostic/i.test(section)).length,
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -575,9 +603,15 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
         operation_id: operationIdSchema,
         patch: z
           .string()
+          .optional()
           .describe(
-            "Patch text enclosed by *** Begin Patch and *** End Patch markers.",
+            "Inline patch text enclosed by *** Begin Patch and *** End Patch markers. Use payload_ref instead for a committed large patch.",
           ),
+        payload_ref: z
+          .string()
+          .regex(PAYLOAD_REF_PATTERN)
+          .optional()
+          .describe("Committed UTF-8 payload containing the complete patch. Mutually exclusive with patch."),
       },
       outputSchema: resultOutputSchema({
         ...operationOutputSchema(),
@@ -593,23 +627,30 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
       }),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspace_id, operation_id, patch }) => {
+    async ({ workspace_id, operation_id, patch, payload_ref }) => {
       const workspaceId = workspace_id;
       const recovered = await runOptionalRecoverableOperation({
         workspaceId,
         stateDir: config.stateDir,
         operationId: operation_id,
         tool: "apply_patch",
-        request: { patch },
+        request: { patch, payload_ref },
         execute: async () => {
           const startedAt = performance.now();
+          const patchText = await inlineOrPayloadText({
+            workspaceId,
+            inline: patch,
+            payloadRef: payload_ref,
+            stateDir: config.stateDir,
+            field: "patch",
+          });
           return runLoggedToolOperation(
             config,
             { tool: "apply_patch", workspaceId },
             startedAt,
             async () => {
               const workspace = await workspaces.getWorkspace(workspaceId);
-              return applyPatch(workspace.root, patch);
+              return applyPatch(workspace.root, patchText);
             },
           );
         },
@@ -648,7 +689,16 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
         operation_id: operationIdSchema,
-        cmd: z.string().min(1).describe("Shell command to execute."),
+        cmd: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Inline shell command. Use payload_ref instead for a committed large UTF-8 command."),
+        payload_ref: z
+          .string()
+          .regex(PAYLOAD_REF_PATTERN)
+          .optional()
+          .describe("Committed UTF-8 payload containing the complete shell command. Mutually exclusive with cmd."),
         tty: z
           .boolean()
           .optional()
@@ -699,6 +749,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       workspace_id,
       operation_id,
       cmd,
+      payload_ref,
       tty,
       columns,
       rows,
@@ -712,7 +763,15 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const yieldTimeMs = yield_time_ms;
       const maxOutputTokens = max_output_tokens;
       const workspace = await workspaces.getWorkspace(workspaceId);
-      const contextRequest = contextCompatibilityRequest(cmd);
+      const command = await inlineOrPayloadText({
+        workspaceId,
+        inline: cmd,
+        payloadRef: payload_ref,
+        stateDir: config.stateDir,
+        field: "cmd",
+      });
+      if (command.length === 0) throw new Error("Shell command must not be empty.");
+      const contextRequest = contextCompatibilityRequest(command);
       if (contextRequest) {
         const packed = await buildContextPack({
           workspace,
@@ -738,7 +797,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           },
         };
       }
-      const semanticRequest = semanticCompatibilityRequest(cmd);
+      const semanticRequest = semanticCompatibilityRequest(command);
       if (semanticRequest) {
         if (!semantic?.available) {
           throw new Error("Serena semantic backend is not installed.");
@@ -768,7 +827,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       }
       if (processSessions.runRoot) {
         const internalResult = await handleRunLogCommand(
-          cmd,
+          command,
           processSessions.runRoot,
         );
         if (internalResult !== null) {
@@ -777,7 +836,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             workspaceId,
             workingDirectory: workingDirectory ?? ".",
             command: "devspace-log",
-            commandLength: cmd.length,
+            commandLength: command.length,
             success: true,
             durationMs: Math.round(performance.now() - startedAt),
           });
@@ -798,15 +857,15 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         stateDir: config.stateDir,
         operationId: operation_id,
         tool: "exec_command",
-        request: { cmd, tty, columns, rows, working_directory, yield_time_ms, max_output_tokens },
+        request: { cmd, payload_ref, tty, columns, rows, working_directory, yield_time_ms, max_output_tokens },
         execute: async () => runLoggedToolOperation(
           config,
           {
             tool: "exec_command",
             workspaceId,
             workingDirectory: workingDirectory ?? ".",
-            command: cmd,
-            commandLength: cmd.length,
+            command,
+            commandLength: command.length,
           },
           startedAt,
           async () => {
@@ -817,7 +876,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             );
             return processSessions.start({
               workspaceId,
-              command: cmd,
+              command,
               cwd,
               workspaceRoot: workspace.root,
               tty,

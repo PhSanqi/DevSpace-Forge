@@ -88,6 +88,26 @@ assert.equal(completed.running, false);
 assert.equal(completed.exitCode, 0);
 assert.match(completed.output, /finished/);
 
+// The default exec yield must return a durable session before a longer job
+// completes, without requiring callers to supply yieldTimeMs explicitly.
+const defaultYieldStartedAt = Date.now();
+const defaultYield = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => console.log('default-yield-finished'), 6500)"`,
+});
+assert.equal(defaultYield.running, true);
+assert.ok(defaultYield.sessionId);
+assert.ok(Date.now() - defaultYieldStartedAt >= 2_500);
+const defaultYieldCompleted = await manager.write({
+  workspaceId: "workspace-a",
+  sessionId: defaultYield.sessionId,
+  yieldTimeMs: 8_000,
+});
+assert.equal(defaultYieldCompleted.running, false);
+assert.equal(defaultYieldCompleted.exitCode, 0);
+assert.match(defaultYieldCompleted.output, /default-yield-finished/);
+
 const interactive = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),

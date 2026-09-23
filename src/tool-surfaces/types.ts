@@ -55,6 +55,9 @@ export interface ToolLogFields {
   exitCode?: number;
   sizeBytes?: number;
   mimeType?: string;
+  semantic?: boolean;
+  backendAgeMs?: number;
+  semanticSections?: number;
   success: boolean;
   durationMs: number;
   error?: string;

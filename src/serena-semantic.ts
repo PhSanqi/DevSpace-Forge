@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -18,7 +18,7 @@ interface SerenaClientLike {
 
 export interface SerenaSemanticManagerOptions {
   available?: boolean;
-  createClient?: (root: string) => Promise<SerenaClientLike>;
+  createClient?: (root: string, language?: string) => Promise<SerenaClientLike>;
   timeoutMs?: number;
   maxBackends?: number;
 }
@@ -63,9 +63,46 @@ function textFromResult(result: unknown): string {
     .join("\n");
 }
 
-async function managedSerenaHome(root: string): Promise<string> {
+// Isolate explicit file-language backends from Serena's default project auto-
+// detection. A PowerShell-heavy checkout must not require pwsh to inspect a
+// TypeScript or Bash file.
+export function serenaLanguageForPath(relativePath: unknown): string | undefined {
+  if (typeof relativePath !== "string") return undefined;
+  const extension = path.extname(relativePath).toLowerCase();
+  if ([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"].includes(extension)) return "typescript";
+  if ([".sh", ".bash"].includes(extension)) return "bash";
+  if ([".ps1", ".psm1", ".psd1"].includes(extension)) return "powershell";
+  if (extension === ".py") return "python";
+  if (extension === ".cs") return "csharp";
+  if (extension === ".go") return "go";
+  if (extension === ".rs") return "rust";
+  if (extension === ".java") return "java";
+  if ([".c", ".cc", ".cpp", ".h", ".hpp"].includes(extension)) return "cpp";
+  return undefined;
+}
+
+export function serenaWarmPathForWorkspace(root: string): string | undefined {
+  const marker = (name: string) => existsSync(path.join(root, name));
+  if (marker("tsconfig.json") || marker("package.json")) return "src/index.ts";
+  if (marker("pyproject.toml") || marker("requirements.txt") || marker("setup.py")) return "main.py";
+  if (marker("go.mod")) return "main.go";
+  if (marker("Cargo.toml")) return "src/main.rs";
+  if (marker("pom.xml") || marker("build.gradle") || marker("build.gradle.kts")) return "src/Main.java";
+  if (marker("CMakeLists.txt")) return "src/main.cpp";
+  if (marker("setup-linux.sh") || marker("install.sh") || marker("setup.sh")) return "setup-linux.sh";
+  try {
+    const names = readdirSync(root);
+    if (names.some((name) => /\.(?:sln|csproj)$/i.test(name))) return "Program.cs";
+    if (process.platform === "win32" && names.some((name) => /\.(?:ps1|psm1|psd1)$/i.test(name))) return "setup.ps1";
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+async function managedSerenaHome(root: string, language?: string): Promise<string> {
   const digest = createHash("sha256")
-    .update(path.resolve(root))
+    .update(path.resolve(root) + (language ? `\0${language}` : ""))
     .digest("hex")
     .slice(0, 20);
   const baseRoot = process.env.XDG_DATA_HOME
@@ -74,6 +111,19 @@ async function managedSerenaHome(root: string): Promise<string> {
   const base = path.join(baseRoot, digest);
   const projectData = path.join(base, "project-data");
   await mkdir(projectData, { recursive: true, mode: 0o700 });
+  if (language) {
+    const projectConfig = path.join(projectData, "project.yml");
+    try {
+      await access(projectConfig);
+    } catch {
+      await writeFile(projectConfig,
+        `project_name: ${JSON.stringify(path.basename(root))}\nlanguage_servers:\n- ${language}\n`,
+        { flag: "wx", mode: 0o600 },
+      ).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+    }
+  }
   const configPath = path.join(base, "serena_config.yml");
   try {
     await access(configPath);
@@ -87,8 +137,22 @@ async function managedSerenaHome(root: string): Promise<string> {
   return base;
 }
 
-async function createClient(root: string): Promise<SerenaClientLike> {
-  const serenaHome = await managedSerenaHome(root);
+// A packaged service may launch Node by absolute path without adding its bin
+// directory to PATH. Serena's language servers still need to resolve `node`.
+export function serenaChildEnvironment(serenaHome: string): Record<string, string> {
+  const nodeBin = path.dirname(process.execPath);
+  const parentPath = process.env.PATH ?? "";
+  const childPath = parentPath.split(path.delimiter).includes(nodeBin)
+    ? parentPath
+    : [nodeBin, parentPath].filter(Boolean).join(path.delimiter);
+  return Object.fromEntries(
+    Object.entries({ ...process.env, PATH: childPath, SERENA_HOME: serenaHome })
+      .filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+}
+
+async function createClient(root: string, language?: string): Promise<SerenaClientLike> {
+  const serenaHome = await managedSerenaHome(root, language);
   const transport = new StdioClientTransport({
     command: serenaCommand(),
     args: [
@@ -109,10 +173,7 @@ async function createClient(root: string): Promise<SerenaClientLike> {
       "ERROR",
     ],
     cwd: root,
-    env: Object.fromEntries(
-      Object.entries({ ...process.env, SERENA_HOME: serenaHome })
-        .filter((entry): entry is [string, string] => entry[1] !== undefined),
-    ),
+    env: serenaChildEnvironment(serenaHome),
     stderr: SERENA_STDERR_MODE,
   });
   const client = new Client({ name: "devspace-serena-backend", version: "1" });
@@ -144,7 +205,7 @@ export class SerenaSemanticManager {
     Promise<{ client: SerenaClientLike; startedAt: number }>
   >();
   private readonly busy = new Map<string, number>();
-  private readonly factory: (root: string) => Promise<SerenaClientLike>;
+  private readonly factory: (root: string, language?: string) => Promise<SerenaClientLike>;
   private readonly timeoutMs: number;
   private readonly maxBackends: number;
 
@@ -155,9 +216,11 @@ export class SerenaSemanticManager {
     this.maxBackends = Math.max(1, options.maxBackends ?? 4);
   }
 
-  async warm(root: string): Promise<void> {
+  async warm(root: string, relativePath?: string): Promise<void> {
     if (!this.available) return;
-    await this.backend(path.resolve(root));
+    const language = serenaLanguageForPath(relativePath);
+    if (language === "powershell" && process.platform !== "win32") return;
+    await this.backend(path.resolve(root), language);
   }
 
   async call(
@@ -168,11 +231,18 @@ export class SerenaSemanticManager {
     if (!this.available) {
       throw new Error("Serena semantic backend is not installed.");
     }
-    const key = path.resolve(root);
+    const language = serenaLanguageForPath(args.relative_path);
+    if (language === "powershell" && process.platform !== "win32") {
+      const check = spawnSync("pwsh", ["-NoProfile", "-Command", "exit 0"], { stdio: "ignore", timeout: 2_000 });
+      if (check.error || check.status !== 0) {
+        throw new Error("PowerShell semantic analysis requires pwsh; other file languages remain available.");
+      }
+    }
+    const key = `${path.resolve(root)}\0${language ?? "default"}`;
     this.busy.set(key, (this.busy.get(key) ?? 0) + 1);
     let backend: { client: SerenaClientLike; startedAt: number } | undefined;
     try {
-      backend = await this.backend(key);
+      backend = await this.backend(path.resolve(root), language);
       const response = await backend.client.callTool(
         { name: tool, arguments: args },
         undefined,
@@ -231,15 +301,16 @@ export class SerenaSemanticManager {
 
   private async backend(
     root: string,
+    language?: string,
   ): Promise<{ client: SerenaClientLike; startedAt: number }> {
-    const key = path.resolve(root);
+    const key = `${path.resolve(root)}\0${language ?? "default"}`;
     const existing = this.clients.get(key);
     if (existing) {
       this.clients.delete(key);
       this.clients.set(key, existing);
       return existing;
     }
-    const created = this.factory(key)
+    const created = this.factory(path.resolve(root), language)
       .then((client) => ({ client, startedAt: Date.now() }))
       .catch((error) => {
         this.clients.delete(key);
