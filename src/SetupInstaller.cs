@@ -556,6 +556,7 @@ namespace DevSpaceControlPlatform
             foreach (var fileName in new[]
             {
                 "runtime-console.mjs",
+                "runtime-rollback.mjs",
                 "runtime-console-ui.html",
                 "runtime-console-ui.css",
                 "runtime-console-ui.js",

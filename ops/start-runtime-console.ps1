@@ -1,7 +1,8 @@
 param(
     [string]$PlatformRoot = (Split-Path -Parent $PSScriptRoot),
     [ValidateRange(1, 65535)][int]$Port = 17678,
-    [string]$Instance = 'group'
+    [string]$Instance = 'group',
+    [switch]$DisableOwnerCopy
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +37,12 @@ $arguments = @(
     $console, '--instance', $Instance, '--platform-root', $root,
     '--config', $config, '--runtime-package', $package, '--serve', "$Port"
 )
+if (-not $DisableOwnerCopy) {
+    $credentials = Join-Path $root 'state\devspace-config\auth.json'
+    if (Test-Path -LiteralPath $credentials) {
+        $arguments += @('--credential-file', $credentials, '--allow-owner-copy', 'true')
+    }
+}
 if ($processInfo) { $arguments += @('--pid', "$($processInfo.ProcessId)") }
 Write-Host "DevSpace Runtime Console: http://127.0.0.1:$Port/"
 & $node @arguments

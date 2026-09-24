@@ -16,6 +16,7 @@
       <div class="sidebar-section" data-i18n="workspace">WORKSPACE</div>
       <nav class="navigation" aria-label="Console sections">
         <button class="nav-item active" data-view="overview" aria-current="page"><span aria-hidden="true">◫</span><span data-i18n="overview">Overview</span></button>
+        <button class="nav-item" data-view="access"><span aria-hidden="true">↗</span><span data-i18n="access">Connection &amp; access</span></button>
         <button class="nav-item" data-view="runtime"><span aria-hidden="true">▤</span><span data-i18n="runtime">Runtime &amp; versions</span></button>
         <button class="nav-item" data-view="connectivity"><span aria-hidden="true">◎</span><span data-i18n="connectivity">Connectivity</span></button>
         <button class="nav-item" data-view="requests"><span aria-hidden="true">≋</span><span data-i18n="requests">MCP diagnostics</span></button>
@@ -33,16 +34,17 @@
         <div class="page-heading"><div><p class="eyebrow" data-i18n="commandCenter">OPERATIONS / COMMAND CENTER</p><h1 id="page-title">Overview</h1><p id="page-description" class="page-description">Health and provenance for this DevSpace instance.</p></div><div id="updated-at" class="updated-at" aria-live="polite">—</div></div>
         <div id="notice" class="notice" role="status" hidden></div>
         <section id="view-overview" class="view active" aria-label="Overview"><div id="overview-content" class="loading-card" role="status">Loading instance data…</div></section>
+        <section id="view-access" class="view" aria-label="Connection and access"><div id="access-content" class="loading-card" role="status">Loading connection information…</div></section>
         <section id="view-runtime" class="view" aria-label="Runtime versions"><div id="runtime-content" class="loading-card" role="status">Loading runtime details…</div></section>
         <section id="view-connectivity" class="view" aria-label="Connectivity"><div id="connectivity-content" class="loading-card" role="status">Loading connectivity…</div></section>
         <section id="view-requests" class="view" aria-label="MCP diagnostics"><div id="requests-content" class="loading-card" role="status">Loading request diagnostics…</div></section>
         <section id="view-activity" class="view" aria-label="Workspaces and jobs"><div id="activity-content" class="loading-card" role="status">Loading workspaces…</div></section>
         <section id="view-deployment" class="view" aria-label="Deployment"><div id="deployment-content" class="loading-card" role="status">Loading deployment state…</div></section>
       </main>
-      <footer class="footer"><span>DevSpace Control Console <span class="footer-divider">·</span> <span id="footer-instance">—</span></span><span data-i18n="noCredentials">Credentials are never shown in this console.</span></footer>
+      <footer class="footer"><span>DevSpace Control Console <span class="footer-divider">·</span> <span id="footer-instance">—</span></span><span data-i18n="noCredentials">Secrets are excluded from routine diagnostics.</span></footer>
     </div>
   </div>
   <div id="mobile-scrim" class="scrim" hidden></div>
-  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><p class="eyebrow" data-i18n="protectedAction">PROTECTED ACTION</p><h2 id="confirm-title">Confirm action</h2><p id="confirm-description"></p><div class="dialog-actions"><button value="cancel" class="secondary-button" data-i18n="cancel">Cancel</button><button id="confirm-submit" value="confirm" class="danger-button" data-i18n="confirm">Confirm</button></div></form></dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><p class="eyebrow" data-i18n="protectedAction">PROTECTED ACTION</p><h2 id="confirm-title">Confirm action</h2><p id="confirm-description"></p><div id="rollback-confirm-area" hidden><label for="rollback-confirm-input" id="rollback-confirm-label">Type the selected version ID to confirm</label><input id="rollback-confirm-input" type="text" autocomplete="off" spellcheck="false"></div><div class="dialog-actions"><button value="cancel" class="secondary-button" data-i18n="cancel">Cancel</button><button id="confirm-submit" value="confirm" class="danger-button" data-i18n="confirm">Confirm</button></div></form></dialog>
 </body>
 </html>

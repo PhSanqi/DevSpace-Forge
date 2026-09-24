@@ -2,26 +2,62 @@
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const views = ['overview', 'runtime', 'connectivity', 'requests', 'activity', 'deployment'];
+  const views = ['overview', 'access', 'runtime', 'connectivity', 'requests', 'activity', 'deployment'];
   const labels = {
     en: {
-      workspace:'WORKSPACE',overview:'Overview',runtime:'Runtime & versions',connectivity:'Connectivity',requests:'MCP diagnostics',activity:'Workspaces & jobs',deployment:'Deployment',loopback:'Local management interface',
+      workspace:'WORKSPACE',overview:'Overview',access:'Connection & access',runtime:'Runtime & versions',connectivity:'Connectivity',requests:'MCP diagnostics',activity:'Workspaces & jobs',deployment:'Deployment',loopback:'Local management interface',
       live:'Live',offline:'Unavailable',refresh:'Refresh',commandCenter:'OPERATIONS / COMMAND CENTER',noCredentials:'Credentials are never shown in this console.',cancel:'Cancel',confirm:'Confirm',protectedAction:'PROTECTED ACTION',
       overviewDesc:'Service health and verified runtime provenance.',runtimeDesc:'Distinguish package labels, Git source, and the process actually running.',connectivityDesc:'Local origin, public route, and dedicated tunnel health.',requestsDesc:'Bounded origin-side request observations. Origin response is not proof of client receipt.',activityDesc:'Durable workspaces, workflow sessions, and jobs.',deploymentDesc:'Active deployment evidence, backups, and protected operations.',
       instance:'Instance',healthy:'Operational',degraded:'Needs attention',unknown:'Unknown',health:'Health',runtimeVersion:'Runtime version',sourceRevision:'Source revision',noProvenance:'Not recorded in deployed artifact',activeWorkspaces:'Workspaces',jobs:'Durable jobs',sessions:'Workflow sessions',serviceHealth:'Service readiness',recentRequests:'Recent requests',seeAll:'See all',runtimeInfo:'Runtime identification',sourceInfo:'Build provenance',declared:'Configured package / slot',actual:'Running process',source:'Source of truth',pid:'Process ID',packageRoot:'Package root',version:'Package version',serverHash:'server.js SHA-256',gitBranch:'Git branch',gitCommit:'Git commit',controlVersion:'Control Platform version',artifact:'Artifact ID',origin:'Origin',evidence:'Evidence',notKnown:'Not verified',pointerMismatch:'The configured package path differs from the live process. Both are displayed; the configured pointer is not treated as running provenance.',hashMatch:'File bytes agree, but package paths differ.',healthLocal:'Local MCP',healthPublic:'Public MCP',tunnelService:'Tunnel service',devspaceService:'DevSpace service',tunnelConnections:'Tunnel HA links',protocol:'Transport protocol',lastReconnect:'Last connection event',transport:'Transport status',requestCount:'Observed requests',aborted:'Aborted',status:'Status',time:'Time',duration:'Duration',requestId:'Request ID',cfRay:'Cloudflare Ray',outcome:'Outcome',scope:'Observation scope',noRequests:'No request records were observed in the available log window.',filter:'Filter rows…',workspaceId:'Workspace ID',path:'Path',lastUsed:'Last used',jobId:'Job ID',command:'Command',workflowId:'Workflow ID',mode:'Mode',noRows:'No records in this window.',inventoryUnavailable:'Durable state could not be inspected.',activeSlot:'Configured active slot',previousSlot:'Previous slot',rollback:'Rollback candidates',backups:'Recent backups',deploymentRoot:'Deployment root',protectedOps:'Protected operations',protectedDesc:'These actions affect the live instance. They require an explicit confirmation and never modify the global proxy.',restartDevspace:'Restart DevSpace',restartTunnel:'Restart tunnel',confirmTitle:'Confirm service restart',confirmDesc:'This will briefly interrupt active connections. The action only targets the named service.',actionDone:'Action submitted. Check health and request diagnostics before proceeding.',actionFailed:'Action failed',fetchFailed:'Unable to fetch current diagnostics.',copy:'Copy',copied:'Copied',of:'of',noManifest:'No verified release manifest was installed; a package version alone is not a Git commit.',controlsUnavailable:'Action is not enabled for this instance.',haPartial:'Fewer than four HA connections are reported.',observed:'Observed at origin',requestsNoClient:'A successful origin write does not prove the connector received the response.',provenance:'Provenance',release:'Release',warnings:'Warnings',none:'None recorded',updated:'Updated',services:'Services'
     },
     zh: {
-      workspace:'工作区',overview:'总览',runtime:'运行版本',connectivity:'连接与 Tunnel',requests:'MCP 诊断',activity:'工作区与任务',deployment:'部署与回滚',loopback:'仅本机访问的管理面',
+      workspace:'工作区',overview:'总览',access:'连接与密钥',runtime:'运行版本',connectivity:'连接与 Tunnel',requests:'MCP 诊断',activity:'工作区与任务',deployment:'部署与回滚',loopback:'仅本机访问的管理面',
       live:'实时',offline:'不可用',refresh:'刷新',commandCenter:'运维 / 控制中心',noCredentials:'此页面不会展示访问凭据。',cancel:'取消',confirm:'确认操作',protectedAction:'受保护操作',
       overviewDesc:'实例服务健康与经过验证的运行版本来源。',runtimeDesc:'明确区分包版本、Git 来源以及实际运行的进程。',connectivityDesc:'本地服务、公网入口与专属 Tunnel 连接状态。',requestsDesc:'有限窗口内的 origin 侧请求观测；origin 发出响应不代表客户端已收到。',activityDesc:'持久化工作区、流程会话与任务。',deploymentDesc:'当前部署、备份与受保护操作。',
       instance:'实例',healthy:'运行正常',degraded:'需要关注',unknown:'未知',health:'健康状态',runtimeVersion:'Runtime 版本',sourceRevision:'源码提交',noProvenance:'部署包未记录',activeWorkspaces:'工作区',jobs:'持久任务',sessions:'流程会话',serviceHealth:'服务就绪状态',recentRequests:'最近请求',seeAll:'查看全部',runtimeInfo:'运行实例身份',sourceInfo:'构建来源',declared:'配置指针 / 版本槽',actual:'真实运行进程',source:'证据来源',pid:'进程 ID',packageRoot:'程序目录',version:'包版本',serverHash:'server.js SHA-256',gitBranch:'Git 分支',gitCommit:'Git 提交',controlVersion:'Control Platform 版本',artifact:'产物标识',origin:'来源',evidence:'核验信息',notKnown:'未验证',pointerMismatch:'配置的包目录与真实进程目录不一致。两者分别展示，不再把配置指针冒充为实际运行版本。',hashMatch:'文件内容一致，但两个包目录不同。',healthLocal:'本地 MCP',healthPublic:'公网 MCP',tunnelService:'Tunnel 服务',devspaceService:'DevSpace 服务',tunnelConnections:'Tunnel HA 连接',protocol:'传输协议',lastReconnect:'最近连接事件',transport:'传输状态',requestCount:'观测请求数',aborted:'异常中断',status:'状态',time:'时间',duration:'耗时',requestId:'请求 ID',cfRay:'Cloudflare Ray',outcome:'结果',scope:'观测范围',noRequests:'当前日志窗口内没有请求记录。',filter:'筛选记录…',workspaceId:'工作区 ID',path:'路径',lastUsed:'最近使用',jobId:'任务 ID',command:'命令',workflowId:'流程 ID',mode:'模式',noRows:'当前窗口没有记录。',inventoryUnavailable:'无法读取持久状态。',activeSlot:'配置的活跃槽位',previousSlot:'上一槽位',rollback:'可回滚版本',backups:'最近备份',deploymentRoot:'部署目录',protectedOps:'受保护操作',protectedDesc:'这些操作会影响当前服务；执行前必须确认，不会修改全局代理。',restartDevspace:'重启 DevSpace',restartTunnel:'重启 Tunnel',confirmTitle:'确认重启服务',confirmDesc:'这会短暂中断现有连接，且只操作指定服务。',actionDone:'操作已提交，请核对健康状态与请求诊断。',actionFailed:'操作失败',fetchFailed:'无法取得最新诊断数据。',copy:'复制',copied:'已复制',of:'共',noManifest:'没有已核验的发行元数据；包版本不等于 Git 提交。',controlsUnavailable:'当前实例未启用该操作。',haPartial:'报告的 HA 连接少于四条。',observed:'Origin 侧观测',requestsNoClient:'origin 写入成功不能证明 connector 已收到响应。',provenance:'版本来源',release:'发行版本',warnings:'告警',none:'无记录',updated:'更新时间',services:'服务'
     }
   };
+  Object.assign(labels.en,{
+    accessDesc:'Copy the connection URL or explicitly request an operator credential.',
+    noCredentials:'Secrets are excluded from routine diagnostics.',
+    publicMcpUrl:'Public MCP endpoint',publicBaseUrl:'Public origin',localMcpUrl:'Local MCP endpoint',
+    connectionDetails:'Connection details',copyUrl:'Copy URL',ownerPassword:'Owner Password',
+    copyOwner:'Copy Owner Password',ownerCopyUnavailable:'Owner credential copy is not enabled on this instance.',
+    ownerCopyWarning:'The credential will be copied directly to your clipboard. Never paste it into chat, logs or screenshots.',
+    ownerCopyTitle:'Copy the Owner Password?',ownerCopied:'Owner Password copied. Keep it in your password manager.',
+    clipboardUnavailable:'Clipboard access failed. Use a secure local terminal instead.',
+    selectTarget:'Select a runtime version',runRollback:'Rollback to selected version',
+    rollbackSummary:'Rollback preview',currentRuntime:'Currently running',rollbackNotAvailable:'No verified alternative runtime is available.',
+    rollbackConfirmTitle:'Switch the live runtime?',rollbackConfirmText:'This will restart the MCP service, temporarily interrupt active connections, and preserve the current launcher for recovery. Tunnel and credentials will not be changed.',
+    rollbackType:'Type the selected target ID to confirm:',rollbackPassed:'Target verified and active. Recheck the connector after the restart.',
+    rollbackFailed:'Runtime switch was not completed.',rollbackBusy:'The service operation is running. Do not close the page.',
+    rollbackSha:'Build SHA-256',rollbackStatus:'Selection status',notCurrent:'Available rollback target',
+    access:'Connection & access',accessDesc:'Copy the endpoint and retrieve the owner credential through an explicit local-only action.',
+  });
+  Object.assign(labels.zh,{
+    accessDesc:'复制连接地址，并通过单独确认的操作获取 Owner Password。',
+    noCredentials:'常规诊断接口不包含密钥。',
+    publicMcpUrl:'公网 MCP 连接地址',publicBaseUrl:'公网入口',localMcpUrl:'本机 MCP 地址',
+    connectionDetails:'连接信息',copyUrl:'复制地址',ownerPassword:'Owner Password',
+    copyOwner:'复制 Owner Password',ownerCopyUnavailable:'此实例未启用 Owner 密钥复制功能。',
+    ownerCopyWarning:'密钥仅会复制到当前浏览器剪贴板，不要粘贴到聊天、日志或截图中。',
+    ownerCopyTitle:'确认复制 Owner Password？',ownerCopied:'Owner Password 已复制，请保存到密码管理器。',
+    clipboardUnavailable:'无法访问剪贴板，请使用安全的本地终端获取。',
+    selectTarget:'选择运行版本',runRollback:'回滚到选定版本',
+    rollbackSummary:'回滚前核对',currentRuntime:'当前正在运行',rollbackNotAvailable:'没有通过校验的其他运行版本。',
+    rollbackConfirmTitle:'确认切换正在运行的版本？',rollbackConfirmText:'这将重启 MCP 服务并短暂中断连接；会保留现有启动脚本以便失败恢复，不会修改 Tunnel 或密钥。',
+    rollbackType:'输入所选版本 ID 以确认：',rollbackPassed:'目标版本已通过运行与健康校验，请重新检查连接。',
+    rollbackFailed:'运行版本切换未完成。',rollbackBusy:'服务正在切换，请不要关闭页面。',
+    rollbackSha:'构建 SHA-256',rollbackStatus:'选择状态',notCurrent:'可选回滚版本',
+    access:'连接与密钥',
+  });
   let lang = localStorage.getItem('devspace-console-lang') === 'en' ? 'en' : 'zh';
   let theme = localStorage.getItem('devspace-console-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
   let activeView = 'overview';
   let snapshot = null;
   let pendingAction = '';
+  let pendingRollback = null;
+  let selectedRollbackId = '';
   let requestFilter = '';
   const h = (value) => String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const t = (key) => labels[lang][key] || key;
@@ -60,6 +96,15 @@
     const recentRows=recent.slice(0,5).map((x)=>'<div class="line-item"><div class="status-row"><span class="mono">'+h(shortHash(x.request_id||x.requestId))+'</span>'+state(x.outcome||x.event||x.status)+'</div><div class="meta"><span>'+h(stamp(x.ts))+'</span><span>'+h(v(x.duration_ms,x.durationMs))+' ms</span></div></div>').join('') || empty(t('noRequests'));
     return hero+metrics+'<div class="panel-grid">'+panel(t('serviceHealth'),'','<div class="panel-body"><div class="status-stack">'+serviceRows+'</div></div>')+panel(t('recentRequests'),t('observed'),'<div class="panel-body">'+recentRows+'</div>')+'</div>'+(runtime.pointer_mismatch?note(t('pointerMismatch'),'warning'):'');
   }
+  function renderAccess(d){
+    const info=d.connection||{};
+    const entries=[[t('publicMcpUrl'),info.public_mcp_url],[t('publicBaseUrl'),info.public_base_url],[t('localMcpUrl'),info.local_mcp_url]];
+    const urls=entries.map(([title,url])=>'<div class="connection-item"><div><p class="mini-label">'+h(title)+'</p><div class="mono code-text">'+h(v(url))+'</div></div><button class="secondary-button" data-copy-url="'+h(url||'')+'" '+(!url?'disabled':'')+'>'+h(t('copyUrl'))+'</button></div>').join('');
+    const enabled=!!d.actions?.copy_owner_password&&!!info.owner_copy_available;
+    const owner='<div class="connection-item"><div><p class="mini-label">'+h(t('ownerPassword'))+'</p><div class="mono code-text">•••• •••• ••••</div></div><button class="secondary-button" data-copy-owner '+(!enabled?'disabled':'')+'>'+h(t('copyOwner'))+'</button></div>';
+    return panel(t('connectionDetails'),t('accessDesc'),'<div class="panel-body">'+urls+'</div>')+
+      panel(t('ownerPassword'),t('ownerCopyWarning'),'<div class="panel-body">'+owner+(enabled?note(t('ownerCopyWarning')):note(t('ownerCopyUnavailable'),'warning'))+'</div>');
+  }
   function renderRuntime(d) {
     const rt=d.runtime||{},actual=rt.actual||{},configured=rt.configured||{},prov=rt.provenance||{};
     const control=prov.control||{},source=prov.runtime||{};
@@ -97,14 +142,22 @@
     const dep=d.deployment||{},rt=d.runtime||{},actions=d.actions||{};
     const rows=[row(t('activeSlot'),dep.active_slot||rt.active_slot),row(t('previousSlot'),dep.previous_slot),row(t('deploymentRoot'),dep.runtime_root,true),row(t('source'),rt.actual?.package_root,true)];
     const buttons=(actions.restart_devspace?'<button class="danger-button" data-action="restart-devspace">'+h(t('restartDevspace'))+'</button>':'')+(actions.restart_tunnel?'<button class="secondary-button" data-action="restart-tunnel">'+h(t('restartTunnel'))+'</button>':'');
-    return panel(t('deployment'),t('runtimeInfo'),'<div class="panel-body">'+rows.join('')+'</div>')+'<div class="panel-grid equal">'+panel(t('rollback'),'',list(dep.rollback_candidates))+panel(t('backups'),'',list(dep.recent_backups))+'</div><div class="action-zone"><div><h2>'+h(t('protectedOps'))+'</h2><p>'+h(t('protectedDesc'))+'</p></div><div class="action-buttons">'+(buttons||badge(t('controlsUnavailable'),'warn'))+'</div></div>';
+    const targets=Array.isArray(dep.rollback_targets)?dep.rollback_targets:[];
+    const eligible=targets.filter(x=>x.verified&&!x.current);
+    if(!eligible.some(x=>x.id===selectedRollbackId))selectedRollbackId='';
+    const chosen=eligible.find(x=>x.id===selectedRollbackId);
+    const options='<option value="">'+h(t('selectTarget'))+'</option>'+targets.map(x=>'<option value="'+h(x.id)+'" '+(x.current?'disabled ':'')+(chosen?.id===x.id?'selected':'')+'>'+h(x.id+' · '+x.version+(x.current?' · '+t('currentRuntime'):''))+'</option>').join('');
+    const selector=targets.length?'<label for="rollback-target" class="mini-label">'+h(t('selectTarget'))+'</label><select id="rollback-target" class="filter-input rollback-select">'+options+'</select>':empty(t('rollbackNotAvailable'));
+    const preview=chosen?'<div class="rollback-preview">'+row(t('version'),chosen.version)+row(t('packageRoot'),chosen.package_root,true)+row(t('rollbackSha'),chosen.server_sha256,true)+row(t('rollbackStatus'),t('notCurrent'))+'</div>':note(t('rollbackNotAvailable'));
+    const control='<div class="panel-body">'+selector+preview+'<button class="danger-button rollback-button" data-action="rollback-runtime" '+(!chosen||!actions.rollback_runtime?'disabled':'')+'>'+h(t('runRollback'))+'</button>'+note(t('rollbackConfirmText'),'warning')+'</div>';
+    return panel(t('deployment'),t('runtimeInfo'),'<div class="panel-body">'+rows.join('')+'</div>')+'<div class="panel-grid equal">'+panel(t('rollback'),t('rollbackSummary'),control)+panel(t('backups'),'',list(dep.recent_backups))+'</div><div class="action-zone"><div><h2>'+h(t('protectedOps'))+'</h2><p>'+h(t('protectedDesc'))+'</p></div><div class="action-buttons">'+(buttons||badge(t('controlsUnavailable'),'warn'))+'</div></div>';
   }
   function render(){
     if(!snapshot)return;
     const focused=document.activeElement?.id==='request-filter', selection=focused?document.activeElement.selectionStart:0;
     $('footer-instance').textContent=v(snapshot.instance);
     $('updated-at').textContent=t('updated')+': '+stamp(snapshot.generated_at);
-    const contents={overview:renderOverview,runtime:renderRuntime,connectivity:renderConnectivity,requests:renderRequests,activity:renderActivity,deployment:renderDeployment};
+    const contents={overview:renderOverview,access:renderAccess,runtime:renderRuntime,connectivity:renderConnectivity,requests:renderRequests,activity:renderActivity,deployment:renderDeployment};
     for(const key of views)$(key+'-content').innerHTML=contents[key](snapshot);
     if(focused&&activeView==='requests'){const input=$('request-filter');input.focus();try{input.setSelectionRange(selection,selection)}catch{}}
   }
@@ -121,20 +174,57 @@
     finally{el.disabled=false;}
   }
   async function action(name){
-    const allowed={'restart-devspace':'restart_devspace','restart-tunnel':'restart_tunnel'};
+    const allowed={'restart-devspace':'restart_devspace','restart-tunnel':'restart_tunnel','rollback-runtime':'rollback_runtime','copy-owner':'copy_owner_password'};
     if(!allowed[name]||!snapshot?.actions?.[allowed[name]])return;
-    pendingAction=name;$('confirm-title').textContent=t('confirmTitle');$('confirm-description').textContent=t('confirmDesc')+' '+name;
+    pendingRollback=null;
+    const isRollback=name==='rollback-runtime';
+    if(isRollback){
+      const target=snapshot.deployment?.rollback_targets?.find(x=>x.id===selectedRollbackId&&!x.current&&x.verified);
+      if(!target)return;
+      pendingRollback={target_id:target.id,expected_sha256:target.server_sha256,observed_pid:snapshot.runtime.actual?.pid};
+    }
+    pendingAction=name;
+    $('rollback-confirm-area').hidden=!isRollback;
+    $('rollback-confirm-input').value='';
+    $('confirm-submit').disabled=isRollback;
+    $('rollback-confirm-label').textContent=t('rollbackType')+' '+(pendingRollback?.target_id||'');
+    $('confirm-title').textContent=t(isRollback?'rollbackConfirmTitle':name==='copy-owner'?'ownerCopyTitle':'confirmTitle');
+    $('confirm-description').textContent=isRollback?t('rollbackConfirmText')+' '+pendingRollback.target_id+' · '+pendingRollback.expected_sha256:(name==='copy-owner'?t('ownerCopyWarning'):t('confirmDesc')+' '+name);
     $('confirm-dialog').showModal();
   }
-  async function executeAction(name){
+  async function copyText(value){
+    if(!value)throw new Error(t('clipboardUnavailable'));
+    if(navigator.clipboard?.writeText){
+      try{await navigator.clipboard.writeText(value);return;}catch{}
+    }
+    const field=document.createElement('textarea');
+    field.value=value;field.setAttribute('readonly','');field.style.position='fixed';field.style.opacity='0';field.style.pointerEvents='none';
+    document.body.appendChild(field);field.focus();field.select();
+    const copied=document.execCommand?.('copy')===true;
+    field.remove();
+    if(!copied)throw new Error(t('clipboardUnavailable'));
+  }
+  async function executeAction(name,rollbackRequest){
     const btn=$('confirm-submit');btn.disabled=true;
     try{
       const tokenResponse=await fetch('/api/action-token',{cache:'no-store',credentials:'same-origin'});
       if(!tokenResponse.ok)throw new Error('HTTP '+tokenResponse.status);
       const token=(await tokenResponse.json()).token;
-      const response=await fetch('/api/actions/'+name,{method:'POST',headers:{'x-devspace-console-token':token,'content-type':'application/json'},body:'{}',credentials:'same-origin'});
-      if(!response.ok)throw new Error((await response.json()).error||('HTTP '+response.status));
-      notice(t('actionDone'));await refresh();
+      if(name==='copy-owner'){
+        const response=await fetch('/api/credentials/owner',{method:'POST',headers:{'x-devspace-console-token':token,'content-type':'application/json'},body:'{}',cache:'no-store',credentials:'same-origin'});
+        if(!response.ok)throw new Error((await response.json()).error||('HTTP '+response.status));
+        const result=await response.json();
+        await copyText(result.password);
+        notice(t('ownerCopied'));
+        return;
+      }
+      if(name==='rollback-runtime')notice(t('rollbackBusy'),'warn');
+      const response=await fetch('/api/actions/'+name,{method:'POST',headers:{'x-devspace-console-token':token,'content-type':'application/json'},body:JSON.stringify(name==='rollback-runtime'?rollbackRequest:{}),credentials:'same-origin'});
+      const result=await response.json();
+      if(!response.ok)throw new Error(result.error||('HTTP '+response.status));
+      await refresh();
+      if(name==='rollback-runtime')selectedRollbackId='';
+      notice(t(name==='rollback-runtime'?'rollbackPassed':'actionDone'));
     }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
     finally{btn.disabled=false;}
   }
@@ -144,8 +234,15 @@
   $('refresh').addEventListener('click',refresh);
   $('menu-toggle').addEventListener('click',()=>{const next=!$('sidebar').classList.contains('open');$('sidebar').classList.toggle('open',next);$('menu-toggle').setAttribute('aria-expanded',String(next));$('mobile-scrim').hidden=!next;});
   $('mobile-scrim').addEventListener('click',()=>changeView(activeView));
-  $('confirm-dialog').addEventListener('close',()=>{if($('confirm-dialog').returnValue==='confirm'&&pendingAction)executeAction(pendingAction);pendingAction='';});
-  document.addEventListener('click',(event)=>{const button=event.target.closest('[data-action]');if(button)action(button.dataset.action);});
+  $('rollback-confirm-input').addEventListener('input',()=>{$('confirm-submit').disabled=$('rollback-confirm-input').value!==pendingRollback?.target_id;});
+  $('confirm-dialog').addEventListener('close',()=>{if($('confirm-dialog').returnValue==='confirm'&&pendingAction)executeAction(pendingAction,pendingRollback);pendingAction='';pendingRollback=null;});
+  document.addEventListener('click',async(event)=>{
+    const copy=event.target.closest('[data-copy-url]');
+    if(copy){try{await copyText(copy.dataset.copyUrl);notice(t('copied'));}catch(error){notice(error.message,'error');}return;}
+    if(event.target.closest('[data-copy-owner]')){action('copy-owner');return;}
+    const button=event.target.closest('[data-action]');if(button)action(button.dataset.action);
+  });
+  document.addEventListener('change',(event)=>{if(event.target.id==='rollback-target'){selectedRollbackId=event.target.value;render();}});
   document.addEventListener('input',(event)=>{if(event.target.id==='request-filter'){requestFilter=event.target.value;document.querySelectorAll('#requests-content tbody tr').forEach((row)=>row.hidden=!row.textContent.toLowerCase().includes(requestFilter.toLowerCase()));}});
   setTheme(theme);setLanguage(lang);changeView('overview');refresh();setInterval(()=>{if(!document.hidden)refresh();},6000);
 })();

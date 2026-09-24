@@ -79,9 +79,29 @@ try{
     })()`);
     const png=await send('Page.captureScreenshot',{format:'png',fromSurface:true,captureBeyondViewport:false});
     writeFileSync(path.join(out,variant.name+'.png'),Buffer.from(png.data,'base64'));
-    const pass=report.width===variant.width&&report.documentWidth<=variant.width&&report.theme===variant.theme&&report.view==='view-'+variant.view&&report.loaded&&report.navCount===6&&report.skipLink&&report.textContrast>=4.5&&report.mutedContrast>=4.5&&report.accentContrast>=4.5;
+    const pass=report.width===variant.width&&report.documentWidth<=variant.width&&report.theme===variant.theme&&report.view==='view-'+variant.view&&report.loaded&&report.navCount===7&&report.skipLink&&report.textContrast>=4.5&&report.mutedContrast>=4.5&&report.accentContrast>=4.5;
     observations.push({...variant,...report,pass});
   }
+  // Explicit connection and rollback controls are reviewed against a fixture,
+  // without ever requesting or handling a real owner credential.
+  await evaluate("document.querySelector('[data-view=\"access\"]').click();");
+  const access=await evaluate("({view:document.querySelector('.view.active')?.id,copies:document.querySelectorAll('[data-copy-url]:not([disabled])').length,ownerButton:!!document.querySelector('[data-copy-owner]:not([disabled])'),masked:document.querySelector('#access-content').textContent.includes('••••'),hasPublic:document.querySelector('#access-content').textContent.includes('/server/mcp')})");
+  observations.push({name:'connection-controls',...access,pass:access.view==='view-access'&&access.copies>=2&&access.ownerButton&&access.masked&&access.hasPublic});
+  const accessImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
+  writeFileSync(path.join(out,'connection-controls.png'),Buffer.from(accessImage.data,'base64'));
+  await evaluate("document.querySelector('[data-view=\"deployment\"]').click();document.querySelector('#rollback-target').value='runtime-local12';document.querySelector('#rollback-target').dispatchEvent(new Event('change',{bubbles:true}));");
+  const rollback=await evaluate("({view:document.querySelector('.view.active')?.id,selected:document.querySelector('#rollback-target').value,preview:document.querySelector('.rollback-preview')?.textContent.includes('1.1.0-beta.4.local.12'),enabled:!document.querySelector('[data-action=\"rollback-runtime\"]').disabled,currentDisabled:document.querySelector('#rollback-target option[value=\"runtime-local13-candidate-20260924-0118\"]')?.disabled})");
+  observations.push({name:'select-specific-rollback',...rollback,pass:rollback.view==='view-deployment'&&rollback.selected==='runtime-local12'&&rollback.preview&&rollback.enabled&&rollback.currentDisabled});
+  const rollbackImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
+  writeFileSync(path.join(out,'rollback-selection.png'),Buffer.from(rollbackImage.data,'base64'));
+  await evaluate("document.querySelector('[data-action=\"rollback-runtime\"]').click();");
+  const typed=await evaluate("({open:document.querySelector('#confirm-dialog').open,disabled:document.querySelector('#confirm-submit').disabled,target:document.querySelector('#rollback-confirm-label').textContent.includes('runtime-local12')})");
+  observations.push({name:'rollback-confirmation-guard',...typed,pass:typed.open&&typed.disabled&&typed.target});
+  await evaluate("document.querySelector('#rollback-confirm-input').value='wrong-target';document.querySelector('#rollback-confirm-input').dispatchEvent(new Event('input',{bubbles:true}));");
+  const guarded=await evaluate("document.querySelector('#confirm-submit').disabled");
+  observations.push({name:'wrong-version-rejected',disabled:guarded,pass:guarded});
+  await evaluate("document.querySelector('#confirm-dialog').close('cancel');");
+  // Never click the final submit in this visualization-only fixture.
   await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
   await evaluate("document.querySelector('#menu-toggle').click();");
   const drawer=await evaluate("({open:document.querySelector('#sidebar').classList.contains('open'),expanded:document.querySelector('#menu-toggle').getAttribute('aria-expanded'),scrim:!document.querySelector('#mobile-scrim').hidden})");

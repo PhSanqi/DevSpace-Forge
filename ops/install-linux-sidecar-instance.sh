@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTANCE=""
 PORT="17677"
 CONSOLE_PORT=""
+OWNER_COPY=1
 PUBLIC_URL=""
 ORIGIN_HOST=""
 ALLOWED_ROOT="$HOME/codex-workspace"
@@ -23,6 +24,8 @@ Options:
   --instance NAME       Instance slug, for example server
   --port PORT           Local DevSpace port (default: 17677)
   --console-port PORT   Loopback-only Control Console (default: DevSpace port + 1)
+  --enable-owner-copy   Allow confirmed Owner Password copy (default: enabled on localhost)
+  --disable-owner-copy  Disable Owner Password copy even on localhost
   --public-url URL      Public base URL, for example https://dev.sanqi.org/server
   --origin-host HOST    Tunnel hostname, for example server-origin.sanqi.org
   --allowed-root PATH   Allowed project root
@@ -42,6 +45,8 @@ while [[ $# -gt 0 ]]; do
     --instance) INSTANCE="${2:?missing instance name}"; shift 2 ;;
     --port) PORT="${2:?missing port}"; shift 2 ;;
     --console-port) CONSOLE_PORT="${2:?missing console port}"; shift 2 ;;
+    --enable-owner-copy) OWNER_COPY=1; shift ;;
+    --disable-owner-copy) OWNER_COPY=0; shift ;;
     --public-url) PUBLIC_URL="${2:?missing public URL}"; shift 2 ;;
     --origin-host) ORIGIN_HOST="${2:?missing origin hostname}"; shift 2 ;;
     --allowed-root) ALLOWED_ROOT="${2:?missing allowed root}"; shift 2 ;;
@@ -105,6 +110,7 @@ mkdir -p "$INSTALL_ROOT/bin" "$CONFIG_DIR" "$STATE_DIR/devspace-state" "$WORKTRE
 chmod 0700 "$CONFIG_DIR" "$STATE_DIR" "$AGENT_DIR" || true
 install -m 0755 "$SCRIPT_DIR/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$SCRIPT_DIR/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
+install -m 0644 "$SCRIPT_DIR/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"
@@ -164,7 +170,7 @@ chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
 cat > "$INSTALL_ROOT/bin/run-runtime-console" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "$INSTANCE" --platform-root "$INSTALL_ROOT" --config "$CONFIG_DIR/config.jsonc" --service-unit "$SERVICE" --tunnel-unit "$TUNNEL_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT"
+exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "$INSTANCE" --platform-root "$INSTALL_ROOT" --config "$CONFIG_DIR/config.jsonc" --credential-file "$CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$SERVICE" --tunnel-unit "$TUNNEL_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT"
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 

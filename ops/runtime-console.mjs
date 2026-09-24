@@ -5,12 +5,13 @@
  * Never infer the running version from a mutable slot pointer or a repo HEAD.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, realpathSync, lstatSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { switchRuntime, localRuntimeProbe } from './runtime-rollback.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const validUnit = /^[A-Za-z0-9_.@-]+\.service$/;
@@ -41,6 +42,8 @@ export function parseOptions(argv) {
     serviceUnit: options.serviceUnit || '',
     tunnelUnit: options.tunnelUnit || '',
     tunnelMetrics: options.tunnelMetrics || '',
+    allowOwnerCopy: options.allowOwnerCopy === 'true',
+    credentialFile: options.credentialFile ? path.resolve(options.credentialFile) : '',
     pid: options.pid ? Number(options.pid) : null,
     serve: Number(options.serve || 0),
   };
@@ -156,7 +159,29 @@ function deploymentInfo(options,rt) {
   const backupRoot=path.join(options.platformRoot,'state','backup');
   let backups=[];
   try {backups=readdirSync(backupRoot,{withFileTypes:true}).filter((x)=>x.isDirectory()).map((x)=>x.name).sort().reverse().slice(0,20);}catch{}
-  return {active_slot:rt.active_slot,previous_slot:rt.previous_slot,runtime_root:rt.actual.package_root ? path.dirname(path.dirname(path.dirname(rt.actual.package_root))) : null,configured_runtime_root:rt.package_root ? path.dirname(path.dirname(path.dirname(rt.package_root))) : null,rollback_candidates:rollback,backup_root_present:existsSync(backupRoot),recent_backups:backups};
+  return {active_slot:rt.active_slot,previous_slot:rt.previous_slot,runtime_root:rt.actual.package_root ? path.dirname(path.dirname(path.dirname(rt.actual.package_root))) : null,configured_runtime_root:rt.package_root ? path.dirname(path.dirname(path.dirname(rt.package_root))) : null,rollback_candidates:rollback,rollback_targets:rollbackTargets(options,rt),backup_root_present:existsSync(backupRoot),recent_backups:backups};
+}
+
+export function rollbackTargets(options,rt=runtimeInfo(options)) {
+  const root=path.resolve(options.platformRoot);
+  const entries=[];
+  try{
+    for(const entry of readdirSync(root,{withFileTypes:true})){
+      if(!entry.isDirectory()||!/^runtime-local[0-9]+(?:-[A-Za-z0-9_-]+)*$/.test(entry.name))continue;
+      const dir=path.join(root,entry.name);
+      const pkg=path.join(dir,'node_modules','@waishnav','devspace');
+      const cli=path.join(pkg,'dist','cli.js');
+      const source=path.join(pkg,'dist','server.js');
+      try{
+        if(realpathSync(dir)!==dir||realpathSync(pkg)!==pkg||!lstatSync(cli).isFile()||!lstatSync(source).isFile())continue;
+        const version=readJson(path.join(pkg,'package.json'))?.version;
+        const hash=fileHash(source);
+        if(typeof version!=='string'||!hash)continue;
+        entries.push({id:entry.name,version,server_sha256:hash,package_root:pkg,current:rt.actual?.package_root===pkg,verified:true});
+      }catch{}
+    }
+  }catch{}
+  return entries.sort((a,b)=>a.id.localeCompare(b.id));
 }
 function requestDiagnostics(unit) {
   const recent=[];
@@ -263,9 +288,15 @@ export async function snapshot(options) {
     runtime:rt,deployment:deploymentInfo(options,rt),
     services:{devspace:devspaceStatus,tunnel:tunnelStatus},
     mcp:{public_base_url:base,local_health:localHealth,public_health:publicHealth,request_diagnostics:requestDiagnostics(options.serviceUnit)},
+    connection:{
+      public_base_url:base||null,
+      public_mcp_url:base?base.replace(/\/+$/,'')+'/mcp':null,
+      local_mcp_url:localUrl?localUrl.replace(/\/healthz$/,'/mcp'):null,
+      owner_copy_available:ownerCopyEnabled(options),
+    },
     tunnel:{metrics,diagnostics:tunnelDiagnostics(options.tunnelUnit)},
     inventory:state,security:{credentials_included:false,loopback_console_only:true},
-    actions:{restart_devspace:!!devspaceStatus&&process.platform!=='win32',restart_tunnel:!!tunnelStatus&&process.platform!=='win32'},
+    actions:{restart_devspace:!!devspaceStatus&&process.platform!=='win32',restart_tunnel:!!tunnelStatus&&process.platform!=='win32',rollback_runtime:!!devspaceStatus&&process.platform!=='win32',copy_owner_password:ownerCopyEnabled(options)},
   };
 }
 
@@ -278,6 +309,20 @@ function response(res,status,body,type='application/json; charset=utf-8') {
   res.end(body);
 }
 const json=(res,status,value)=>response(res,status,JSON.stringify(value));
+function readOperatorPassword(options) {
+  if(!options.allowOwnerCopy||!options.credentialFile)return null;
+  try {
+    if(process.platform!=='win32'&&(statSync(options.credentialFile).mode&0o077)!==0)return null;
+    const store=readJson(options.credentialFile);
+    const password=store?.ownerToken;
+    return typeof password==='string'&&password.length>=16?password:null;
+  }catch{return null;}
+}
+function ownerCopyEnabled(options) {
+  if(!options.allowOwnerCopy||!options.credentialFile||!existsSync(options.credentialFile))return false;
+  try{return process.platform==='win32'||(statSync(options.credentialFile).mode&0o077)===0;}
+  catch{return false;}
+}
 function executeService(unit) {
   if(process.platform==='win32'||!validUnit.test(unit||''))return {ok:false,status:409,error:'Action unavailable on this platform.'};
   const r=spawnSync('systemctl',['--user','restart',unit],{encoding:'utf8',timeout:15000,windowsHide:true});
@@ -287,6 +332,9 @@ export function createConsoleServer(options,services={}) {
   const token=randomBytes(32).toString('base64url');
   const getSnapshot=services.snapshot||snapshot;
   const restart=services.restart||executeService;
+  const getOperatorPassword=services.getOperatorPassword||readOperatorPassword;
+  const changeRuntime=services.switchRuntime||switchRuntime;
+  let switching=false;
   const staticFiles={'/':'runtime-console-ui.html','/index.html':'runtime-console-ui.html','/ui.css':'runtime-console-ui.css','/ui.js':'runtime-console-ui.js'};
   const type={'/':'text/html; charset=utf-8','/index.html':'text/html; charset=utf-8','/ui.css':'text/css; charset=utf-8','/ui.js':'text/javascript; charset=utf-8'};
   const server=http.createServer(async(req,res)=>{
@@ -304,12 +352,41 @@ export function createConsoleServer(options,services={}) {
       catch(error){return json(res,500,{error:clip(error.message,200)});}
     }
     if(req.method==='GET'&&url==='/api/action-token')return json(res,200,{token});
+    if(req.method==='POST'&&url==='/api/credentials/owner'){
+      if(req.headers.origin!=='http://'+host||req.headers['x-devspace-console-token']!==token)return json(res,403,{error:'Operator confirmation required.'});
+      if(!options.allowOwnerCopy)return json(res,404,{error:'Owner password copy is disabled.'});
+      if(Number(req.headers['content-length']||0)>128)return json(res,413,{error:'Request too large.'});
+      const password=getOperatorPassword(options);
+      if(!password)return json(res,404,{error:'Owner password copy is not available on this instance.'});
+      return json(res,200,{password});
+    }
     if(req.method==='POST'&&url.startsWith('/api/actions/')){
       const origin=req.headers.origin;
-      if(origin&&origin!=='http://'+host)return json(res,403,{ok:false,error:'Invalid origin.'});
+      if(origin!=='http://'+host)return json(res,403,{ok:false,error:'Invalid origin.'});
       if(req.headers['x-devspace-console-token']!==token)return json(res,403,{ok:false,error:'Invalid action token.'});
       if(Number(req.headers['content-length']||0)>4096)return json(res,413,{ok:false,error:'Request too large.'});
       const name=url.slice('/api/actions/'.length);
+      if(name==='rollback-runtime'){
+        if(req.headers.origin!=='http://'+host)return json(res,403,{ok:false,error:'Same-origin confirmation required.'});
+        if(switching)return json(res,409,{ok:false,error:'A runtime switch is already in progress.'});
+        switching=true;
+        try {
+          let body='';
+          for await(const chunk of req){body+=chunk;if(body.length>4096)return json(res,413,{ok:false,error:'Request too large.'});}
+          const request=parse(body);
+          const info=runtimeInfo(options);
+          const target=rollbackTargets(options,info).find(x=>x.id===request?.target_id);
+          if(!target||target.current||target.server_sha256!==request?.expected_sha256||info.actual.pid!==request?.observed_pid)
+            return json(res,409,{ok:false,error:'The selected runtime is no longer valid. Refresh and try again.'});
+          const result=await changeRuntime({
+            options,live:info.actual,target,expectedHash:request?.expected_sha256,
+            observedPid:request?.observed_pid,
+            probe:(candidate)=>localRuntimeProbe(options,candidate),
+          });
+          return json(res,result.status,result);
+        }catch{return json(res,500,{ok:false,error:'Runtime operation failed; inspect the local console journal.'});}
+        finally{switching=false;}
+      }
       const unit=name==='restart-devspace'?options.serviceUnit:name==='restart-tunnel'?options.tunnelUnit:'';
       if(!unit)return json(res,404,{ok:false,error:'Unknown or disabled action.'});
       const result=restart(unit);

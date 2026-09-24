@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="7677"
 CONSOLE_PORT=""
+OWNER_COPY=1
 ALLOWED_ROOT="$HOME"
 PUBLIC_URL=""
 ORIGIN_HOST=""
@@ -29,6 +30,8 @@ Options:
   --allowed-root PATH   Project root DevSpace may access (default: $HOME)
   --port PORT           Local DevSpace port (default: 7677)
   --console-port PORT   Loopback-only Control Console (default: DevSpace port + 1)
+  --enable-owner-copy   Allow confirmed Owner Password copy (default: enabled on localhost)
+  --disable-owner-copy  Disable Owner Password copy even on localhost
   --public-url URL      Public base URL; path bases are supported (example: https://dev.example.com/server)
   --origin-host HOST    Cloudflare Tunnel origin hostname accepted by DevSpace
   --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
@@ -47,6 +50,8 @@ while [[ $# -gt 0 ]]; do
     --allowed-root) ALLOWED_ROOT="${2:?missing path}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --port) PORT="${2:?missing port}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --console-port) CONSOLE_PORT="${2:?missing console port}"; shift 2 ;;
+    --enable-owner-copy) OWNER_COPY=1; shift ;;
+    --disable-owner-copy) OWNER_COPY=0; shift ;;
     --public-url) PUBLIC_URL="${2:?missing URL}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --origin-host) ORIGIN_HOST="${2:?missing hostname}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; CONFIG_OVERRIDE=1; shift 2 ;;
@@ -190,6 +195,7 @@ if [[ "$UPGRADE_EXISTING" -eq 0 ]]; then ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && p
 mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_DIR" "$WORKTREE_ROOT" "$INSTALL_ROOT/bin"
 install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$ROOT/ops/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
+install -m 0644 "$ROOT/ops/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
 install -m 0644 "$ROOT/ops/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
 install -m 0644 "$ROOT/ops/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
 install -m 0644 "$ROOT/ops/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"
@@ -301,7 +307,7 @@ chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
 cat > "$INSTALL_ROOT/bin/run-runtime-console" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT"
+exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --credential-file "$DEVSPACE_CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT"
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 

@@ -25,17 +25,37 @@ presented as the running Git revision. No secrets are included in the snapshot.
 
 ## Modules
 
-Overview; Runtime & versions; Connectivity; MCP request diagnostics;
-Workspaces & jobs; Deployment/rollback inventory. The Console supports Chinese
+Overview; Connection & access; Runtime & versions; Connectivity; MCP request
+diagnostics; Workspaces & jobs; Deployment/rollback. The Console supports Chinese
 and English, light/dark appearance, keyboard focus, accessible confirmation and
 reduced-motion preferences. A structured HTTP JSON snapshot is at `/api/status`.
 Request timings describe origin observations; `firstByteMs` means the origin
 wrote response headers and does not prove delivery to the ChatGPT connector.
 
-Protected restart controls are restricted to loopback Host, same-origin POST,
-an ephemeral per-process action token, and a confirmation dialog. They are not
-made available in Windows instances without an explicit service supervisor.
-No endpoint exposes owner passwords, tunnel tokens or OAuth credentials.
+The public MCP URL is derived from the configured public base URL and can be
+copied without revealing a secret. Owner Password copying is a separate,
+explicitly confirmed action (`POST /api/credentials/owner`) available only on
+localhost, with a same-origin request, per-process action token and a protected
+local `auth.json`. No secret is included in `/api/status`, normal logs or page
+HTML. The password is copied to the browser clipboard, never inserted into a
+visible input, and should be moved to a password manager. To disable the copy
+operation, install with `--disable-owner-copy` or omit the feature flag in a
+manually configured console wrapper.
+
+Rollback requires choosing a specific installed runtime. Candidate entries
+must have an actual CLI and server file inside their instance directory; the
+server SHA-256 and current process PID are rechecked immediately before a
+switch. The operator must type the selected runtime ID in the confirmation
+dialog. The backend saves a launcher backup, switches the CLI path, restarts
+only the DevSpace service, and verifies both the new process identity and local
+MCP health. On failure it restores the former launcher and requests a service
+restart. The Cloudflare Tunnel and owner credential are not changed. A rollback
+candidate being listed is not a guarantee that it will pass runtime health.
+If target health fails, the former launcher is restored, the service is
+restarted again, and the former process identity/health must also pass before
+the operation reports an automatic recovery.
+Windows rollback is unavailable until a verified Windows service supervisor
+and safe switch transaction are implemented.
 
 ## Development acceptance
 
