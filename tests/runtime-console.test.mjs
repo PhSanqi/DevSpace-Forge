@@ -70,6 +70,9 @@ test('snapshot never includes owner secrets and does not mislabel missing Git pr
     writeFileSync(config,JSON.stringify({server:{host:'127.0.0.1',port:1,publicBaseUrl:'https://example.invalid/server'},storage:{stateDir:path.join(f.root,'state')},oauth:{ownerToken:'NEVER_SHOW_THIS'}}));
     const x=await snapshot({instance:'server',platformRoot:f.root,configPath:config,explicitRuntimePackage:f.declared,serviceUnit:'',tunnelUnit:'',tunnelMetrics:'',stateDir:'',runtimeManifest:'',controlManifest:''});
     assert.equal(x.schema_version,2);
+    assert.equal(x.management.settings.tunnel_mode,'Remote');
+    assert.equal(x.management.settings.public_base_url,'https://example.invalid/server');
+    assert.ok(Array.isArray(x.management.projects));
     assert.equal(x.runtime.actual.package_root,null);
     assert.equal(x.runtime.provenance.runtime,null);
     assert.equal(x.security.credentials_included,false);

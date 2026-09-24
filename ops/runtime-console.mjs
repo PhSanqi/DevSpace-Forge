@@ -291,7 +291,7 @@ export async function snapshot(options) {
   ]);
   const devspaceStatus=systemd(options.serviceUnit,'is-active')||null;
   const tunnelStatus=systemd(options.tunnelUnit,'is-active')||null;
-  return {
+  const result={
     schema_version:2,generated_at:new Date().toISOString(),instance:options.instance,platform:process.platform,
     runtime:rt,deployment:deploymentInfo(options,rt),
     services:{devspace:devspaceStatus,tunnel:tunnelStatus},
