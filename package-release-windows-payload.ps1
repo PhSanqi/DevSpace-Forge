@@ -52,7 +52,7 @@ foreach ($file in @('README.md', 'README.zh-CN.md', 'LICENSE')) {
     Copy-Item (Join-Path $root $file) $stage -Force
 }
 New-Item -ItemType Directory -Force (Join-Path $stage 'ops') | Out-Null
-foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
+foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'control-management.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
     Copy-Item (Join-Path $root ('ops\' + $file)) (Join-Path $stage 'ops') -Force
 }
 & node (Join-Path $root 'ops\write-provenance.mjs') --source-root $root --server-file (Join-Path $stage 'ops\runtime-console.mjs') --package-file (Join-Path $root 'package.json') --output (Join-Path $stage 'control-provenance.json') --version $Version --artifact-id $packageName --strict

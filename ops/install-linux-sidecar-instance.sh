@@ -111,6 +111,7 @@ chmod 0700 "$CONFIG_DIR" "$STATE_DIR" "$AGENT_DIR" || true
 install -m 0755 "$SCRIPT_DIR/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$SCRIPT_DIR/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
+install -m 0644 "$SCRIPT_DIR/control-management.mjs" "$INSTALL_ROOT/bin/control-management.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"

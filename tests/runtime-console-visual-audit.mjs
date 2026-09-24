@@ -43,10 +43,10 @@ try{
   await send('Page.enable');await send('Runtime.enable');
   const observations=[];
   const variants=[
-    {name:'desktop-zh-dark',width:1440,height:900,lang:'zh',theme:'dark',view:'overview'},
-    {name:'desktop-en-light',width:1440,height:900,lang:'en',theme:'light',view:'runtime'},
-    {name:'mobile-zh-dark',width:390,height:844,lang:'zh',theme:'dark',view:'overview'},
-    {name:'mobile-en-light',width:390,height:844,lang:'en',theme:'light',view:'requests'},
+    {name:'desktop-zh-dark',width:1440,height:900,lang:'zh',theme:'dark',view:'services'},
+    {name:'desktop-en-light',width:1440,height:900,lang:'en',theme:'light',view:'projects'},
+    {name:'mobile-zh-dark',width:390,height:844,lang:'zh',theme:'dark',view:'connection'},
+    {name:'mobile-en-light',width:390,height:844,lang:'en',theme:'light',view:'devspace'},
   ];
   for(const variant of variants){
     await send('Emulation.setDeviceMetricsOverride',{width:variant.width,height:variant.height,deviceScaleFactor:1,mobile:variant.width<600});
@@ -79,19 +79,62 @@ try{
     })()`);
     const png=await send('Page.captureScreenshot',{format:'png',fromSurface:true,captureBeyondViewport:false});
     writeFileSync(path.join(out,variant.name+'.png'),Buffer.from(png.data,'base64'));
-    const pass=report.width===variant.width&&report.documentWidth<=variant.width&&report.theme===variant.theme&&report.view==='view-'+variant.view&&report.loaded&&report.navCount===7&&report.skipLink&&report.textContrast>=4.5&&report.mutedContrast>=4.5&&report.accentContrast>=4.5;
+    const pass=report.width===variant.width&&report.documentWidth<=variant.width&&report.theme===variant.theme&&report.view==='view-'+variant.view&&report.loaded&&report.navCount===12&&report.skipLink&&report.textContrast>=4.5&&report.mutedContrast>=4.5&&report.accentContrast>=4.5;
     observations.push({...variant,...report,pass});
   }
   // Explicit connection and rollback controls are reviewed against a fixture,
   // without ever requesting or handling a real owner credential.
-  await evaluate("document.querySelector('[data-view=\"access\"]').click();");
-  const access=await evaluate("({view:document.querySelector('.view.active')?.id,copies:document.querySelectorAll('[data-copy-url]:not([disabled])').length,ownerButton:!!document.querySelector('[data-copy-owner]:not([disabled])'),masked:document.querySelector('#access-content').textContent.includes('••••'),hasPublic:document.querySelector('#access-content').textContent.includes('/server/mcp')})");
-  observations.push({name:'connection-controls',...access,pass:access.view==='view-access'&&access.copies>=2&&access.ownerButton&&access.masked&&access.hasPublic});
+  await evaluate("document.querySelector('[data-view=\"services\"]').click();");
+  const access=await evaluate("({view:document.querySelector('.view.active')?.id,copies:document.querySelectorAll('#services-content [data-copy-url]:not([disabled])').length,ownerButton:!!document.querySelector('#services-content [data-copy-owner]:not([disabled])'),masked:document.querySelector('#services-content').textContent.includes('••••'),hasPublic:document.querySelector('#services-content').textContent.includes('/server/mcp'),serviceActions:document.querySelectorAll('#services-content [data-service-target]').length})");
+  observations.push({name:'mandatory-service-and-access-controls',...access,pass:access.view==='view-services'&&access.copies>=2&&access.ownerButton&&access.masked&&access.hasPublic&&access.serviceActions>=6});
   const accessImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
   writeFileSync(path.join(out,'connection-controls.png'),Buffer.from(accessImage.data,'base64'));
+  await evaluate("document.querySelector('[data-view=\"connection\"]').click();");
+  const connectionConfig=await evaluate("({view:document.querySelector('.view.active')?.id,roots:!!document.querySelector('#cfg-roots'),port:document.querySelector('#cfg-port')?.value,publicUrl:document.querySelector('#cfg-public')?.value,autoStart:!!document.querySelector('#cfg-autostart'),tunnelToken:!!document.querySelector('#cfg-token'),save:!!document.querySelector('[data-save-connection]')})");
+  observations.push({name:'mandatory-connection-config',...connectionConfig,pass:connectionConfig.view==='view-connection'&&connectionConfig.roots&&connectionConfig.port==='17677'&&connectionConfig.publicUrl.includes('dev.sanqi.org/server')&&connectionConfig.autoStart&&connectionConfig.tunnelToken&&connectionConfig.save});
+  await evaluate("document.querySelector('[data-view=\"devspace\"]').click();");
+  const devspaceConfig=await evaluate("({view:document.querySelector('.view.active')?.id,toolMode:document.querySelector('#cfg-tool-mode')?.value,review:!!document.querySelector('#cfg-review-ui'),skills:!!document.querySelector('#cfg-skills'),skillPaths:!!document.querySelector('#cfg-skill-paths'),logLevel:!!document.querySelector('#cfg-log-level'),logFormat:!!document.querySelector('#cfg-log-format'),requestLogs:!!document.querySelector('#cfg-log-requests'),toolLogs:!!document.querySelector('#cfg-log-tools'),shellLogs:!!document.querySelector('#cfg-log-shell'),save:!!document.querySelector('[data-save-devspace]')})");
+  observations.push({name:'mandatory-devspace-config',...devspaceConfig,pass:devspaceConfig.view==='view-devspace'&&devspaceConfig.toolMode==='codex'&&devspaceConfig.review&&devspaceConfig.skills&&devspaceConfig.skillPaths&&devspaceConfig.logLevel&&devspaceConfig.logFormat&&devspaceConfig.requestLogs&&devspaceConfig.toolLogs&&devspaceConfig.shellLogs&&devspaceConfig.save});
+  await evaluate("document.querySelector('[data-view=\"diagnostics\"]').click();");
+  const diagnostics=await evaluate("({view:document.querySelector('.view.active')?.id,validate:!!document.querySelector('[data-validate-config]'),doctor:!!document.querySelector('[data-run-doctor]'),config:!!document.querySelector('[data-show-config]'),logs:document.querySelectorAll('[data-load-log]').length,conversation:!!document.querySelector('#conversation-selector'),statePaths:document.querySelector('#diagnostics-content')?.textContent.includes('devspace-state')})");
+  observations.push({name:'mandatory-diagnostics-controls',...diagnostics,pass:diagnostics.view==='view-diagnostics'&&diagnostics.validate&&diagnostics.doctor&&diagnostics.config&&diagnostics.logs===2&&diagnostics.conversation&&diagnostics.statePaths});
+  await evaluate("document.querySelector('[data-view=\"history\"]').click();");
+  const historyList=await evaluate("({view:document.querySelector('.view.active')?.id,items:document.querySelectorAll('[data-history-id]').length})");
+  observations.push({name:'mandatory-config-history-list',...historyList,pass:historyList.view==='view-history'&&historyList.items>=1});
+  await evaluate("document.querySelector('[data-history-id]').click();");
+  for(let i=0;i<30;i++){
+    if(await evaluate("Boolean(document.querySelector('[data-load-history-form]'))"))break;
+    await sleep(100);
+  }
+  const historyPreview=await evaluate("({preview:!!document.querySelector('#history-content .code-box'),load:!!document.querySelector('[data-load-history-form]'),direct:!!document.querySelector('[data-restore-history]')})");
+  observations.push({name:'mandatory-config-history-preview',...historyPreview,pass:historyPreview.preview&&historyPreview.load&&historyPreview.direct});
+  await evaluate("document.querySelector('[data-load-history-form]').click();");
+  const loadedForm=await evaluate("({view:document.querySelector('.view.active')?.id,port:document.querySelector('#cfg-port')?.value,publicUrl:document.querySelector('#cfg-public')?.value})");
+  observations.push({name:'windows-style-history-load-into-form',...loadedForm,pass:loadedForm.view==='view-connection'&&loadedForm.port==='17677'&&loadedForm.publicUrl.includes('dev.sanqi.org/server')});
+  await evaluate("document.querySelector('[data-view=\"projects\"]').click();");
+  for(let i=0;i<40;i++){
+    if(await evaluate("Boolean(document.querySelector('#projects-content input[name=\"review-version\"]'))"))break;
+    await sleep(100);
+  }
+  const project=await evaluate("({view:document.querySelector('.view.active')?.id,projectSelector:!!document.querySelector('#project-selector'),gitRows:document.querySelectorAll('#projects-content table tbody tr').length,reviewChoices:document.querySelectorAll('#projects-content input[name=\"review-version\"]').length,currentDisabled:[...document.querySelectorAll('#projects-content input[name=\"review-version\"]')].some(x=>x.disabled),recordButton:!!document.querySelector('[data-record-project]')})");
+  observations.push({name:'mandatory-project-git-version-management',...project,pass:project.view==='view-projects'&&project.projectSelector&&project.gitRows>=2&&project.reviewChoices>=3&&project.currentDisabled&&project.recordButton});
+  await evaluate("const x=[...document.querySelectorAll('#projects-content input[name=\"review-version\"]')].find(x=>!x.disabled);x.click();");
+  const codeRollback=await evaluate("({selected:!!document.querySelector('#projects-content input[name=\"review-version\"]:checked'),enabled:!document.querySelector('[data-project-rollback]').disabled})");
+  observations.push({name:'select-code-review-version',...codeRollback,pass:codeRollback.selected&&codeRollback.enabled});
+  await evaluate("document.querySelector('[data-project-rollback]').click();");
+  const codeConfirm=await evaluate("({open:document.querySelector('#confirm-dialog').open,title:document.querySelector('#confirm-title').textContent,typedAreaHidden:document.querySelector('#rollback-confirm-area').hidden})");
+  observations.push({name:'code-rollback-confirmation',...codeConfirm,pass:codeConfirm.open&&codeConfirm.typedAreaHidden});
+  await evaluate("document.querySelector('#confirm-dialog').close('cancel');");
   await evaluate("document.querySelector('[data-view=\"deployment\"]').click();document.querySelector('#rollback-target').value='runtime-local12';document.querySelector('#rollback-target').dispatchEvent(new Event('change',{bubbles:true}));");
   const rollback=await evaluate("({view:document.querySelector('.view.active')?.id,selected:document.querySelector('#rollback-target').value,preview:document.querySelector('.rollback-preview')?.textContent.includes('1.1.0-beta.4.local.12'),enabled:!document.querySelector('[data-action=\"rollback-runtime\"]').disabled,currentDisabled:document.querySelector('#rollback-target option[value=\"runtime-local13-candidate-20260924-0118\"]')?.disabled})");
   observations.push({name:'select-specific-rollback',...rollback,pass:rollback.view==='view-deployment'&&rollback.selected==='runtime-local12'&&rollback.preview&&rollback.enabled&&rollback.currentDisabled});
+  const noOverlap=await evaluate(`(()=>{
+    const panels=[...document.querySelectorAll('#deployment-content .panel')];
+    const action=document.querySelector('#deployment-content .action-zone');
+    const overlap=(a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return x.bottom>y.top&&y.bottom>x.top&&x.right>y.left&&y.right>x.left;};
+    return {panels:panels.length,action:!!action,overlap:panels.some(x=>overlap(x,action))};
+  })()`);
+  observations.push({name:'runtime-rollback-layout-not-obstructed',...noOverlap,pass:noOverlap.panels>=3&&noOverlap.action&&!noOverlap.overlap});
   const rollbackImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
   writeFileSync(path.join(out,'rollback-selection.png'),Buffer.from(rollbackImage.data,'base64'));
   await evaluate("document.querySelector('[data-action=\"rollback-runtime\"]').click();");

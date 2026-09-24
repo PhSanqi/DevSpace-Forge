@@ -4,8 +4,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
 import { switchRuntime } from '../ops/runtime-rollback.mjs';
+import { projectChoices, projectDetails, observeProject, rollbackReview, updateManagedConfig } from '../ops/control-management.mjs';
 
 const fixture=()=>{
   const root=mkdtempSync(path.join(tmpdir(),'devspace-console-'));
@@ -220,11 +222,61 @@ test('selected runtime switch validates identity and restores launcher on failed
     assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-devspace.bak'),'utf8'),original);
   }finally{f.clean();}
 });
+test('managed config save preserves unrelated config and creates a restorable history snapshot',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'devspace-managed-config-'));
+  try{
+    const project=path.join(root,'project');mkdirSync(project);
+    const config=path.join(root,'config','config.jsonc');mkdirSync(path.dirname(config),{recursive:true});
+    const original={configVersion:1,server:{host:'127.0.0.1',port:17677,publicBaseUrl:'https://example.invalid/server'},workspaces:{allowedRoots:[root],worktreeRoot:path.join(root,'worktrees')},tools:{mode:'codex'},ui:{enabled:true},skills:{enabled:true,paths:[]},logging:{level:'info',format:'json',requests:true,toolCalls:true,shellCommands:false},oauth:{scopes:['devspace'],sentinel:'KEEP'}};
+    writeFileSync(config,JSON.stringify(original));
+    const result=updateManagedConfig({platformRoot:root,configPath:config,serve:17678},{allowed_roots:[project],tool_mode:'claude',logging:{level:'debug',shell_commands:true}});
+    assert.equal(result.ok,true);
+    const next=JSON.parse(readFileSync(config,'utf8'));
+    assert.deepEqual(next.oauth,original.oauth);
+    assert.deepEqual(next.workspaces.allowedRoots,[project]);
+    assert.equal(next.tools.mode,'claude');
+    assert.equal(next.logging.level,'debug');
+    assert.equal(next.logging.shellCommands,true);
+    const history=path.join(root,'state','config-history-web',result.history);
+    assert.equal(JSON.parse(readFileSync(history,'utf8')).tools.mode,'codex');
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('project/Git parity records Review versions and rolls back selected code safely',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'devspace-project-versions-'));
+  const repo=path.join(root,'repo');mkdirSync(repo);
+  const git=(...args)=>{
+    const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8'});
+    assert.equal(r.status,0,r.stderr);return r.stdout.trim();
+  };
+  try{
+    git('init');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid');
+    writeFileSync(path.join(repo,'code.txt'),'one\n');git('add','code.txt');git('commit','-m','baseline');
+    const workspaces=[{id:'ws1',root:repo,last_used_at:1}];
+    const project=projectChoices(workspaces)[0];assert.ok(project);
+    assert.equal(projectDetails(workspaces,project.id).review.initialized,false);
+    assert.equal(observeProject(workspaces,project.id,'baseline').version,'V0');
+    writeFileSync(path.join(repo,'code.txt'),'two\n');
+    assert.equal(observeProject(workspaces,project.id,'second').version,'V1');
+    writeFileSync(path.join(repo,'code.txt'),'three\n');
+    assert.equal(observeProject(workspaces,project.id,'third').version,'V2');
+    const before=projectDetails(workspaces,project.id);
+    const target=before.review.versions.find(x=>x.version==='V1');
+    assert.equal(before.review.versions.find(x=>x.version==='V2').is_current,true);
+    assert.equal(target.is_active,true);
+    const result=rollbackReview(workspaces,project.id,target.review_ref);
+    assert.equal(result.target,'V1');
+    assert.equal(readFileSync(path.join(repo,'code.txt'),'utf8').replace(/\r\n/g,'\n'),'two\n');
+    const after=projectDetails(workspaces,project.id);
+    assert.equal(after.review.versions.find(x=>x.version==='V1').is_current,true);
+    assert.equal(after.review.versions.find(x=>x.version==='V2').is_active,false);
+    assert.equal(git('rev-parse','HEAD'),before.commits[0].commit,'real Git HEAD is not reset');
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('UI includes semantic navigation, theme/language controls, responsive and accessible states',()=>{
   const html=readFileSync(new URL('../ops/runtime-console-ui.html',import.meta.url),'utf8');
   const css=readFileSync(new URL('../ops/runtime-console-ui.css',import.meta.url),'utf8');
   const js=readFileSync(new URL('../ops/runtime-console-ui.js',import.meta.url),'utf8');
-  for(const id of ['overview','access','runtime','connectivity','requests','activity','deployment'])assert.match(html,new RegExp('data-view="'+id+'"'));
+  for(const id of ['services','connection','devspace','projects','diagnostics','history','overview','runtime','connectivity','requests','activity','deployment'])assert.match(html,new RegExp('data-view="'+id+'"'));
   for(const id of ['language','theme-toggle','confirm-dialog','request-filter'])assert.match(html+js,new RegExp(id));
   assert.match(html,/skip-link/);
   assert.match(css,/@media\(max-width:520px\)/);
@@ -234,4 +286,6 @@ test('UI includes semantic navigation, theme/language controls, responsive and a
   assert.match(js,/noManifest/);
   assert.match(js,/data-copy-owner/);
   assert.match(js,/rollback-confirm-input/);
+  assert.match(js,/data-project-rollback/);
+  assert.match(js,/data-save-devspace/);
 });

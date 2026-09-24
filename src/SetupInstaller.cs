@@ -557,6 +557,7 @@ namespace DevSpaceControlPlatform
             {
                 "runtime-console.mjs",
                 "runtime-rollback.mjs",
+                "control-management.mjs",
                 "runtime-console-ui.html",
                 "runtime-console-ui.css",
                 "runtime-console-ui.js",

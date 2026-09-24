@@ -13,10 +13,12 @@ to have performed an independent model review.
 The previous single dark `<pre>` diagnostic view is a useful fallback but not a
 management product. A dense, console-first layout would continue hiding
 version provenance and important errors in undifferentiated JSON. The selected
-direction is an operator-facing system dashboard: persistent seven-section
-navigation; clear service/health hierarchy; separate configured and running
-versions; monospace identities and hashes; bounded tables for diagnostics and
-workspaces; explicit uncertainty instead of invented Git revisions.
+direction is an operator-facing control product with two explicit layers.
+**Core Management** comes first and mirrors the operational Windows manager:
+services/access, connection config, DevSpace config, Projects/Git, logs/diagnostics
+and config history. **Runtime Observation** is secondary and contains the
+diagnostic dashboard pages. This prevents monitoring cards from displacing the
+controls needed to operate and recover the instance.
 
 Tokens: navy surfaces with restrained azure accent, reserved green/amber/red
 operational states, neutral light theme, spacious section panels, responsive
@@ -31,17 +33,22 @@ user-agent/mobile emulation label. Results are recorded in the ignored
 
 | Check | Evidence / expected behavior |
 | --- | --- |
-| Desktop | 1440px Chinese/dark overview and English/light runtime |
-| Mobile | 390px Chinese/dark overview and English/light requests, no page-level horizontal overflow |
-| Functional hierarchy | Seven named sections, populated fixture data, distinct process vs pointer and Git provenance fields |
+| Desktop | 1440px Chinese/dark Services and English/light Projects/Git |
+| Mobile | 390px Chinese/dark Connection config and English/light DevSpace config, no page-level horizontal overflow |
+| Functional hierarchy | 12 navigation entries split into Core Management and Runtime Observation |
+| Windows parity | Service control, access copy, connection/config fields, Project/Git versions, diagnostics and config-history surfaces |
 | Connection/access | Configured MCP URL copy, masked credential and explicit owner-copy confirmation |
-| Rollback | Select a specific installed version, see its path/hash, require the matching target ID to confirm |
+| Code rollback | Select an earlier active DevSpace Review version; current/archived versions are not valid targets |
+| Runtime rollback | Select a specific installed runtime, see its path/hash, require the matching target ID to confirm |
+| Layout regression | Runtime rollback, backups and protected operations are vertically separated; bounding boxes do not overlap |
 | Interaction | Mobile drawer opens and closes upon navigation; theme and language actually change |
 | Accessibility | Skip link, semantic navigation/tables, visible keyboard focus, dialog labeling/focus, error announcement, reduced-motion |
 | Resilience | Loading and error states, bounded request results, explicit unknown provenance, confirmation before a dangerous action |
 | Safety | Local-only Host and CSP; `/api/status` and HTML never contain credentials; Owner Password is returned only by the explicitly confirmed same-origin credential action; protected service POSTs; no public UI route |
 
-Headless Edge produced all four viewport screenshots plus dialog/error captures,
+Headless Edge produced all four core-management viewport screenshots plus
+service/access, Project/Git version selection, code-rollback confirmation,
+runtime-rollback selection/layout, dialog/error and accessibility captures,
 with no browser exceptions. This is an **automated browser/design acceptance**,
 not a claim that an independent human or model performed a subjective
 pixel-by-pixel visual review. The final release gate remains real Linux/Windows

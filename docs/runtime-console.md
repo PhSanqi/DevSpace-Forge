@@ -23,14 +23,34 @@ only if its manifest includes the SHA-256 matching the installed runtime
 alone, a development checkout HEAD, and a configured slot must **never** be
 presented as the running Git revision. No secrets are included in the snapshot.
 
-## Modules
+## Product parity contract
 
-Overview; Connection & access; Runtime & versions; Connectivity; MCP request
-diagnostics; Workspaces & jobs; Deployment/rollback. The Console supports Chinese
-and English, light/dark appearance, keyboard focus, accessible confirmation and
-reduced-motion preferences. A structured HTTP JSON snapshot is at `/api/status`.
-Request timings describe origin observations; `firstByteMs` means the origin
-wrote response headers and does not prove delivery to the ChatGPT connector.
+The web Console is not only a diagnostic dashboard. The **core management**
+section must preserve the operator capabilities of the Windows Control Platform:
+
+- Services & access: DevSpace/Tunnel start, stop, restart, all-service controls,
+  public/local MCP URL copy and explicit Owner Password copy.
+- Connection config: Allowed Roots, local port, public base URL, protected
+  Cloudflare Tunnel token and login autostart.
+- DevSpace config: runtime version, tool mode, Change Review UI, Agent Skills
+  discovery/paths, subagent state, and request/tool/shell logging controls.
+- Projects / Git: real repository status and Git commits plus the independent
+  DevSpace Review version chain, including selection and safe code rollback.
+- Logs & diagnostics: config validation, doctor, effective config, per-workspace
+  tool/activity log, service logs and state paths.
+- Platform config history: snapshot preview and the Windows-compatible workflow
+  of loading a snapshot into the editable forms, reviewing it, then pressing
+  Save. An immediate restore remains an explicitly marked advanced action.
+
+The runtime observation pages (Overview, Runtime & versions, Connectivity, MCP
+diagnostics, Workspaces & jobs, Runtime deployment) are supplementary. They must
+not replace the management functions above.
+
+The Console supports Chinese and English, light/dark appearance, keyboard focus,
+accessible confirmation and reduced-motion preferences. A structured HTTP JSON
+snapshot is at `/api/status`. Request timings describe origin observations;
+`firstByteMs` means the origin wrote response headers and does not prove delivery
+to the ChatGPT connector.
 
 The public MCP URL is derived from the configured public base URL and can be
 copied without revealing a secret. Owner Password copying is a separate,
@@ -56,6 +76,18 @@ restarted again, and the former process identity/health must also pass before
 the operation reports an automatic recovery.
 Windows rollback is unavailable until a verified Windows service supervisor
 and safe switch transaction are implemented.
+
+Project/code rollback is separate from runtime rollback. It uses the same hidden
+Review refs as the Windows manager (`refs/devspace/control-platform/...`), makes
+working-tree snapshots with a temporary Git index and `commit-tree`, checks a
+reverse patch before applying it, and refuses conflicting later edits. It never
+uses `git reset --hard` and never moves the repository's real Git HEAD. The
+operator chooses the project and an earlier active Review version explicitly.
+
+Managed configuration writes preserve unrelated DevSpace/OAuth fields and create
+a configuration-history snapshot before changing the canonical `config.jsonc`.
+Saving configuration never silently restarts DevSpace. Tunnel credentials remain
+in their protected token file rather than in the ordinary config or status API.
 
 ## Development acceptance
 

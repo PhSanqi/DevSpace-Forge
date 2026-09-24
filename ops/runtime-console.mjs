@@ -12,6 +12,12 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { switchRuntime, localRuntimeProbe } from './runtime-rollback.mjs';
+import {
+  managementSnapshot, projectDetails, observeProject, rollbackReview,
+  updateManagedConfig, setTunnelToken, setAutostart, serviceAction,
+  configHistoryItem, restoreConfigHistory, redactedConfig, validateManagedConfig, doctor,
+  recentWorkspaceLog, recentServiceLog
+} from './control-management.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const validUnit = /^[A-Za-z0-9_.@-]+\.service$/;
@@ -44,6 +50,7 @@ export function parseOptions(argv) {
     tunnelMetrics: options.tunnelMetrics || '',
     allowOwnerCopy: options.allowOwnerCopy === 'true',
     credentialFile: options.credentialFile ? path.resolve(options.credentialFile) : '',
+    tunnelTokenFile: options.tunnelTokenFile ? path.resolve(options.tunnelTokenFile) : '',
     pid: options.pid ? Number(options.pid) : null,
     serve: Number(options.serve || 0),
   };
@@ -118,7 +125,7 @@ function manifest(file,expectedHash) {
   const commit=String(data.git_commit);
   if (!/^[0-9a-f]{40,64}$/i.test(commit)) return null;
   if (!expectedHash || !data.server_sha256 || data.server_sha256!==expectedHash) return null;
-  return {
+  const result={
     git_branch:clip(data.git_branch||data.source_ref||'',120)||null,
     git_commit:commit,
     artifact_id:clip(data.artifact_id||'',150)||null,
@@ -126,6 +133,7 @@ function manifest(file,expectedHash) {
     server_sha256:data.server_sha256||null,
     manifest_verified:true,
   };
+  return result;
 }
 export function runtimeInfo(options) {
   const active=readPointer(options.platformRoot,'active-slot.txt');
@@ -253,7 +261,7 @@ async function inventory(options,config,runtimePackage) {
           result[key]=db.prepare('select count(*) as total from '+table).get().total;
           const order=table==='workspace_sessions'?'last_used_at':'updated_at';
           result[rowsKey]=db.prepare('select * from '+table+' order by '+order+' desc limit 30').all().map((x)=>{
-            if(table==='workspace_sessions')return {id:x.id,root:x.root||x.workspace_root,status:x.status,mode:x.mode,last_used_at:x.last_used_at};
+            if(table==='workspace_sessions')return {id:x.id,root:x.root||x.workspace_root,source_root:x.source_root||null,status:x.status,mode:x.mode,last_used_at:x.last_used_at};
             return {id:x.id,workspace_root:x.workspace_root,workspace_mode:x.workspace_mode,status:x.status,task_intent:clip(x.task_intent,180),updated_at:x.updated_at,review_ref:x.review_ref};
           });
         }
@@ -298,6 +306,8 @@ export async function snapshot(options) {
     inventory:state,security:{credentials_included:false,loopback_console_only:true},
     actions:{restart_devspace:!!devspaceStatus&&process.platform!=='win32',restart_tunnel:!!tunnelStatus&&process.platform!=='win32',rollback_runtime:!!devspaceStatus&&process.platform!=='win32',copy_owner_password:ownerCopyEnabled(options)},
   };
+  result.management=managementSnapshot(options,rt,state);
+  return result;
 }
 
 function response(res,status,body,type='application/json; charset=utf-8') {
@@ -334,15 +344,26 @@ export function createConsoleServer(options,services={}) {
   const restart=services.restart||executeService;
   const getOperatorPassword=services.getOperatorPassword||readOperatorPassword;
   const changeRuntime=services.switchRuntime||switchRuntime;
+  const getProjectDetails=services.projectDetails||projectDetails;
+  const getConfigHistoryItem=services.configHistoryItem||configHistoryItem;
   let switching=false;
   const staticFiles={'/':'runtime-console-ui.html','/index.html':'runtime-console-ui.html','/ui.css':'runtime-console-ui.css','/ui.js':'runtime-console-ui.js'};
   const type={'/':'text/html; charset=utf-8','/index.html':'text/html; charset=utf-8','/ui.css':'text/css; charset=utf-8','/ui.js':'text/javascript; charset=utf-8'};
+  const readBody=async(req,limit=32768)=>{
+    let body='';
+    for await(const chunk of req){body+=chunk;if(body.length>limit)throw Object.assign(new Error('Request too large.'),{status:413});}
+    const value=body?parse(body):{};
+    if(value===null)throw Object.assign(new Error('Invalid JSON body.'),{status:400});
+    return value;
+  };
+  const protectedRequest=(req,host)=>req.headers.origin==='http://'+host&&req.headers['x-devspace-console-token']===token;
   const server=http.createServer(async(req,res)=>{
     const host=req.headers.host||'';
     const port=server.address()?.port||options.serve;
     const validHost=host==='127.0.0.1:'+port||host==='localhost:'+port||host==='[::1]:'+port;
     if(!validHost)return json(res,403,{error:'Loopback Host required.'});
-    const url=req.url?.split('?')[0]||'';
+    const requestUrl=new URL(req.url||'/','http://'+host);
+    const url=requestUrl.pathname;
     if(req.method==='GET'&&Object.hasOwn(staticFiles,url)){
       try{return response(res,200,readFileSync(path.join(here,staticFiles[url])),type[url]);}
       catch{return json(res,500,{error:'Console asset unavailable.'});}
@@ -352,6 +373,31 @@ export function createConsoleServer(options,services={}) {
       catch(error){return json(res,500,{error:clip(error.message,200)});}
     }
     if(req.method==='GET'&&url==='/api/action-token')return json(res,200,{token});
+    if(req.method==='GET'&&url==='/api/management/project'){
+      try{
+        const state=await getSnapshot(options);
+        return json(res,200,getProjectDetails(state.inventory?.workspaces||[],requestUrl.searchParams.get('project_id')||''));
+      }catch(error){return json(res,404,{error:clip(error.message,220)});}
+    }
+    if(req.method==='GET'&&url==='/api/management/history'){
+      try{return json(res,200,getConfigHistoryItem(options,requestUrl.searchParams.get('history_id')||''));}
+      catch(error){return json(res,404,{error:clip(error.message,220)});}
+    }
+    if(req.method==='GET'&&url==='/api/management/config')return json(res,200,{config:redactedConfig(options)});
+    if(req.method==='GET'&&url==='/api/management/log'){
+      const service=requestUrl.searchParams.get('service');
+      const unit=service==='devspace'?options.serviceUnit:service==='tunnel'?options.tunnelUnit:'';
+      if(!unit)return json(res,404,{error:'Unknown service.'});
+      return json(res,200,{service,log:recentServiceLog(unit,200)});
+    }
+    if(req.method==='GET'&&url==='/api/management/conversation'){
+      const workspaceId=requestUrl.searchParams.get('workspace_id')||'';
+      try{
+        const state=await getSnapshot(options);
+        if(!(state.inventory?.workspaces||[]).some(x=>x.id===workspaceId))return json(res,404,{error:'Unknown workspace session.'});
+        return json(res,200,{workspace_id:workspaceId,log:recentWorkspaceLog(options.serviceUnit,workspaceId,250)});
+      }catch(error){return json(res,500,{error:clip(error.message,220)});}
+    }
     if(req.method==='POST'&&url==='/api/credentials/owner'){
       if(req.headers.origin!=='http://'+host||req.headers['x-devspace-console-token']!==token)return json(res,403,{error:'Operator confirmation required.'});
       if(!options.allowOwnerCopy)return json(res,404,{error:'Owner password copy is disabled.'});
@@ -359,6 +405,39 @@ export function createConsoleServer(options,services={}) {
       const password=getOperatorPassword(options);
       if(!password)return json(res,404,{error:'Owner password copy is not available on this instance.'});
       return json(res,200,{password});
+    }
+    if(req.method==='POST'&&url.startsWith('/api/management/')){
+      if(!protectedRequest(req,host))return json(res,403,{ok:false,error:'Same-origin operator token required.'});
+      try{
+        const body=await readBody(req);
+        if(url==='/api/management/config/save')return json(res,200,updateManagedConfig(options,body));
+        if(url==='/api/management/config/restore')return json(res,200,restoreConfigHistory(options,body.history_id));
+        if(url==='/api/management/tunnel-token'){
+          const result=setTunnelToken(options,body.token);
+          return json(res,200,{...result,restart_required:true});
+        }
+        if(url==='/api/management/autostart')return json(res,200,setAutostart(options,!!body.enabled));
+        if(url==='/api/management/service'){
+          const result=serviceAction(options,body.target,body.action);
+          return json(res,result.status||200,result);
+        }
+        if(url==='/api/management/doctor'){
+          const info=runtimeInfo(options);return json(res,200,doctor(options,info.actual.package_root||info.package_root));
+        }
+        if(url==='/api/management/validate'){
+          const info=runtimeInfo(options);const result=validateManagedConfig(options,info.actual.package_root||info.package_root);
+          return json(res,result.ok?200:409,result);
+        }
+        if(url==='/api/management/project/observe'){
+          const state=await getSnapshot(options);return json(res,200,observeProject(state.inventory?.workspaces||[],body.project_id,clip(body.summary||'Manual web-console snapshot',240)));
+        }
+        if(url==='/api/management/project/rollback'){
+          const state=await getSnapshot(options);
+          const result=rollbackReview(state.inventory?.workspaces||[],body.project_id,body.review_ref);
+          return json(res,200,{...result,restart_required:true});
+        }
+        return json(res,404,{ok:false,error:'Unknown management action.'});
+      }catch(error){return json(res,error.status||409,{ok:false,error:clip(error.message,300)});}
     }
     if(req.method==='POST'&&url.startsWith('/api/actions/')){
       const origin=req.headers.origin;
