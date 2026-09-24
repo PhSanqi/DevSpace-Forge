@@ -65,11 +65,15 @@
     devspaceServiceTitle:'DevSpace service',tunnelServiceTitle:'Cloudflare Tunnel',autoStart:'Start automatically at login',
     allowedRoots:'Allowed roots',localPort:'Local port',tunnelMode:'Tunnel mode',fixedEndpoint:'Public base URL',
     tunnelToken:'Cloudflare Tunnel token',saveToken:'Save Tunnel token',tokenStored:'Protected token is stored',tokenMissing:'No protected token is stored',
+    effectivePublic:'Effective public URL',legacyImport:'Migrate legacy QuickConfig',legacyImportFile:'Legacy settings.json',legacyImportButton:'Load legacy config',
+    quickModeDesc:'Quick mode creates a temporary trycloudflare.com address. Start Tunnel first; DevSpace will use the generated address.',
+    remoteModeDesc:'Remote mode uses the configured Cloudflare hostname and protected Tunnel Token.',
     saveConfig:'Save configuration',saveConfigNote:'Configuration changes are written with a history snapshot. Restart DevSpace from the Services page when you want them applied.',
     toolMode:'Tool mode',reviewUi:'Change Review / show_changes UI',skillsEnabled:'Agent Skills discovery',skillPaths:'Additional Skill paths',subagents:'Subagents',
     logLevel:'Log level',logFormat:'Log format',requestLogs:'Request logs',toolCallLogs:'Tool-call logs',shellCommandLogs:'Shell command logs',
     project:'Project',refreshProject:'Refresh versions',recordVersion:'Record current code version',gitCommits:'Local Git commits',
     reviewVersions:'DevSpace Review versions',reviewVersion:'Version',summary:'Summary',createdAt:'Created at',rollbackSteps:'Rollback steps',
+    sourceConversation:'Source conversation',latestTool:'Latest tool',
     codeRollback:'Rollback selected code version',selectReview:'Select an earlier active Review version.',reviewCurrent:'Current',reviewRollback:'Rollback available',reviewArchived:'Archived',
     codeRollbackWarning:'Code rollback applies a reverse patch and refuses conflicts. It does not run git reset --hard.',
     doctor:'Run doctor',effectiveConfig:'Effective config',serviceLog:'Service log',loadLog:'Load log',statePaths:'State paths',
@@ -96,11 +100,15 @@
     devspaceServiceTitle:'DevSpace 服务',tunnelServiceTitle:'Cloudflare Tunnel',autoStart:'登录后自动启动',
     allowedRoots:'Allowed Roots',localPort:'本地端口',tunnelMode:'Tunnel 模式',fixedEndpoint:'公网 Base URL',
     tunnelToken:'Cloudflare Tunnel Token',saveToken:'保存 Tunnel Token',tokenStored:'受保护 Token 已保存',tokenMissing:'尚未保存受保护 Token',
+    effectivePublic:'当前生效公网地址',legacyImport:'迁移旧 QuickConfig',legacyImportFile:'旧 settings.json',legacyImportButton:'载入旧配置',
+    quickModeDesc:'Quick 模式会生成临时 trycloudflare.com 地址。先启动 Tunnel，DevSpace 会使用生成的公网地址。',
+    remoteModeDesc:'Remote 模式使用配置的 Cloudflare hostname 与受保护 Tunnel Token。',
     saveConfig:'保存配置',saveConfigNote:'保存时会先生成配置历史快照；需要应用时再去“服务与连接”手动重启 DevSpace。',
     toolMode:'Tool mode',reviewUi:'启用 Change Review / show_changes UI',skillsEnabled:'启用 Agent Skills 发现',skillPaths:'额外 Skill 路径',subagents:'Subagents',
     logLevel:'Log level',logFormat:'Log format',requestLogs:'Request logs',toolCallLogs:'Tool-call logs',shellCommandLogs:'Shell command logs',
     project:'项目',refreshProject:'刷新版本',recordVersion:'记录当前代码版本',gitCommits:'本地 Git 提交',
     reviewVersions:'DevSpace Review 版本',reviewVersion:'版本',summary:'说明',createdAt:'时间',rollbackSteps:'撤销版本数',
+    sourceConversation:'来源会话',latestTool:'最近工具',
     codeRollback:'回滚到选中代码版本',selectReview:'请选择更早的活动 Review 版本。',reviewCurrent:'当前',reviewRollback:'可回滚',reviewArchived:'已回滚',
     codeRollbackWarning:'代码回滚使用反向补丁，发生冲突会拒绝；不会执行 git reset --hard。',
     doctor:'运行 doctor',effectiveConfig:'查看实际配置',serviceLog:'服务日志',loadLog:'加载日志',statePaths:'状态路径',
@@ -132,6 +140,7 @@
   let pendingManagement = null;
   let selectedConversationId = '';
   let conversationLog = '';
+  let conversationLatestTool = '';
   let formSettingsOverride = null;
   let requestFilter = '';
   const h = (value) => String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -149,12 +158,13 @@
   const note = (message,kind='') => '<div class="section-note '+h(kind)+'">'+h(message)+'</div>';
   const list = (arr) => Array.isArray(arr) && arr.length ? arr.map((x)=>'<div class="line-item mono">'+h(typeof x==='string'?x:JSON.stringify(x))+'</div>').join('') : empty();
   const dataTable = (headers,records,emptyMsg) => !records.length ? empty(emptyMsg) : '<div class="table-wrap"><table><thead><tr>'+headers.map((x)=>'<th scope="col">'+h(x)+'</th>').join('')+'</tr></thead><tbody>'+records.join('')+'</tbody></table></div>';
-  const settingsFromConfig = (config,current={}) => ({
+  const settingsFromConfig = (config,current={},control={}) => ({
     ...current,
     allowed_roots:config?.workspaces?.allowedRoots||[],
     local_port:config?.server?.port??current.local_port,
-    public_base_url:config?.server?.publicBaseUrl??'',
-    tunnel_mode:'Remote',
+    public_base_url:control?.remote_public_base_url??config?.server?.publicBaseUrl??current.public_base_url??'',
+    tunnel_mode:control?.tunnel_mode||current.tunnel_mode||'Remote',
+    public_base_path:control?.public_base_path||current.public_base_path||'',
     tunnel_token_present:current.tunnel_token_present,
     auto_start:current.auto_start,
     tool_mode:config?.tools?.mode||current.tool_mode||'codex',
@@ -215,15 +225,20 @@
     const s=formSettingsOverride||d.management?.settings||{};
     const roots=(s.allowed_roots||[]).join('\n');
     const tokenState=s.tunnel_token_present?t('tokenStored'):t('tokenMissing');
+    const quick=s.tunnel_mode==='Quick';
+    const modeOptions=['Remote','Quick'].map(x=>'<option value="'+x+'" '+(s.tunnel_mode===x?'selected':'')+'>'+x+'</option>').join('');
+    const effective=s.effective_public_base_url||d.management?.settings?.effective_public_base_url||'';
     return panel(t('connectionConfig'),t('connectionDesc'),'<div class="panel-body"><div class="form-grid">'+
       '<div class="field full"><label for="cfg-roots">'+h(t('allowedRoots'))+'</label><textarea id="cfg-roots" class="text-area">'+h(roots)+'</textarea></div>'+
       '<div class="field"><label for="cfg-port">'+h(t('localPort'))+'</label><input id="cfg-port" class="text-input" type="number" min="1" max="65535" value="'+h(v(s.local_port,''))+'"></div>'+
-      '<div class="field"><label>'+h(t('tunnelMode'))+'</label><input class="text-input" value="'+h(v(s.tunnel_mode,'Remote'))+'" readonly></div>'+
-      '<div class="field full"><label for="cfg-public">'+h(t('fixedEndpoint'))+'</label><input id="cfg-public" class="text-input mono" type="text" value="'+h(v(s.public_base_url,''))+'"></div>'+
+      '<div class="field"><label for="cfg-tunnel-mode">'+h(t('tunnelMode'))+'</label><select id="cfg-tunnel-mode" class="select-input">'+modeOptions+'</select></div>'+
+      '<div class="field full"><label for="cfg-public">'+h(t('fixedEndpoint'))+'</label><input id="cfg-public" class="text-input mono" type="text" value="'+h(v(s.public_base_url,''))+'" '+(quick?'disabled':'')+'></div>'+
+      '<div class="field full"><label>'+h(t('effectivePublic'))+'</label><input class="text-input mono" type="text" readonly value="'+h(v(effective,''))+'"></div>'+
       '<div class="field"><label>'+h(t('autoStart'))+'</label><label class="check-row"><input id="cfg-autostart" type="checkbox" '+(s.auto_start?'checked':'')+'> '+h(t('autoStart'))+'</label></div>'+
       '<div class="field"><label>'+h(t('tunnelToken'))+'</label><div class="muted">'+h(tokenState)+'</div></div>'+
-      '<div class="field full"><label for="cfg-token">'+h(t('tunnelToken'))+'</label><input id="cfg-token" class="text-input" type="password" autocomplete="off" placeholder="••••••••"><div><button class="secondary-button" data-save-tunnel-token>'+h(t('saveToken'))+'</button></div></div>'+
-      '</div><div class="button-row"><button class="primary-button" data-save-connection>'+h(t('saveConfig'))+'</button></div>'+note(t('saveConfigNote'))+'</div>');
+      '<div class="field full"><label for="cfg-token">'+h(t('tunnelToken'))+'</label><input id="cfg-token" class="text-input" type="password" autocomplete="off" placeholder="••••••••" '+(quick?'disabled':'')+'><div><button class="secondary-button" data-save-tunnel-token '+(quick?'disabled':'')+'>'+h(t('saveToken'))+'</button></div></div>'+
+      '<div class="field full"><label for="legacy-config-file">'+h(t('legacyImport'))+'</label><input id="legacy-config-file" class="text-input" type="file" accept=".json,application/json"><div><button class="secondary-button" data-import-legacy>'+h(t('legacyImportButton'))+'</button></div></div>'+
+      '</div><div class="button-row"><button class="primary-button" data-save-connection>'+h(t('saveConfig'))+'</button></div>'+note(quick?t('quickModeDesc'):t('remoteModeDesc'))+note(t('saveConfigNote'))+'</div>');
   }
   function renderDevspace(d){
     const s=formSettingsOverride||d.management?.settings||{},log=s.logging||{};
@@ -254,9 +269,9 @@
     if(!projectData||projectData.project?.id!==selectedProjectId)return panel(t('projectsGit'),t('projectsDesc'),'<div class="panel-body">'+toolbar+note(t('refreshProject'))+'</div>');
     const p=projectData.project||{},commits=projectData.commits||[],review=projectData.review||{};
     const commitRows=commits.map(x=>'<tr><td class="mono">'+h(x.short_commit)+'</td><td>'+h(stamp(x.created_at))+'</td><td>'+h(x.summary)+'</td></tr>');
-    const reviewRows=(review.versions||[]).slice().reverse().map(x=>'<tr class="'+(x.is_current?'strong':'')+'"><td><input type="radio" name="review-version" value="'+h(x.review_ref)+'" '+(x.is_current||!x.is_active?'disabled ':'')+(selectedReviewRef===x.review_ref?'checked':'')+'></td><td>'+h(x.version)+'</td><td>'+h(x.status==='current'?t('reviewCurrent'):x.status==='rollback'?t('reviewRollback'):t('reviewArchived'))+'</td><td>'+h(stamp(x.created_at))+'</td><td>'+h(x.summary)+'</td><td>'+h(x.rollback_steps)+'</td></tr>');
+    const reviewRows=(review.versions||[]).slice().reverse().map(x=>'<tr class="'+(x.is_current?'strong':'')+'"><td><input type="radio" name="review-version" value="'+h(x.review_ref)+'" '+(x.is_current||!x.is_active?'disabled ':'')+(selectedReviewRef===x.review_ref?'checked':'')+'></td><td>'+h(x.version)+'</td><td>'+h(x.status==='current'?t('reviewCurrent'):x.status==='rollback'?t('reviewRollback'):t('reviewArchived'))+'</td><td>'+h(stamp(x.created_at))+'</td><td class="mono">'+h(v(x.workspace_id,''))+'</td><td>'+h(x.summary)+'</td><td>'+h(x.rollback_steps)+'</td></tr>');
     const meta='<div class="project-meta">'+badge(p.branch||'detached')+badge(p.head||'—')+(p.dirty?badge('dirty','warn'):badge('clean','ok'))+badge(fmt(p.commit_count)+' commits')+'</div>';
-    const versions=review.initialized?dataTable(['',t('reviewVersion'),t('status'),t('createdAt'),t('summary'),t('rollbackSteps')],reviewRows,t('noRows')):note(t('notInitialized')+' '+t('recordFirst'),'warning');
+    const versions=review.initialized?dataTable(['',t('reviewVersion'),t('status'),t('createdAt'),t('sourceConversation'),t('summary'),t('rollbackSteps')],reviewRows,t('noRows')):note(t('notInitialized')+' '+t('recordFirst'),'warning');
     const rollbackButton='<div class="button-row"><button class="danger-button" data-project-rollback '+(!selectedReviewRef?'disabled':'')+'>'+h(t('codeRollback'))+'</button></div>'+note(t('codeRollbackWarning'),'warning');
     return panel(t('projectsGit'),t('projectsDesc'),'<div class="panel-body">'+toolbar+meta+'</div>')+
       panel(t('gitCommits'),p.root,dataTable([t('gitCommit'),t('createdAt'),t('summary')],commitRows,t('noRows')))+
@@ -267,9 +282,9 @@
     const pathRows=[row(t('configFile'),paths.config,true),row(t('stateDirectory'),paths.state,true),row(t('worktreeDirectory'),paths.worktrees,true),row(t('agentDirectory'),paths.agent_dir,true)].join('');
     const controls='<div class="button-row"><button class="primary-button" data-validate-config>'+h(t('validateConfig'))+'</button><button class="primary-button" data-run-doctor>'+h(t('doctor'))+'</button><button class="secondary-button" data-show-config>'+h(t('effectiveConfig'))+'</button><button class="secondary-button" data-load-log="devspace">DevSpace '+h(t('serviceLog'))+'</button><button class="secondary-button" data-load-log="tunnel">Tunnel '+h(t('serviceLog'))+'</button></div>';
     const conversations=d.inventory?.workspaces||[];
-    if(selectedConversationId&&!conversations.some(x=>x.id===selectedConversationId)){selectedConversationId='';conversationLog='';}
+    if(selectedConversationId&&!conversations.some(x=>x.id===selectedConversationId)){selectedConversationId='';conversationLog='';conversationLatestTool='';}
     const conversationOptions='<option value="">'+h(t('chooseConversation'))+'</option>'+conversations.map(x=>'<option value="'+h(x.id)+'" '+(selectedConversationId===x.id?'selected':'')+'>'+h(x.id+' · '+v(x.root,x.workspace_root))+'</option>').join('');
-    const conversation='<div class="panel-body"><div class="project-toolbar"><div class="field"><label for="conversation-selector">'+h(t('conversationLogs'))+'</label><select id="conversation-selector" class="select-input">'+conversationOptions+'</select></div><button class="secondary-button" data-load-conversation '+(!selectedConversationId?'disabled':'')+'>'+h(t('loadConversation'))+'</button><span></span></div><div class="log-box">'+h(conversationLog||t('noRows'))+'</div></div>';
+    const conversation='<div class="panel-body"><div class="project-toolbar"><div class="field"><label for="conversation-selector">'+h(t('conversationLogs'))+'</label><select id="conversation-selector" class="select-input">'+conversationOptions+'</select></div><button class="secondary-button" data-load-conversation '+(!selectedConversationId?'disabled':'')+'>'+h(t('loadConversation'))+'</button><span class="muted">'+h(t('latestTool'))+': '+h(v(conversationLatestTool,t('notKnown')))+'</span></div><div class="log-box">'+h(conversationLog||t('noRows'))+'</div></div>';
     return panel(t('logsDiagnostics'),t('diagnosticsDesc'),'<div class="panel-body">'+controls+'</div>')+
       panel(t('statePaths'),'','<div class="panel-body">'+pathRows+'</div>')+
       panel(t('conversationLogs'),'',conversation)+
@@ -279,7 +294,7 @@
     const items=d.management?.config_history||[];
     if(selectedHistoryId&&!items.some(x=>x.id===selectedHistoryId)){selectedHistoryId='';historyData=null;}
     const listHtml=items.length?'<div class="history-list">'+items.map(x=>'<button class="history-item '+(selectedHistoryId===x.id?'active':'')+'" data-history-id="'+h(x.id)+'"><strong>'+h(x.id)+'</strong><div class="muted">'+h(stamp(x.created_at))+' · '+h(fmt(x.bytes))+' B</div></button>').join('')+'</div>':empty(t('historyEmpty'));
-    const preview=historyData?'<div class="code-box">'+h(JSON.stringify(historyData.config,null,2))+'</div><div class="button-row"><button class="primary-button" data-load-history-form>'+h(t('loadIntoForm'))+'</button><button class="danger-button" data-restore-history>'+h(t('directRestore'))+'</button></div>'+note(t('directRestoreNote'),'warning'):note(t('chooseHistory'));
+    const preview=historyData?'<div class="code-box">'+h(JSON.stringify({managed_config:historyData.config,control_settings:historyData.control||{}},null,2))+'</div><div class="button-row"><button class="primary-button" data-load-history-form>'+h(t('loadIntoForm'))+'</button><button class="danger-button" data-restore-history>'+h(t('directRestore'))+'</button></div>'+note(t('directRestoreNote'),'warning'):note(t('chooseHistory'));
     return panel(t('configHistory'),t('historyDesc'),'<div class="panel-body"><div class="history-layout"><div>'+listHtml+'</div><div>'+preview+'</div></div></div>');
   }
   function renderRuntime(d) {
@@ -495,7 +510,8 @@
       try{
         const body={
           allowed_roots:($('cfg-roots')?.value||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),
-          local_port:Number($('cfg-port')?.value),public_base_url:$('cfg-public')?.value||''
+          local_port:Number($('cfg-port')?.value),public_base_url:$('cfg-public')?.value||'',
+          tunnel_mode:$('cfg-tunnel-mode')?.value||'Remote'
         };
         await managementPost('/api/management/config/save',body);
         await managementPost('/api/management/autostart',{enabled:!!$('cfg-autostart')?.checked});
@@ -518,6 +534,18 @@
       catch(error){notice(t('actionFailed')+': '+error.message,'error');}
       return;
     }
+    if(event.target.closest('[data-import-legacy]')){
+      const file=$('legacy-config-file')?.files?.[0];
+      if(!file){notice(t('legacyImportFile'),'warn');return;}
+      try{
+        if(file.size>1024*1024)throw new Error('Legacy settings.json is too large.');
+        const legacy=JSON.parse(await file.text());
+        const result=await managementPost('/api/management/legacy-import',{legacy});
+        formSettingsOverride=result.settings;
+        notice((result.notes||[]).join(' '));render();
+      }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
+      return;
+    }
     if(event.target.closest('[data-refresh-project]')){await loadProjectDetails();return;}
     if(event.target.closest('[data-record-project]')){
       try{await managementPost('/api/management/project/observe',{project_id:selectedProjectId,summary:'Web console code snapshot'});notice(t('operationComplete'));await refresh();await loadProjectDetails();}
@@ -532,7 +560,7 @@
     if(historyButton){await loadHistoryItem(historyButton.dataset.historyId);return;}
     if(event.target.closest('[data-load-history-form]')){
       if(!historyData?.config)return;
-      formSettingsOverride=settingsFromConfig(historyData.config,snapshot.management?.settings||{});
+      formSettingsOverride=settingsFromConfig(historyData.config,snapshot.management?.settings||{},historyData.control||{});
       notice(t('loadedIntoForm'));changeView('connection');return;
     }
     if(event.target.closest('[data-restore-history]')){if(selectedHistoryId)managementConfirm('config-restore',{history_id:selectedHistoryId});return;}
@@ -564,7 +592,7 @@
       try{
         const response=await fetch('/api/management/conversation?workspace_id='+encodeURIComponent(selectedConversationId),{cache:'no-store'});
         const result=await response.json();if(!response.ok)throw new Error(result.error);
-        conversationLog=result.log||'';render();
+        conversationLog=result.log||'';conversationLatestTool=result.latest_tool||'';render();
       }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
       return;
     }
@@ -574,7 +602,14 @@
     if(event.target.id==='rollback-target'){selectedRollbackId=event.target.value;render();return;}
     if(event.target.id==='project-selector'){selectedProjectId=event.target.value;projectData=null;selectedReviewRef='';render();loadProjectDetails();return;}
     if(event.target.name==='review-version'){selectedReviewRef=event.target.value;render();return;}
-    if(event.target.id==='conversation-selector'){selectedConversationId=event.target.value;conversationLog='';render();return;}
+    if(event.target.id==='conversation-selector'){selectedConversationId=event.target.value;conversationLog='';conversationLatestTool='';render();return;}
+    if(event.target.id==='cfg-tunnel-mode'){
+      const quick=event.target.value==='Quick';
+      if($('cfg-public'))$('cfg-public').disabled=quick;
+      if($('cfg-token'))$('cfg-token').disabled=quick;
+      const saveToken=document.querySelector('[data-save-tunnel-token]');if(saveToken)saveToken.disabled=quick;
+      return;
+    }
   });
   document.addEventListener('input',(event)=>{if(event.target.id==='request-filter'){requestFilter=event.target.value;document.querySelectorAll('#requests-content tbody tr').forEach((row)=>row.hidden=!row.textContent.toLowerCase().includes(requestFilter.toLowerCase()));}});
   setTheme(theme);setLanguage(lang);changeView('services');refresh();setInterval(()=>{

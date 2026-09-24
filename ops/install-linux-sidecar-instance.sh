@@ -94,10 +94,14 @@ console.log(`${base || ''}/mcp`);
 NODE
 )"
 
+BASE_PATH="${MCP_PATH%/mcp}"
 INSTALL_ROOT="$HOME/.local/share/devspace-control-$INSTANCE"
 CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/devspace-control-$INSTANCE"
 CONFIG_DIR="$CONFIG_ROOT/devspace"
 STATE_DIR="$INSTALL_ROOT/state"
+CONTROL_SETTINGS="$CONFIG_ROOT/control-settings.json"
+QUICK_URL_FILE="$STATE_DIR/quick-tunnel-url.txt"
+QUICK_CONFIG_DIR="$STATE_DIR/quick-effective-config"
 WORKTREE_ROOT="$STATE_DIR/worktrees"
 AGENT_DIR="$STATE_DIR/agent-home"
 SERVICE="devspace-control-$INSTANCE.service"
@@ -112,6 +116,8 @@ install -m 0755 "$SCRIPT_DIR/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-cons
 install -m 0755 "$SCRIPT_DIR/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
 install -m 0644 "$SCRIPT_DIR/control-management.mjs" "$INSTALL_ROOT/bin/control-management.mjs"
+install -m 0644 "$SCRIPT_DIR/managed-cloudflared.mjs" "$INSTALL_ROOT/bin/managed-cloudflared.mjs"
+install -m 0644 "$SCRIPT_DIR/prepare-effective-config.mjs" "$INSTALL_ROOT/bin/prepare-effective-config.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"
@@ -157,6 +163,15 @@ if [[ ! -f "$CONFIG_DIR/auth.json" ]]; then
   chmod 0600 "$CONFIG_DIR/auth.json"
 fi
 
+if [[ ! -f "$CONTROL_SETTINGS" ]]; then
+  "$NODE" - "$CONTROL_SETTINGS" "$PUBLIC_URL" "$BASE_PATH" <<'NODE'
+const fs=require('node:fs');
+const file=process.argv[2],remote=process.argv[3],basePath=process.argv[4]||'';
+const value={schema_version:1,tunnel_mode:'Remote',remote_public_base_url:remote,public_base_path:basePath};
+fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n',{mode:0o600});
+NODE
+fi
+
 if [[ -f "$HOME/.local/share/devspace-control/state/agent-home/AGENTS.md" && ! -f "$AGENT_DIR/AGENTS.md" ]]; then
   cp "$HOME/.local/share/devspace-control/state/agent-home/AGENTS.md" "$AGENT_DIR/AGENTS.md"
 fi
@@ -164,7 +179,7 @@ fi
 cat > "$INSTALL_ROOT/bin/run-devspace" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export DEVSPACE_CONFIG_DIR="$CONFIG_DIR"
+export DEVSPACE_CONFIG_DIR="\$("$NODE" "$INSTALL_ROOT/bin/prepare-effective-config.mjs" --config "$CONFIG_DIR/config.jsonc" --auth "$CONFIG_DIR/auth.json" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --output-dir "$QUICK_CONFIG_DIR")"
 exec "$NODE" "$DEVSPACE_PACKAGE/dist/cli.js" serve
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
@@ -180,7 +195,7 @@ mkdir -p "$SYSTEMD_DIR"
 cat > "$SYSTEMD_DIR/$SERVICE" <<EOF
 [Unit]
 Description=DevSpace Control sidecar instance ($INSTANCE)
-After=network-online.target
+After=network-online.target${TUNNEL_TOKEN_FILE:+ $TUNNEL_SERVICE}
 Wants=network-online.target
 
 [Service]
@@ -222,17 +237,15 @@ if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
   [[ -x "$INSTANCE_CLOUDFLARED" ]] || { echo "cloudflared not found in isolated runtime: $INSTANCE_CLOUDFLARED" >&2; exit 1; }
   INSTANCE_TOKEN_FILE="$CONFIG_ROOT/cloudflare-tunnel-token.txt"
   install -m 0600 "$TUNNEL_TOKEN_FILE" "$INSTANCE_TOKEN_FILE"
-  TUNNEL_PROTOCOL_ARG=""
-  [[ "$TUNNEL_PROTOCOL" == "auto" ]] || TUNNEL_PROTOCOL_ARG="--protocol $TUNNEL_PROTOCOL"
   cat > "$SYSTEMD_DIR/$TUNNEL_SERVICE" <<EOF
 [Unit]
 Description=DevSpace $INSTANCE dedicated Cloudflare Tunnel
-After=network-online.target $SERVICE
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTANCE_CLOUDFLARED tunnel $TUNNEL_PROTOCOL_ARG --no-autoupdate --loglevel info run --token-file $INSTANCE_TOKEN_FILE
+ExecStart=$NODE $INSTALL_ROOT/bin/managed-cloudflared.mjs --cloudflared $INSTANCE_CLOUDFLARED --control-settings $CONTROL_SETTINGS --quick-url-file $QUICK_URL_FILE --local-port $PORT --protocol $TUNNEL_PROTOCOL --token-file $INSTANCE_TOKEN_FILE
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -244,7 +257,6 @@ UMask=0077
 WantedBy=default.target
 EOF
 
-  BASE_PATH="${MCP_PATH%/mcp}"
   HEALTH_PATH="${BASE_PATH}/healthz"
   WATCHDOG_STATE="$STATE_DIR/cloudflared-watchdog-failures"
   cat > "$INSTALL_ROOT/bin/check-cloudflared" <<EOF
@@ -254,6 +266,8 @@ LOCAL_URL="http://127.0.0.1:${PORT}${HEALTH_PATH}"
 ORIGIN_URL="https://${ORIGIN_HOST}${HEALTH_PATH}"
 STATE_FILE="$WATCHDOG_STATE"
 TUNNEL_SERVICE="$TUNNEL_SERVICE"
+CONTROL_SETTINGS="$CONTROL_SETTINGS"
+QUICK_URL_FILE="$QUICK_URL_FILE"
 
 probe_200() {
   local url="\$1"
@@ -266,6 +280,15 @@ if ! probe_200 "\$LOCAL_URL"; then
   printf '0\n' > "\$STATE_FILE"
   echo "watchdog: local DevSpace is not healthy; tunnel restart suppressed"
   exit 0
+fi
+
+if grep -Eq '"tunnel_mode"[[:space:]]*:[[:space:]]*"Quick"' "\$CONTROL_SETTINGS" 2>/dev/null; then
+  if [[ ! -s "\$QUICK_URL_FILE" ]]; then
+    printf '0\n' > "\$STATE_FILE"
+    echo "watchdog: Quick Tunnel URL not available yet"
+    exit 0
+  fi
+  ORIGIN_URL="\$(tr -d '\r\n' < "\$QUICK_URL_FILE")${HEALTH_PATH}"
 fi
 
 if probe_200 "\$ORIGIN_URL"; then

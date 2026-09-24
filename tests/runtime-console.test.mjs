@@ -5,9 +5,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
 import { switchRuntime } from '../ops/runtime-rollback.mjs';
-import { projectChoices, projectDetails, observeProject, rollbackReview, updateManagedConfig } from '../ops/control-management.mjs';
+import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
+import {
+  configHistoryItem, importLegacyQuickConfigCandidate, managementPublicBaseUrl,
+  projectChoices, projectDetails, observeProject, restoreConfigHistory, rollbackReview, updateManagedConfig
+} from '../ops/control-management.mjs';
 
 const fixture=()=>{
   const root=mkdtempSync(path.join(tmpdir(),'devspace-console-'));
@@ -239,7 +244,114 @@ test('managed config save preserves unrelated config and creates a restorable hi
     assert.equal(next.logging.shellCommands,true);
     const history=path.join(root,'state','config-history-web',result.history);
     assert.equal(JSON.parse(readFileSync(history,'utf8')).tools.mode,'codex');
+    const historyItem=configHistoryItem({platformRoot:root,configPath:config},result.history);
+    assert.equal(historyItem.control.tunnel_mode,'Remote');
+    assert.equal(historyItem.control.remote_public_base_url,'https://example.invalid/server');
+
+    const quick=updateManagedConfig(
+      {platformRoot:root,configPath:config,serve:17678},
+      {tunnel_mode:'Quick',public_base_url:'https://example.invalid/server'}
+    );
+    assert.equal(quick.control.tunnel_mode,'Quick');
+    assert.equal(JSON.parse(readFileSync(config,'utf8')).server.publicBaseUrl,null);
+    const controlFile=path.join(root,'control-settings.json');
+    assert.equal(JSON.parse(readFileSync(controlFile,'utf8')).tunnel_mode,'Quick');
+    mkdirSync(path.join(root,'state'),{recursive:true});
+    writeFileSync(path.join(root,'state','quick-tunnel-url.txt'),'https://fixture-quick.trycloudflare.com\n');
+    assert.equal(managementPublicBaseUrl({platformRoot:root,configPath:config}),'https://fixture-quick.trycloudflare.com/server');
+
+    const beforeQuick=configHistoryItem({platformRoot:root,configPath:config},quick.history);
+    assert.equal(beforeQuick.control.tunnel_mode,'Remote');
+    const restored=restoreConfigHistory({platformRoot:root,configPath:config},quick.history);
+    assert.equal(restored.ok,true);
+    assert.equal(JSON.parse(readFileSync(config,'utf8')).server.publicBaseUrl,'https://example.invalid/server');
+    assert.equal(JSON.parse(readFileSync(controlFile,'utf8')).tunnel_mode,'Remote');
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('Quick effective config uses generated origin, preserves route prefix and never mutates canonical config',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'devspace-quick-config-'));
+  try{
+    const configRoot=path.join(root,'config');
+    const configDir=path.join(configRoot,'devspace');
+    const state=path.join(root,'state');
+    const effective=path.join(state,'quick-effective-config');
+    mkdirSync(configDir,{recursive:true});mkdirSync(state,{recursive:true});
+    const canonical={
+      configVersion:1,
+      server:{host:'127.0.0.1',port:17677,publicBaseUrl:null,allowedHosts:['localhost','127.0.0.1','dev.sanqi.org'],trustProxy:false},
+      workspaces:{allowedRoots:[root]},storage:{stateDir:path.join(state,'devspace-state')},
+      tools:{mode:'codex'},ui:{enabled:true},skills:{enabled:true,paths:[]},logging:{level:'info',format:'json',requests:true,toolCalls:true,shellCommands:false}
+    };
+    const config=path.join(configDir,'config.jsonc'),auth=path.join(configDir,'auth.json');
+    const control=path.join(configRoot,'control-settings.json'),quick=path.join(state,'quick-tunnel-url.txt');
+    writeFileSync(config,JSON.stringify(canonical));writeFileSync(auth,JSON.stringify({ownerToken:'fixture-owner'}));
+    writeFileSync(control,JSON.stringify({schema_version:1,tunnel_mode:'Quick',remote_public_base_url:'https://dev.sanqi.org/server',public_base_path:'/server'}));
+    writeFileSync(quick,'https://fixture-quick.trycloudflare.com\n');
+    const script=fileURLToPath(new URL('../ops/prepare-effective-config.mjs',import.meta.url));
+    const run=spawnSync(process.execPath,[script,'--config',config,'--auth',auth,'--control-settings',control,'--quick-url-file',quick,'--output-dir',effective],{encoding:'utf8'});
+    assert.equal(run.status,0,run.stderr);
+    assert.equal(path.resolve(run.stdout.trim()),path.resolve(effective));
+    const generated=JSON.parse(readFileSync(path.join(effective,'config.jsonc'),'utf8'));
+    assert.equal(generated.server.publicBaseUrl,'https://fixture-quick.trycloudflare.com/server');
+    assert.ok(generated.server.allowedHosts.includes('fixture-quick.trycloudflare.com'));
+    assert.equal(JSON.parse(readFileSync(config,'utf8')).server.publicBaseUrl,null,'canonical config stays mode-neutral in Quick mode');
+    assert.equal(JSON.parse(readFileSync(path.join(effective,'auth.json'),'utf8')).ownerToken,'fixture-owner');
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('legacy QuickConfig migration maps current Windows manager semantics without importing credentials',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'devspace-legacy-import-'));
+  try{
+    const project=path.join(root,'project');mkdirSync(project);
+    const configDir=path.join(root,'config','devspace');mkdirSync(configDir,{recursive:true});
+    const config=path.join(configDir,'config.jsonc');
+    writeFileSync(config,JSON.stringify({configVersion:1,server:{host:'127.0.0.1',port:17677,publicBaseUrl:'https://dev.example/server'},workspaces:{allowedRoots:[root]},tools:{mode:'codex'},ui:{enabled:true},skills:{enabled:true,paths:[]},logging:{level:'info',format:'json',requests:true,toolCalls:true,shellCommands:false}}));
+    const result=importLegacyQuickConfigCandidate({platformRoot:root,configPath:config,serviceUnit:'',tunnelUnit:''},{
+      SchemaVersion:1,WorkspaceRoot:project,LocalPort:7777,TunnelMode:'Quick',FixedHostname:'old.example.com',ToolMode:'minimal',AutoStart:true,
+      CredentialsFilePath:'C:\\never\\import\\secret.json'
+    },'1.1.0-beta.4.local.13');
+    assert.equal(result.ok,true);
+    assert.deepEqual(result.settings.allowed_roots,[project]);
+    assert.equal(result.settings.local_port,7777);
+    assert.equal(result.settings.tunnel_mode,'Quick');
+    assert.equal(result.settings.public_base_url,'https://old.example.com');
+    assert.equal(result.settings.tool_mode,'claude');
+    assert.equal(result.settings.auto_start,true);
+    assert.equal(JSON.stringify(result).includes('never\\\\import\\\\secret'),false);
+    assert.ok(result.notes.some(x=>x.includes('auth.json')));
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('managed cloudflared builds Remote/Quick commands and extracts only trycloudflare origins',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'devspace-cloudflared-args-'));
+  try{
+    const token=path.join(root,'token.txt');writeFileSync(token,'fixture-token');
+    assert.deepEqual(
+      buildCloudflaredArgs({mode:'Quick',port:17677,protocol:'quic'}),
+      ['tunnel','--protocol','quic','--no-autoupdate','--loglevel','info','--url','http://127.0.0.1:17677']
+    );
+    assert.deepEqual(
+      buildCloudflaredArgs({mode:'Remote',port:17677,protocol:'auto',tokenFile:token}),
+      ['tunnel','--no-autoupdate','--loglevel','info','run','--token-file',token]
+    );
+    assert.equal(quickTunnelOriginFromText('INF +https://fixture-name.trycloudflare.com/path ready'),'https://fixture-name.trycloudflare.com');
+    assert.equal(quickTunnelOriginFromText('https://attacker.example.com/'), '');
+    assert.throws(()=>buildCloudflaredArgs({mode:'Remote',port:17677,tokenFile:path.join(root,'missing')}),/token file is missing/);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('Linux installers wire Quick/Remote helpers without exposing the Tunnel token in process arguments',()=>{
+  const setup=readFileSync(new URL('../setup-linux.sh',import.meta.url),'utf8');
+  const sidecar=readFileSync(new URL('../ops/install-linux-sidecar-instance.sh',import.meta.url),'utf8');
+  const release=readFileSync(new URL('../package-release-linux.sh',import.meta.url),'utf8');
+  for(const source of [setup,sidecar]){
+    assert.match(source,/prepare-effective-config\.mjs/);
+    assert.match(source,/managed-cloudflared\.mjs/);
+    assert.match(source,/control-settings\.json/);
+    assert.match(source,/quick-tunnel-url\.txt/);
+  }
+  assert.match(setup,/cloudflare-tunnel-token\.txt/);
+  assert.doesNotMatch(setup,/run-cloudflared[\s\S]*--token\s+"\\\$CLOUDFLARED_TOKEN"/);
+  assert.match(sidecar,/--token-file \$INSTANCE_TOKEN_FILE/);
+  assert.match(release,/managed-cloudflared\.mjs/);
+  assert.match(release,/prepare-effective-config\.mjs/);
 });
 test('project/Git parity records Review versions and rolls back selected code safely',()=>{
   const root=mkdtempSync(path.join(tmpdir(),'devspace-project-versions-'));
@@ -260,6 +372,8 @@ test('project/Git parity records Review versions and rolls back selected code sa
     writeFileSync(path.join(repo,'code.txt'),'three\n');
     assert.equal(observeProject(workspaces,project.id,'third').version,'V2');
     const before=projectDetails(workspaces,project.id);
+    assert.equal(before.review.versions.find(x=>x.version==='V1').workspace_id,'ws1');
+    assert.equal(before.review.versions.find(x=>x.version==='V2').workspace_id,'ws1');
     const target=before.review.versions.find(x=>x.version==='V1');
     assert.equal(before.review.versions.find(x=>x.version==='V2').is_current,true);
     assert.equal(target.is_active,true);
@@ -288,4 +402,8 @@ test('UI includes semantic navigation, theme/language controls, responsive and a
   assert.match(js,/rollback-confirm-input/);
   assert.match(js,/data-project-rollback/);
   assert.match(js,/data-save-devspace/);
+  assert.match(js,/cfg-tunnel-mode/);
+  assert.match(js,/data-import-legacy/);
+  assert.match(js,/sourceConversation/);
+  assert.match(js,/latestTool/);
 });

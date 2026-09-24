@@ -23,7 +23,7 @@ const data={
   inventory:{workspace_count:117,workflow_session_count:2,job_count:3,available:true,workspaces:[{id:'ws_5b9de9ee0e',root:'/home/z/codex-workspace/DevSpace-Forge',last_used_at:Date.now()}],workflow_sessions:[{id:'workflow-001',workspace_root:'/home/z/codex-workspace/DevSpace-Forge',status:'completed'}],jobs:[{id:'job-001',command:'pnpm test',status:'completed'}]},
   connection:{public_base_url:'https://dev.sanqi.org/server',public_mcp_url:'https://dev.sanqi.org/server/mcp',local_mcp_url:'http://127.0.0.1:17677/server/mcp',owner_copy_available:true},
   management:{
-    settings:{allowed_roots:['/home/z/codex-workspace'],local_port:17677,public_base_url:'https://dev.sanqi.org/server',tunnel_mode:'Remote',tunnel_token_present:true,auto_start:true,tool_mode:'codex',review_ui_enabled:true,skills_enabled:true,skill_paths:[],subagents_enabled:false,logging:{level:'info',format:'json',requests:true,tool_calls:true,shell_commands:false}},
+    settings:{allowed_roots:['/home/z/codex-workspace'],local_port:17677,public_base_url:'https://dev.sanqi.org/server',effective_public_base_url:'https://dev.sanqi.org/server',quick_public_origin:null,public_base_path:'/server',tunnel_mode:'Remote',tunnel_token_present:true,auto_start:true,tool_mode:'codex',review_ui_enabled:true,skills_enabled:true,skill_paths:[],subagents_enabled:false,logging:{level:'info',format:'json',requests:true,tool_calls:true,shell_commands:false}},
     services:{devspace:{status:'active',enabled:'enabled',pid:1745},tunnel:{status:'active',enabled:'enabled',pid:1056510}},
     paths:{config:'/home/z/.config/devspace-control-server/devspace/config.jsonc',state:'/home/z/.local/share/devspace-control-server/state/devspace-state',worktrees:'/home/z/.local/share/devspace-control-server/state/worktrees',agent_dir:'/home/z/.local/share/devspace-control-server/state/agent-home'},
     config_history:[{id:'2026-09-24T13-00-00-000Z-save.json',created_at:new Date().toISOString(),bytes:1365}],
@@ -38,9 +38,14 @@ const projectFixture={project:{id:'project-1',name:'DevSpace-Forge',root:'/home/
   {commit:'8639db1b8cb0968b6dc7ed910cf3a66fb0a9647b',short_commit:'8639db1b8c',created_at:new Date(Date.now()-3600000).toISOString(),summary:'Runtime local13 baseline'}
 ],review:{initialized:true,current_ref:'c'.repeat(40),versions:[
   {version:'V0',review_ref:'a'.repeat(40),created_at:new Date(Date.now()-7200000).toISOString(),summary:'Workspace 初始基线',is_current:false,is_active:true,is_baseline:true,rollback_steps:2,status:'rollback'},
-  {version:'V1',review_ref:'b'.repeat(40),created_at:new Date(Date.now()-3600000).toISOString(),summary:'Connection management',is_current:false,is_active:true,is_baseline:false,rollback_steps:1,status:'rollback'},
-  {version:'V2',review_ref:'c'.repeat(40),created_at:new Date().toISOString(),summary:'Current UI work',is_current:true,is_active:true,is_baseline:false,rollback_steps:0,status:'current'}
+  {version:'V1',review_ref:'b'.repeat(40),workspace_id:'ws_5b9de9ee0e',created_at:new Date(Date.now()-3600000).toISOString(),summary:'Connection management',is_current:false,is_active:true,is_baseline:false,rollback_steps:1,status:'rollback'},
+  {version:'V2',review_ref:'c'.repeat(40),workspace_id:'ws_5b9de9ee0e',created_at:new Date().toISOString(),summary:'Current UI work',is_current:true,is_active:true,is_baseline:false,rollback_steps:0,status:'current'}
 ]}};
-const historyFixture={id:'2026-09-24T13-00-00-000Z-save.json',config:{configVersion:1,server:{host:'127.0.0.1',port:17677,publicBaseUrl:'https://dev.sanqi.org/server'},workspaces:{allowedRoots:['/home/z/codex-workspace'],worktreeRoot:'/home/z/.local/share/devspace-control-server/state/worktrees'},storage:{stateDir:'/home/z/.local/share/devspace-control-server/state/devspace-state'},tools:{mode:'codex'},ui:{enabled:true},skills:{enabled:true,paths:[]},subagents:{enabled:false},logging:{level:'info',format:'json',requests:true,toolCalls:true,shellCommands:false}}};
-const app=createConsoleServer(options,{snapshot:async()=>({...data,generated_at:new Date().toISOString()}),projectDetails:()=>projectFixture,configHistoryItem:()=>historyFixture});
+const historyFixture={id:'2026-09-24T13-00-00-000Z-save.json',config:{configVersion:1,server:{host:'127.0.0.1',port:17677,publicBaseUrl:'https://dev.sanqi.org/server'},workspaces:{allowedRoots:['/home/z/codex-workspace'],worktreeRoot:'/home/z/.local/share/devspace-control-server/state/worktrees'},storage:{stateDir:'/home/z/.local/share/devspace-control-server/state/devspace-state'},tools:{mode:'codex'},ui:{enabled:true},skills:{enabled:true,paths:[]},subagents:{enabled:false},logging:{level:'info',format:'json',requests:true,toolCalls:true,shellCommands:false}},control:{schema_version:1,tunnel_mode:'Remote',remote_public_base_url:'https://dev.sanqi.org/server',public_base_path:'/server'}};
+const app=createConsoleServer(options,{
+  snapshot:async()=>({...data,generated_at:new Date().toISOString()}),
+  projectDetails:()=>projectFixture,
+  configHistoryItem:()=>historyFixture,
+  workspaceActivity:()=>({latest_tool:'exec_command',log:new Date().toISOString()+' | tool_call | exec_command | /home/z/codex-workspace/DevSpace-Forge'})
+});
 app.listen(options.serve,'127.0.0.1',()=>console.log('preview=http://127.0.0.1:'+options.serve+'/'));

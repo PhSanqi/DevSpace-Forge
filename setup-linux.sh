@@ -75,6 +75,10 @@ INSTALL_ROOT="${DEVSPACE_CONTROL_HOME:-$HOME/.local/share/devspace-control${INST
 CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/devspace-control${INSTANCE_SUFFIX}"
 DEVSPACE_CONFIG_DIR="$CONFIG_ROOT/devspace"
 STATE_DIR="$INSTALL_ROOT/state"
+CONTROL_SETTINGS="$CONFIG_ROOT/control-settings.json"
+QUICK_URL_FILE="$STATE_DIR/quick-tunnel-url.txt"
+QUICK_CONFIG_DIR="$STATE_DIR/quick-effective-config"
+CLOUDFLARE_TOKEN_FILE="$CONFIG_ROOT/cloudflare-tunnel-token.txt"
 WORKTREE_ROOT="$STATE_DIR/worktrees"
 SERVICE_BASE="devspace-control${INSTANCE_SUFFIX}"
 DEVSPACE_SERVICE="$SERVICE_BASE.service"
@@ -159,7 +163,7 @@ NODE
   ORIGIN_HOST="${existing_values[3]}"
   UPGRADE_EXISTING=1
   NON_INTERACTIVE=1
-  if [[ ! -f "$CLOUDFLARE_ENV" ]]; then REUSE_EXISTING_TUNNEL=1; fi
+  if [[ ! -f "$CLOUDFLARE_ENV" && ! -f "$CLOUDFLARE_TOKEN_FILE" ]]; then REUSE_EXISTING_TUNNEL=1; fi
   echo "Existing DevSpace configuration detected; updating runtime in place without reconfiguration."
 fi
 
@@ -197,6 +201,8 @@ install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-consol
 install -m 0755 "$ROOT/ops/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
 install -m 0644 "$ROOT/ops/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
 install -m 0644 "$ROOT/ops/control-management.mjs" "$INSTALL_ROOT/bin/control-management.mjs"
+install -m 0644 "$ROOT/ops/managed-cloudflared.mjs" "$INSTALL_ROOT/bin/managed-cloudflared.mjs"
+install -m 0644 "$ROOT/ops/prepare-effective-config.mjs" "$INSTALL_ROOT/bin/prepare-effective-config.mjs"
 install -m 0644 "$ROOT/ops/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
 install -m 0644 "$ROOT/ops/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
 install -m 0644 "$ROOT/ops/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"
@@ -242,6 +248,7 @@ console.log(`${base || ''}/mcp`);
 NODE
 )"
 
+BASE_PATH="${MCP_PATH%/mcp}"
 if [[ -z "$PUBLIC_URL" && "$NON_INTERACTIVE" -eq 0 ]]; then
   echo 'Cloudflare public hostname is required for the finished Remote Tunnel setup.' >&2
   exit 1
@@ -286,22 +293,40 @@ else
   OWNER_TOKEN="$("$NODE" -e "const a=require(process.argv[1]); console.log(a.ownerToken||'')" "$DEVSPACE_CONFIG_DIR/auth.json")"
 fi
 
-if [[ "$UPGRADE_EXISTING" -eq 1 ]]; then
-  :
-elif [[ "$REUSE_EXISTING_TUNNEL" -eq 1 ]]; then
-  :
-elif [[ -n "$TUNNEL_TOKEN" ]]; then
-  printf 'CLOUDFLARED_TOKEN=%q\n' "$TUNNEL_TOKEN" > "$CLOUDFLARE_ENV"
-  chmod 0600 "$CLOUDFLARE_ENV"
-elif [[ ! -f "$CLOUDFLARE_ENV" && "$NON_INTERACTIVE" -eq 0 ]]; then
-  echo 'Cloudflare Tunnel token is required.' >&2
-  exit 1
+if [[ ! -f "$CONTROL_SETTINGS" ]]; then
+  "$NODE" - "$CONTROL_SETTINGS" "$PUBLIC_URL" "$BASE_PATH" <<'NODE'
+const fs=require('node:fs');
+const file=process.argv[2],remote=process.argv[3]||'',basePath=process.argv[4]||'';
+const value={schema_version:1,tunnel_mode:'Remote',remote_public_base_url:remote,public_base_path:basePath};
+fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n',{mode:0o600});
+NODE
+fi
+
+if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
+  if [[ -n "$TUNNEL_TOKEN" ]]; then
+    printf '%s\n' "$TUNNEL_TOKEN" > "$CLOUDFLARE_TOKEN_FILE"
+    chmod 0600 "$CLOUDFLARE_TOKEN_FILE"
+  elif [[ ! -f "$CLOUDFLARE_TOKEN_FILE" && -f "$CLOUDFLARE_ENV" ]]; then
+    set +u
+    source "$CLOUDFLARE_ENV"
+    legacy_token="${CLOUDFLARED_TOKEN:-}"
+    set -u
+    if [[ -n "$legacy_token" ]]; then
+      printf '%s\n' "$legacy_token" > "$CLOUDFLARE_TOKEN_FILE"
+      chmod 0600 "$CLOUDFLARE_TOKEN_FILE"
+    fi
+    unset legacy_token CLOUDFLARED_TOKEN || true
+  fi
+  if [[ ! -f "$CLOUDFLARE_TOKEN_FILE" ]]; then
+    echo 'Cloudflare Tunnel token is required unless --reuse-existing-tunnel is used.' >&2
+    exit 1
+  fi
 fi
 
 cat > "$INSTALL_ROOT/bin/run-devspace" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export DEVSPACE_CONFIG_DIR="$DEVSPACE_CONFIG_DIR"
+export DEVSPACE_CONFIG_DIR="\$("$NODE" "$INSTALL_ROOT/bin/prepare-effective-config.mjs" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --auth "$DEVSPACE_CONFIG_DIR/auth.json" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --output-dir "$QUICK_CONFIG_DIR")"
 exec "$NODE" "$DEVSPACE_PACKAGE/dist/cli.js" serve
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
@@ -315,23 +340,22 @@ chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 CLOUDFLARED_PROTOCOL="${DEVSPACE_CLOUDFLARED_PROTOCOL:-auto}"
 if [[ "$UPGRADE_EXISTING" -eq 1 ]]; then CLOUDFLARED_PROTOCOL="auto"; fi
 case "$CLOUDFLARED_PROTOCOL" in auto|quic|http2) ;; *) echo 'DEVSPACE_CLOUDFLARED_PROTOCOL must be auto, quic, or http2.' >&2; exit 1 ;; esac
-CLOUDFLARED_PROTOCOL_ARG=""
-[[ "$CLOUDFLARED_PROTOCOL" == "auto" ]] || CLOUDFLARED_PROTOCOL_ARG="--protocol $CLOUDFLARED_PROTOCOL"
 
 cat > "$INSTALL_ROOT/bin/run-cloudflared" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-source "$CLOUDFLARE_ENV"
-exec "$CLOUDFLARED" tunnel $CLOUDFLARED_PROTOCOL_ARG --no-autoupdate run --token "\$CLOUDFLARED_TOKEN"
+exec "$NODE" "$INSTALL_ROOT/bin/managed-cloudflared.mjs" --cloudflared "$CLOUDFLARED" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --local-port "$PORT" --protocol "$CLOUDFLARED_PROTOCOL" --token-file "$CLOUDFLARE_TOKEN_FILE"
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-cloudflared"
 
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
+DEVSPACE_AFTER="network-online.target"
+if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then DEVSPACE_AFTER="$DEVSPACE_AFTER $CLOUDFLARED_SERVICE"; fi
 cat > "$SYSTEMD_DIR/$DEVSPACE_SERVICE" <<EOF
 [Unit]
 Description=DevSpace Control - DevSpace MCP server
-After=network-online.target
+After=$DEVSPACE_AFTER
 Wants=network-online.target
 
 [Service]
@@ -369,7 +393,7 @@ if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
 cat > "$SYSTEMD_DIR/$CLOUDFLARED_SERVICE" <<EOF
 [Unit]
 Description=DevSpace Control - Cloudflare Tunnel
-After=network-online.target $DEVSPACE_SERVICE
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -400,6 +424,8 @@ LOCAL_URL="http://127.0.0.1:${PORT}${HEALTH_PATH}"
 ORIGIN_URL="$WATCHDOG_TARGET"
 STATE_FILE="$WATCHDOG_STATE"
 TUNNEL_SERVICE="$CLOUDFLARED_SERVICE"
+CONTROL_SETTINGS="$CONTROL_SETTINGS"
+QUICK_URL_FILE="$QUICK_URL_FILE"
 
 probe_200() {
   local url="\$1"
@@ -412,6 +438,15 @@ if ! probe_200 "\$LOCAL_URL"; then
   printf '0\n' > "\$STATE_FILE"
   echo "watchdog: local DevSpace is not healthy; tunnel restart suppressed"
   exit 0
+fi
+
+if grep -Eq '"tunnel_mode"[[:space:]]*:[[:space:]]*"Quick"' "\$CONTROL_SETTINGS" 2>/dev/null; then
+  if [[ ! -s "\$QUICK_URL_FILE" ]]; then
+    printf '0\n' > "\$STATE_FILE"
+    echo "watchdog: Quick Tunnel URL not available yet"
+    exit 0
+  fi
+  ORIGIN_URL="\$(tr -d '\r\n' < "\$QUICK_URL_FILE")${HEALTH_PATH}"
 fi
 
 if probe_200 "\$ORIGIN_URL"; then
@@ -505,7 +540,7 @@ if command -v systemctl >/dev/null 2>&1; then
   if [[ "$START_SERVICES" -eq 1 ]]; then
     systemctl --user enable --now "$DEVSPACE_SERVICE"
     systemctl --user enable --now "$CONSOLE_SERVICE"
-    if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
+    if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_TOKEN_FILE" ]]; then
       systemctl --user enable --now "$CLOUDFLARED_SERVICE"
       if [[ -f "$SYSTEMD_DIR/$CLOUDFLARED_WATCHDOG_TIMER" ]]; then
         systemctl --user enable --now "$CLOUDFLARED_WATCHDOG_TIMER"
@@ -528,7 +563,7 @@ if command -v systemctl >/dev/null 2>&1; then
       systemctl --user --no-pager status "$CONSOLE_SERVICE" >&2 || true
       exit 1
     fi
-    if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
+    if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_TOKEN_FILE" ]]; then
       if ! systemctl --user is-active --quiet "$CLOUDFLARED_SERVICE"; then
         echo 'Cloudflare Tunnel user service did not stay active.' >&2
         systemctl --user --no-pager status "$CLOUDFLARED_SERVICE" >&2 || true

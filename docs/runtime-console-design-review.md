@@ -36,7 +36,7 @@ user-agent/mobile emulation label. Results are recorded in the ignored
 | Desktop | 1440px Chinese/dark Services and English/light Projects/Git |
 | Mobile | 390px Chinese/dark Connection config and English/light DevSpace config, no page-level horizontal overflow |
 | Functional hierarchy | 12 navigation entries split into Core Management and Runtime Observation |
-| Windows parity | Service control, access copy, connection/config fields, Project/Git versions, diagnostics and config-history surfaces |
+| Windows parity | Service control, access copy, Quick/Remote Tunnel selection, legacy QuickConfig load, connection/DevSpace config, Project/Git versions with source conversation, latest-tool diagnostics, and composite config-history surfaces |
 | Connection/access | Configured MCP URL copy, masked credential and explicit owner-copy confirmation |
 | Code rollback | Select an earlier active DevSpace Review version; current/archived versions are not valid targets |
 | Runtime rollback | Select a specific installed runtime, see its path/hash, require the matching target ID to confirm |
@@ -47,8 +47,9 @@ user-agent/mobile emulation label. Results are recorded in the ignored
 | Safety | Local-only Host and CSP; `/api/status` and HTML never contain credentials; Owner Password is returned only by the explicitly confirmed same-origin credential action; protected service POSTs; no public UI route |
 
 Headless Edge produced all four core-management viewport screenshots plus
-service/access, Project/Git version selection, code-rollback confirmation,
-runtime-rollback selection/layout, dialog/error and accessibility captures,
+service/access, Quick/Remote mode selection, Project/Git version selection,
+source-conversation/latest-tool evidence, code-rollback confirmation,
+composite history load, runtime-rollback selection/layout, dialog/error and accessibility captures,
 with no browser exceptions. This is an **automated browser/design acceptance**,
 not a claim that an independent human or model performed a subjective
 pixel-by-pixel visual review. The final release gate remains real Linux/Windows

@@ -30,14 +30,17 @@ section must preserve the operator capabilities of the Windows Control Platform:
 
 - Services & access: DevSpace/Tunnel start, stop, restart, all-service controls,
   public/local MCP URL copy and explicit Owner Password copy.
-- Connection config: Allowed Roots, local port, public base URL, protected
-  Cloudflare Tunnel token and login autostart.
+- Connection config: Allowed Roots, local port, Windows-compatible Quick/Remote
+  Tunnel selection, Remote public base URL, protected Cloudflare Tunnel token,
+  login autostart, and legacy QuickConfig `settings.json` migration into the
+  editable form without importing credential contents.
 - DevSpace config: runtime version, tool mode, Change Review UI, Agent Skills
   discovery/paths, subagent state, and request/tool/shell logging controls.
 - Projects / Git: real repository status and Git commits plus the independent
-  DevSpace Review version chain, including selection and safe code rollback.
+  DevSpace Review version chain, source workspace/conversation metadata,
+  selection, and safe code rollback.
 - Logs & diagnostics: config validation, doctor, effective config, per-workspace
-  tool/activity log, service logs and state paths.
+  tool/activity log with the latest tool indicator, service logs and state paths.
 - Platform config history: snapshot preview and the Windows-compatible workflow
   of loading a snapshot into the editable forms, reviewing it, then pressing
   Save. An immediate restore remains an explicitly marked advanced action.
@@ -85,9 +88,20 @@ uses `git reset --hard` and never moves the repository's real Git HEAD. The
 operator chooses the project and an earlier active Review version explicitly.
 
 Managed configuration writes preserve unrelated DevSpace/OAuth fields and create
-a configuration-history snapshot before changing the canonical `config.jsonc`.
-Saving configuration never silently restarts DevSpace. Tunnel credentials remain
-in their protected token file rather than in the ordinary config or status API.
+a composite configuration-history snapshot before changing the canonical
+`config.jsonc`: the DevSpace config and the Control-only Tunnel mode/Remote URL
+state are restored together. Saving configuration never silently restarts
+DevSpace. Tunnel credentials remain in their protected token file rather than in
+the ordinary config or status API.
+
+Quick Tunnel mode deliberately keeps the canonical DevSpace config free of a
+stale temporary URL. A managed cloudflared wrapper records the generated
+`trycloudflare.com` origin in a protected local state file; a startup helper then
+creates a temporary effective config that combines that origin with the preserved
+path base (for example `/server`) and starts DevSpace against that effective
+config. Remote mode continues to use the canonical config and protected Tunnel
+token. Switching modes therefore does not overwrite the remembered Remote
+hostname, and a later switch back to Remote can restore it without re-entry.
 
 ## Development acceptance
 

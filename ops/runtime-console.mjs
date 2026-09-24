@@ -14,9 +14,9 @@ import { spawnSync } from 'node:child_process';
 import { switchRuntime, localRuntimeProbe } from './runtime-rollback.mjs';
 import {
   managementSnapshot, projectDetails, observeProject, rollbackReview,
-  updateManagedConfig, setTunnelToken, setAutostart, serviceAction,
+  updateManagedConfig, setTunnelToken, importLegacyQuickConfigCandidate, setAutostart, serviceAction,
   configHistoryItem, restoreConfigHistory, redactedConfig, validateManagedConfig, doctor,
-  recentWorkspaceLog, recentServiceLog
+  recentWorkspaceActivity, recentServiceLog, managementPublicBaseUrl, managementPublicBasePath
 } from './control-management.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -282,8 +282,8 @@ async function inventory(options,config,runtimePackage) {
 export async function snapshot(options) {
   const config=readJson(options.configPath)||{};
   const rt=runtimeInfo(options);
-  const base=config?.server?.publicBaseUrl||'';
-  let pathPart='/healthz',publicUrl='';
+  const base=managementPublicBaseUrl(options,config)||'';
+  let pathPart=(managementPublicBasePath(options,config)||'')+'/healthz',publicUrl='';
   try{const u=new URL(base);pathPart=u.pathname.replace(/\/+$/,'')+'/healthz';publicUrl=u.origin+pathPart;}catch{}
   const localUrl=config?.server?.host&&config?.server?.port?'http://'+config.server.host+':'+config.server.port+pathPart:'';
   const [localHealth,publicHealth,metrics,state]=await Promise.all([
@@ -346,6 +346,7 @@ export function createConsoleServer(options,services={}) {
   const changeRuntime=services.switchRuntime||switchRuntime;
   const getProjectDetails=services.projectDetails||projectDetails;
   const getConfigHistoryItem=services.configHistoryItem||configHistoryItem;
+  const getWorkspaceActivity=services.workspaceActivity||recentWorkspaceActivity;
   let switching=false;
   const staticFiles={'/':'runtime-console-ui.html','/index.html':'runtime-console-ui.html','/ui.css':'runtime-console-ui.css','/ui.js':'runtime-console-ui.js'};
   const type={'/':'text/html; charset=utf-8','/index.html':'text/html; charset=utf-8','/ui.css':'text/css; charset=utf-8','/ui.js':'text/javascript; charset=utf-8'};
@@ -395,7 +396,7 @@ export function createConsoleServer(options,services={}) {
       try{
         const state=await getSnapshot(options);
         if(!(state.inventory?.workspaces||[]).some(x=>x.id===workspaceId))return json(res,404,{error:'Unknown workspace session.'});
-        return json(res,200,{workspace_id:workspaceId,log:recentWorkspaceLog(options.serviceUnit,workspaceId,250)});
+        return json(res,200,{workspace_id:workspaceId,...getWorkspaceActivity(options.serviceUnit,workspaceId,250)});
       }catch(error){return json(res,500,{error:clip(error.message,220)});}
     }
     if(req.method==='POST'&&url==='/api/credentials/owner'){
@@ -411,6 +412,10 @@ export function createConsoleServer(options,services={}) {
       try{
         const body=await readBody(req);
         if(url==='/api/management/config/save')return json(res,200,updateManagedConfig(options,body));
+        if(url==='/api/management/legacy-import'){
+          const info=runtimeInfo(options);
+          return json(res,200,importLegacyQuickConfigCandidate(options,body.legacy,info.actual.version||info.version||''));
+        }
         if(url==='/api/management/config/restore')return json(res,200,restoreConfigHistory(options,body.history_id));
         if(url==='/api/management/tunnel-token'){
           const result=setTunnelToken(options,body.token);
@@ -418,7 +423,7 @@ export function createConsoleServer(options,services={}) {
         }
         if(url==='/api/management/autostart')return json(res,200,setAutostart(options,!!body.enabled));
         if(url==='/api/management/service'){
-          const result=serviceAction(options,body.target,body.action);
+          const result=await serviceAction(options,body.target,body.action);
           return json(res,result.status||200,result);
         }
         if(url==='/api/management/doctor'){
