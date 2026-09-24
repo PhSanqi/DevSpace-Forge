@@ -12,6 +12,7 @@ dist/
 
 # Local test output
 .test-output/
+tests/.review-runtime/
 
 # Upstream reference is intentionally a separate clone
 upstream/devspace/

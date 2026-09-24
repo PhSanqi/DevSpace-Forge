@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="7677"
+CONSOLE_PORT=""
 ALLOWED_ROOT="$HOME"
 PUBLIC_URL=""
 ORIGIN_HOST=""
@@ -27,6 +28,7 @@ Options:
   --instance NAME       Install a side-by-side named instance (for example: server)
   --allowed-root PATH   Project root DevSpace may access (default: $HOME)
   --port PORT           Local DevSpace port (default: 7677)
+  --console-port PORT   Loopback-only Control Console (default: DevSpace port + 1)
   --public-url URL      Public base URL; path bases are supported (example: https://dev.example.com/server)
   --origin-host HOST    Cloudflare Tunnel origin hostname accepted by DevSpace
   --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --instance) INSTANCE="${2:?missing instance name}"; shift 2 ;;
     --allowed-root) ALLOWED_ROOT="${2:?missing path}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --port) PORT="${2:?missing port}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --console-port) CONSOLE_PORT="${2:?missing console port}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:?missing URL}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --origin-host) ORIGIN_HOST="${2:?missing hostname}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; CONFIG_OVERRIDE=1; shift 2 ;;
@@ -173,6 +176,11 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   echo 'Port must be between 1 and 65535.' >&2
   exit 1
 fi
+CONSOLE_PORT="${CONSOLE_PORT:-$((PORT + 1))}"
+if ! [[ "$CONSOLE_PORT" =~ ^[0-9]+$ ]] || (( CONSOLE_PORT < 1 || CONSOLE_PORT > 65535 || CONSOLE_PORT == PORT )); then
+  echo 'Invalid console port.' >&2
+  exit 1
+fi
 if [[ "$UPGRADE_EXISTING" -eq 0 && ! -d "$ALLOWED_ROOT" ]]; then
   echo "Allowed root does not exist: $ALLOWED_ROOT" >&2
   exit 1
@@ -181,6 +189,13 @@ if [[ "$UPGRADE_EXISTING" -eq 0 ]]; then ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && p
 
 mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_DIR" "$WORKTREE_ROOT" "$INSTALL_ROOT/bin"
 install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
+install -m 0755 "$ROOT/ops/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
+install -m 0644 "$ROOT/ops/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
+install -m 0644 "$ROOT/ops/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
+install -m 0644 "$ROOT/ops/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"
+if [[ -f "$ROOT/control-provenance.json" ]]; then
+  install -m 0644 "$ROOT/control-provenance.json" "$INSTALL_ROOT/control-provenance.json"
+fi
 cat > "$INSTALL_ROOT/runtime-console.env" <<EOF
 DEVSPACE_SERVICE=$DEVSPACE_SERVICE
 TUNNEL_SERVICE=$CLOUDFLARED_SERVICE
@@ -283,6 +298,12 @@ export DEVSPACE_CONFIG_DIR="$DEVSPACE_CONFIG_DIR"
 exec "$NODE" "$DEVSPACE_PACKAGE/dist/cli.js" serve
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
+cat > "$INSTALL_ROOT/bin/run-runtime-console" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT"
+EOF
+chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 
 CLOUDFLARED_PROTOCOL="${DEVSPACE_CLOUDFLARED_PROTOCOL:-auto}"
 if [[ "$UPGRADE_EXISTING" -eq 1 ]]; then CLOUDFLARED_PROTOCOL="auto"; fi
@@ -311,6 +332,27 @@ Type=simple
 ExecStart=$INSTALL_ROOT/bin/run-devspace
 Restart=on-failure
 RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+
+CONSOLE_SERVICE="${SERVICE_BASE}-console.service"
+cat > "$SYSTEMD_DIR/$CONSOLE_SERVICE" <<EOF
+[Unit]
+Description=DevSpace Control - Runtime Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$INSTALL_ROOT/bin/run-runtime-console
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -455,6 +497,7 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if [[ "$START_SERVICES" -eq 1 ]]; then
     systemctl --user enable --now "$DEVSPACE_SERVICE"
+    systemctl --user enable --now "$CONSOLE_SERVICE"
     if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
       systemctl --user enable --now "$CLOUDFLARED_SERVICE"
       if [[ -f "$SYSTEMD_DIR/$CLOUDFLARED_WATCHDOG_TIMER" ]]; then
@@ -471,6 +514,11 @@ if command -v systemctl >/dev/null 2>&1; then
     if ! wait_for_endpoint "http://127.0.0.1:${PORT}${MCP_PATH}" 45; then
       echo "Local DevSpace MCP did not become reachable: http://127.0.0.1:${PORT}${MCP_PATH}" >&2
       systemctl --user --no-pager status "$DEVSPACE_SERVICE" >&2 || true
+      exit 1
+    fi
+    if ! wait_for_endpoint "http://127.0.0.1:${CONSOLE_PORT}/api/status" 20; then
+      echo 'Runtime Console did not become reachable.' >&2
+      systemctl --user --no-pager status "$CONSOLE_SERVICE" >&2 || true
       exit 1
     fi
     if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_ENV" ]]; then
@@ -499,6 +547,7 @@ echo "DevSpace installed under: $INSTALL_ROOT"
 echo "Owner password:           $OWNER_TOKEN"
 echo "Cloudflare local Origin:  http://127.0.0.1:${PORT}"
 echo "Local MCP endpoint:       http://127.0.0.1:${PORT}${MCP_PATH}"
+echo "Local Control Console:    http://127.0.0.1:${CONSOLE_PORT}/"
 if [[ -n "$PUBLIC_URL" ]]; then
   echo "Public MCP endpoint:      ${PUBLIC_URL%/}/mcp"
 else

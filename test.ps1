@@ -6,6 +6,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$consoleNode = Get-Command node.exe -ErrorAction SilentlyContinue
+if ($consoleNode) {
+    & $consoleNode.Source --test (Join-Path $PSScriptRoot 'tests\runtime-console.test.mjs')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} else {
+    throw 'Node.js is required for Runtime Console security and rendering tests.'
+}
+
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) {
     throw '.NET Framework 4.x C# compiler was not found.'

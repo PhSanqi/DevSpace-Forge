@@ -542,12 +542,30 @@ namespace DevSpaceControlPlatform
                 "README.md",
                 "README.zh-CN.md",
                 "LICENSE",
+                "control-provenance.json",
                 "update-control-platform-out-of-band.ps1"
             })
             {
                 var from = Path.Combine(source, fileName);
                 if (!File.Exists(from)) continue;
                 File.Copy(from, Path.Combine(target, fileName), true);
+            }
+
+            var sourceOps = Path.Combine(source, "ops");
+            var targetOps = Path.Combine(target, "ops");
+            foreach (var fileName in new[]
+            {
+                "runtime-console.mjs",
+                "runtime-console-ui.html",
+                "runtime-console-ui.css",
+                "runtime-console-ui.js",
+                "start-runtime-console.ps1"
+            })
+            {
+                var from = Path.Combine(sourceOps, fileName);
+                if (!File.Exists(from)) continue;
+                Directory.CreateDirectory(targetOps);
+                File.Copy(from, Path.Combine(targetOps, fileName), true);
             }
 
             var sourcePayload = OfflinePayloadPath(source);

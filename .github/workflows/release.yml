@@ -64,6 +64,8 @@ jobs:
           $slot = (Get-Content -Raw dist\offline-windows-runtime\runtime\active-slot.txt).Trim()
           $node = "dist\offline-windows-runtime\runtime\slots\$slot\node\node.exe"
           $package = "dist\offline-windows-runtime\runtime\slots\$slot\devspace\node_modules\@waishnav\devspace"
+          & node .\ops\write-provenance.mjs --source-root runtime-src --server-file "$package\dist\server.js" --package-file runtime-src\package.json --output "$package\runtime-provenance.json" --artifact-id "runtime-$env:CANONICAL_RUNTIME_VERSION" --strict
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime provenance generation failed.' }
           .\test.ps1 -NodePath $node -DevSpacePackageRoot $package
 
           New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
@@ -128,10 +130,11 @@ jobs:
       - name: Build Linux product package
         working-directory: control
         run: |
+          node --test tests/runtime-console.test.mjs
           version="${GITHUB_REF_NAME#v}"
           runtime_package="dist/linux-runtime/waishnav-devspace-${CANONICAL_RUNTIME_VERSION}.tgz"
           test -f "$runtime_package"
-          bash ./package-release-linux.sh "$version" "$runtime_package"
+          bash ./package-release-linux.sh "$version" "$runtime_package" ../runtime-src
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4

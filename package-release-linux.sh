@@ -3,6 +3,7 @@ set -euo pipefail
 
 VERSION="${1:-0.3.0}"
 RUNTIME_PACKAGE="${2:?usage: package-release-linux.sh VERSION RUNTIME_PACKAGE}"
+RUNTIME_SOURCE="${3:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$ROOT/dist"
 NAME="DevSpace-Forge-v${VERSION}-linux-x64"
@@ -19,8 +20,9 @@ mkdir -p "$STAGE/runtime/devspace" "$STAGE/ops" "$DIST/.offline-cache/linux"
 
 cp "$ROOT/setup-linux.sh" "$STAGE/setup-linux.sh"
 cp "$ROOT/ops/runtime-console.sh" "$STAGE/ops/runtime-console.sh"
+cp "$ROOT/ops/runtime-console.mjs" "$ROOT/ops/runtime-console-ui.html" "$ROOT/ops/runtime-console-ui.css" "$ROOT/ops/runtime-console-ui.js" "$STAGE/ops/"
 cp "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/LICENSE" "$STAGE/"
-chmod 0755 "$STAGE/setup-linux.sh" "$STAGE/ops/runtime-console.sh"
+chmod 0755 "$STAGE/setup-linux.sh" "$STAGE/ops/runtime-console.sh" "$STAGE/ops/runtime-console.mjs"
 
 NODE_ARCHIVE="$DIST/.offline-cache/linux/node-v${NODE_VERSION}-linux-x64.tar.xz"
 if [[ ! -f "$NODE_ARCHIVE" ]] || [[ "$(sha256sum "$NODE_ARCHIVE" | awk '{print $1}')" != "$NODE_SHA256" ]]; then
@@ -74,6 +76,11 @@ cp "$CLOUDFLARED_CACHE" "$STAGE/cloudflared"
 chmod 0755 "$STAGE/cloudflared" "$STAGE/runtime/node/bin/node"
 
 DEVSPACE_VERSION="$($STAGE/runtime/node/bin/node -p "require(process.argv[1]).version" "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/package.json")"
+NODE="$STAGE/runtime/node/bin/node"
+"$NODE" "$ROOT/ops/write-provenance.mjs" --source-root "$ROOT" --server-file "$STAGE/ops/runtime-console.mjs" --package-file "$ROOT/package.json" --output "$STAGE/control-provenance.json" --version "$VERSION" --artifact-id "$NAME" --strict
+if [[ -n "$RUNTIME_SOURCE" ]]; then
+  "$NODE" "$ROOT/ops/write-provenance.mjs" --source-root "$RUNTIME_SOURCE" --server-file "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/dist/server.js" --package-file "$RUNTIME_SOURCE/package.json" --output "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/runtime-provenance.json" --artifact-id "runtime-$DEVSPACE_VERSION" --strict
+fi
 echo "Linux bundle runtime: $DEVSPACE_VERSION"
 RUNTIME_FILE_COUNT="$(find "$STAGE/runtime" -type f | wc -l | tr -d ' ')"
 RUNTIME_SIZE_MIB="$(du -sm "$STAGE/runtime" | awk '{print $1}')"
