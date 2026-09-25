@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { parse as parseYaml } from "yaml";
 import type { AgentSessionEvent, AgentSessionEventListener } from "@earendil-works/pi-coding-agent";
 import {
   PiLocalAgentDriver,
@@ -7,6 +10,30 @@ import {
 } from "./local-agent-pi.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import type { LocalAgentRuntimeContext } from "./local-agent-runtime.js";
+
+test("Pi AuthStorage dependencies remain compatible on fresh installs", async () => {
+  // Waishnav/devspace#366: floating ^0.80.3 can select a release without AuthStorage.
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const workspace = parseYaml(readFileSync(new URL("../pnpm-workspace.yaml", import.meta.url), "utf8"));
+  const lock = parseYaml(readFileSync(new URL("../pnpm-lock.yaml", import.meta.url), "utf8"));
+  const pin = "0.80.7";
+  const main = "@earendil-works/pi-coding-agent";
+  const siblings = ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-tui"];
+  assert.equal(packageJson.dependencies[main], pin);
+  assert.equal(lock.importers["."].dependencies[main].specifier, pin);
+  for (const name of siblings) {
+    assert.equal(packageJson.overrides[name], pin);
+    assert.equal(workspace.overrides[name], pin);
+  }
+  for (const name of [main, ...siblings]) {
+    const installed = Object.keys(lock.packages).filter((key) => key.startsWith(`${name}@`));
+    assert.ok(installed.length > 0, `No locked package: ${name}`);
+    assert.ok(installed.every((key) => key.startsWith(`${name}@${pin}`)), `Incompatible locked package: ${name}`);
+  }
+  const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+  assert.equal(typeof AuthStorage?.create, "function");
+  assert.equal(typeof ModelRegistry?.create, "function");
+});
 
 class FakePiSession implements PiSessionLike {
   readonly sessionId = "pi_session_1";

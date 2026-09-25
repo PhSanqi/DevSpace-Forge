@@ -6,3 +6,10 @@ allowBuilds:
   koffi: true
   node-pty: true
   protobufjs: false
+
+# Keep the pi runtime family aligned: newer versions drop the AuthStorage API.
+# pnpm 11 reads dependency overrides here, not package.json overrides.
+overrides:
+  '@earendil-works/pi-agent-core': '0.80.7'
+  '@earendil-works/pi-ai': '0.80.7'
+  '@earendil-works/pi-tui': '0.80.7'

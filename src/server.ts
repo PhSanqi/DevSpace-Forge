@@ -1262,6 +1262,19 @@ export function createServer(
     app.set("trust proxy", true);
   }
 
+  const publicHostname = new URL(config.publicBaseUrl).hostname.toLowerCase();
+  app.use((req, res, next) => {
+    const forwardedProto = req.get("x-forwarded-proto")?.split(",", 1)[0]?.trim().toLowerCase();
+    const requestHost = (req.get("host") ?? "").split(":", 1)[0]?.toLowerCase();
+    if (requestHost === publicHostname && forwardedProto === "http") {
+      res.setHeader("cache-control", "no-store");
+      res.redirect(308, `https://${publicHostname}${req.originalUrl}`);
+      return;
+    }
+    res.setHeader("strict-transport-security", "max-age=3600");
+    next();
+  });
+
   app.use((req, res, next) => {
     const requestId = randomUUID();
     const startedAt = performance.now();

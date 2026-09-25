@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { access, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -63,6 +64,41 @@ test("HTTP response start timing records only the first writeHead", () => {
   assert.equal(writes, 2);
   assert.equal(starts, 1);
   assert.equal(typeof timing.startedAt, "number");
+});
+
+test("public HTTP proxy requests redirect to HTTPS and HTTPS responses carry HSTS", async (t) => {
+  const { localBaseUrl } = await httpServerFixture(t, "devspace-https-hardening-");
+  const rawGet = (path: string, headers: Record<string, string>) => new Promise<{
+    status: number | undefined;
+    headers: import("node:http").IncomingHttpHeaders;
+  }>((resolve, reject) => {
+    const target = new URL(path, localBaseUrl);
+    const request = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "GET",
+      headers,
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve({ status: response.statusCode, headers: response.headers }));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+  const redirected = await rawGet("/healthz?source=http", {
+      host: "example.test",
+      "x-forwarded-proto": "http",
+  });
+  assert.equal(redirected.status, 308);
+  assert.equal(redirected.headers.location, "https://example.test/healthz?source=http");
+
+  const secure = await rawGet("/healthz", {
+      host: "example.test",
+      "x-forwarded-proto": "https",
+  });
+  assert.equal(secure.status, 200);
+  assert.equal(secure.headers["strict-transport-security"], "max-age=3600");
 });
 
 test("origin logs correlate response start, MCP tool completion and response finish", async (t) => {
