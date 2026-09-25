@@ -393,7 +393,14 @@ test('UI includes semantic navigation, theme/language controls, responsive and a
   const html=readFileSync(new URL('../ops/runtime-console-ui.html',import.meta.url),'utf8');
   const css=readFileSync(new URL('../ops/runtime-console-ui.css',import.meta.url),'utf8');
   const js=readFileSync(new URL('../ops/runtime-console-ui.js',import.meta.url),'utf8');
-  for(const id of ['services','connection','devspace','projects','diagnostics','history','overview','runtime','connectivity','requests','activity','deployment'])assert.match(html,new RegExp('data-view="'+id+'"'));
+  const destinations=['overview','services','connection','deployment','devspace','projects','history','diagnostics'];
+  for(const id of destinations){
+    assert.match(html,new RegExp('data-view="'+id+'"'));
+    assert.match(html,new RegExp('id="view-'+id+'"'));
+  }
+  assert.equal((html.match(/class="nav-item(?: active)?"/g)||[]).length,8);
+  assert.equal((html.match(/<section id="view-/g)||[]).length,8);
+  for(const obsolete of ['runtime','connectivity','requests','activity'])assert.doesNotMatch(html,new RegExp('data-view="'+obsolete+'"'));
   for(const id of ['language','theme-toggle','confirm-dialog','request-filter'])assert.match(html+js,new RegExp(id));
   assert.match(html,/skip-link/);
   assert.match(css,/@media\(max-width:520px\)/);

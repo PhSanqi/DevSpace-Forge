@@ -2,7 +2,9 @@
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const views = ['services','connection','devspace','projects','diagnostics','history','overview','runtime','connectivity','requests','activity','deployment'];
+  // One navigation destination per task. Observation panels are composed into their
+  // owning task pages rather than exposed as a second, conflicting navigation tree.
+  const views = ['overview','services','connection','deployment','devspace','projects','history','diagnostics'];
   const labels = {
     en: {
       workspace:'WORKSPACE',overview:'Overview',access:'Connection & access',runtime:'Runtime & versions',connectivity:'Connectivity',requests:'MCP diagnostics',activity:'Workspaces & jobs',deployment:'Deployment',loopback:'Local management interface',
@@ -123,9 +125,49 @@
     loadIntoForm:'载入到配置表单',loadedIntoForm:'配置快照已载入表单，请检查后再点击“保存配置”应用。',
     directRestore:'立即恢复',directRestoreNote:'高级操作：立即替换受管配置。Windows 管理器一致的流程是先“载入到配置表单”，检查后再保存。',
   });
+  Object.assign(labels.en,{
+    navOperate:'OPERATE',navManage:'MANAGE',navObserve:'OBSERVE',
+    servicesPage:'Services',servicesDesc:'Control the DevSpace and Tunnel services. Connection details live on the Connection page.',
+    connectionConfig:'Connection & Tunnel',connectionDesc:'Copy the MCP endpoint, manage access and configure the Tunnel in one place.',
+    devspaceConfig:'DevSpace settings',projectsGit:'Projects & activity',
+    projectsDesc:'Inspect project commits and Review versions, then inspect workspace and job activity.',
+    logsDiagnostics:'Diagnostics',diagnosticsDesc:'Inspect MCP requests, validate configuration and review service or workspace logs.',
+    deploymentDesc:'Compare the actual running process with the configured slot, then inspect verified rollback targets.',
+    accessSection:'Access & credentials',tunnelSection:'Tunnel configuration',tunnelSettings:'Tunnel settings',tunnelHealthSection:'Connection health',allServices:'Combined service actions',
+    activitySection:'Workspace and job inventory',requestsSection:'MCP request lifecycle',
+    runtimeSection:'Running runtime & provenance',rollbackSection:'Recovery & rollback',
+    configDraft:'Unsaved form changes are preserved while you navigate. Save to write them.',
+    stagedHistory:'A historical snapshot is staged in this form. Connection and DevSpace settings must be reviewed and saved separately.',
+    snapshotLabel:'Snapshot',connectionError:'Connection error',
+    confirmServiceAction:'Confirm service action?',confirmServiceActionText:'This may interrupt active connections. Review the target and action:',
+    noSource:'Not recorded in the deployed artifact'
+  });
+  Object.assign(labels.zh,{
+    navOperate:'运行控制',navManage:'配置管理',navObserve:'诊断观测',
+    servicesPage:'服务控制',servicesDesc:'管理 DevSpace 和 Tunnel 服务；连接地址与密钥统一放在连接页面。',
+    connectionConfig:'连接与 Tunnel',connectionDesc:'统一管理 MCP 地址、Owner 密钥和 Tunnel 配置。',
+    devspaceConfig:'DevSpace 设置',projectsGit:'项目与活动',
+    projectsDesc:'查看 Git 提交、Review 版本以及工作区和任务活动。',
+    logsDiagnostics:'诊断与日志',diagnosticsDesc:'查看 MCP 请求、配置校验、服务日志和工作区活动日志。',
+    deploymentDesc:'对照真实运行进程和配置指针，并核对可用的回滚目标。',
+    accessSection:'连接地址与凭据',tunnelSection:'Tunnel 配置',tunnelSettings:'Tunnel 设置',tunnelHealthSection:'连接健康',allServices:'组合服务操作',
+    activitySection:'工作区与任务清单',requestsSection:'MCP 请求生命周期',
+    runtimeSection:'真实运行版本与来源',rollbackSection:'恢复与回滚',
+    configDraft:'切换页面会保留未保存的表单内容；点击保存才会写入配置。',
+    stagedHistory:'历史快照已载入此表单。连接设置与 DevSpace 设置需要分别核对、保存。',
+    snapshotLabel:'快照',connectionError:'连接错误',
+    confirmServiceAction:'确认服务操作？',confirmServiceActionText:'此操作可能中断当前连接。请核对目标与操作：',
+    noSource:'部署产物未记录来源'
+  });
+  const pageKeys={overview:'overview',services:'servicesPage',connection:'connectionConfig',
+    deployment:'deployment',devspace:'devspaceConfig',projects:'projectsGit',
+    history:'configHistory',diagnostics:'logsDiagnostics'};
+  const pageDescriptions={overview:'overviewDesc',services:'servicesDesc',connection:'connectionDesc',
+    deployment:'deploymentDesc',devspace:'devspaceDesc',projects:'projectsDesc',
+    history:'historyDesc',diagnostics:'diagnosticsDesc'};
   let lang = localStorage.getItem('devspace-console-lang') === 'en' ? 'en' : 'zh';
   let theme = localStorage.getItem('devspace-console-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-  let activeView = 'services';
+  let activeView = 'overview';
   let snapshot = null;
   let pendingAction = '';
   let pendingRollback = null;
@@ -142,7 +184,10 @@
   let conversationLog = '';
   let conversationLatestTool = '';
   let formSettingsOverride = null;
+  const stagedConfig={connection:false,devspace:false};
   let requestFilter = '';
+  const formDrafts={connection:null,devspace:null};
+  const formDirty={connection:false,devspace:false};
   const h = (value) => String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const t = (key) => labels[lang][key] || key;
   const v = (value, fallback) => value === null || value === undefined || value === '' ? (fallback || '—') : value;
@@ -180,14 +225,48 @@
       shell_commands:config?.logging?.shellCommands===true
     }
   });
-  function setLanguage(next) {lang=next;localStorage.setItem('devspace-console-lang',next);document.documentElement.lang=next === 'zh'?'zh-CN':'en';document.querySelectorAll('[data-i18n]').forEach((el)=>el.textContent=t(el.dataset.i18n));$('language').value=next;updateViewText();render();}
+  function captureDraft(view=activeView){
+    if(!formDrafts.hasOwnProperty(view))return;
+    const root=$('view-'+view);
+    if(!root?.querySelector('[id^="cfg-"]'))return;
+    const values={};
+    root.querySelectorAll('input[id^="cfg-"],select[id^="cfg-"],textarea[id^="cfg-"]').forEach((field)=>{
+      // Credentials are never cached in a form draft or browser storage.
+      if(field.type==='password'||field.type==='file'||field.readOnly)return;
+      values[field.id]=field.type==='checkbox'?field.checked:field.value;
+    });
+    formDrafts[view]=values;
+  }
+  function restoreDraft(view=activeView){
+    const values=formDrafts[view];if(!values)return;
+    for(const [id,value] of Object.entries(values)){
+      const field=$(id);if(!field)continue;
+      if(field.type==='checkbox')field.checked=!!value;else field.value=value;
+    }
+    if(view==='connection'){
+      const quick=$('cfg-tunnel-mode')?.value==='Quick';
+      if($('cfg-public'))$('cfg-public').disabled=quick;
+      if($('cfg-token'))$('cfg-token').disabled=quick;
+      const saveToken=document.querySelector('[data-save-tunnel-token]');
+      if(saveToken)saveToken.disabled=quick;
+    }
+  }
+  function setLanguage(next) {captureDraft();lang=next;localStorage.setItem('devspace-console-lang',next);document.documentElement.lang=next === 'zh'?'zh-CN':'en';document.querySelectorAll('[data-i18n]').forEach((el)=>el.textContent=t(el.dataset.i18n));$('language').value=next;updateViewText();render();}
   function setTheme(next) {theme=next;document.documentElement.dataset.theme=next;localStorage.setItem('devspace-console-theme',next);$('theme-toggle').textContent=next === 'dark'?'☼':'☾';}
-  function updateViewText(){const key=activeView;const title=t(key);$('page-title').textContent=title;$('breadcrumb-label').textContent=title;$('page-description').textContent=t(key+'Desc');}
-  function changeView(next){if(!views.includes(next))return;activeView=next;document.querySelectorAll('.view').forEach((el)=>el.classList.toggle('active',el.id==='view-'+next));document.querySelectorAll('.nav-item').forEach((el)=>{let selected=el.dataset.view===next;el.classList.toggle('active',selected);if(selected)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});updateViewText();$('sidebar').classList.remove('open');$('menu-toggle').setAttribute('aria-expanded','false');$('mobile-scrim').hidden=true;render();}
+  function updateViewText(){
+    const title=t(pageKeys[activeView]);$('page-title').textContent=title;$('breadcrumb-label').textContent=title;
+    $('page-description').textContent=t(pageDescriptions[activeView]);
+    const paused=['connection','devspace','projects','history'].includes(activeView);
+    const indicator=$('poll-indicator');indicator.classList.toggle('is-paused',paused);
+    indicator.querySelector('[data-i18n]').textContent=paused?t('snapshotLabel'):t('live');
+  }
+  function changeView(next){if(!views.includes(next))return;captureDraft();activeView=next;document.querySelectorAll('.view').forEach((el)=>el.classList.toggle('active',el.id==='view-'+next));document.querySelectorAll('.nav-item').forEach((el)=>{let selected=el.dataset.view===next;el.classList.toggle('active',selected);if(selected)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});updateViewText();$('sidebar').classList.remove('open');$('menu-toggle').setAttribute('aria-expanded','false');$('mobile-scrim').hidden=true;render();}
   function notice(message,kind='warn'){const n=$('notice');n.textContent=message;n.className='notice '+kind;n.setAttribute('role',kind==='error'?'alert':'status');n.hidden=!message;}
   function renderOverview(d){
     const service=d.services||{},runtime=d.runtime||{},mcp=d.mcp||{},inventory=d.inventory||{},actual=runtime.actual||{},source=runtime.provenance||{};
-    const ok=service.devspace==='active' && mcp.local_health?.ok && (!service.tunnel || service.tunnel==='active');
+    const ok=service.devspace==='active' && mcp.local_health?.ok &&
+      (!service.tunnel || service.tunnel==='active') &&
+      (!d.connection?.public_mcp_url || mcp.public_health?.ok);
     const git=source.runtime?.git_commit || source.git_commit;
     const stats=[
       [t('runtimeVersion'),v(actual.version,runtime.version),'▣',git ? shortHash(git) : t('noProvenance')],
@@ -212,52 +291,49 @@
       panel(t('ownerPassword'),t('ownerCopyWarning'),'<div class="panel-body">'+owner+(enabled?note(t('ownerCopyWarning')):note(t('ownerCopyUnavailable'),'warning'))+'</div>');
   }
   function renderServices(d){
-    const mg=d.management||{},svc=mg.services||{},info=d.connection||{};
-    const card=(key,item)=>'<article class="panel"><div class="panel-head"><div><h2>'+h(t(key))+'</h2><p>PID '+h(v(item?.pid))+' · '+h(item?.enabled||'—')+'</p></div>'+state(item?.status)+'</div><div class="panel-body"><div class="service-actions"><button class="primary-button" data-service-target="'+(key==='devspaceServiceTitle'?'devspace':'tunnel')+'" data-service-action="start">'+h(t('start'))+'</button><button class="secondary-button" data-service-target="'+(key==='devspaceServiceTitle'?'devspace':'tunnel')+'" data-service-action="restart">'+h(t('restart'))+'</button><button class="danger-button" data-service-target="'+(key==='devspaceServiceTitle'?'devspace':'tunnel')+'" data-service-action="stop">'+h(t('stop'))+'</button></div></div></article>';
-    const accessEntries=[[t('publicMcpUrl'),info.public_mcp_url],[t('localMcpUrl'),info.local_mcp_url]];
-    const access=accessEntries.map(([label,url])=>'<div class="connection-item"><div><p class="mini-label">'+h(label)+'</p><div class="mono code-text">'+h(v(url))+'</div></div><button class="secondary-button" data-copy-url="'+h(url||'')+'" '+(!url?'disabled':'')+'>'+h(t('copyUrl'))+'</button></div>').join('')+
-      '<div class="connection-item"><div><p class="mini-label">'+h(t('ownerPassword'))+'</p><div class="mono code-text">•••• •••• ••••</div></div><button class="secondary-button" data-copy-owner '+(!d.actions?.copy_owner_password?'disabled':'')+'>'+h(t('copyOwner'))+'</button></div>';
+    const svc=d.management?.services||{};
+    const serviceCard=(key,target,item)=>'<article class="panel"><div class="panel-head"><div><h2>'+h(t(key))+'</h2><p>PID '+h(v(item?.pid))+' / '+h(v(item?.enabled))+'</p></div>'+state(item?.status)+'</div><div class="panel-body"><div class="service-actions"><button class="primary-button" data-service-target="'+target+'" data-service-action="start">'+h(t('start'))+'</button><button class="secondary-button" data-service-target="'+target+'" data-service-action="restart">'+h(t('restart'))+'</button><button class="danger-button" data-service-target="'+target+'" data-service-action="stop">'+h(t('stop'))+'</button></div></div></article>';
     const all='<div class="button-row"><button class="primary-button" data-service-target="all" data-service-action="start">'+h(t('startAll'))+'</button><button class="secondary-button" data-service-target="all" data-service-action="restart">'+h(t('restartAll'))+'</button><button class="danger-button" data-service-target="all" data-service-action="stop">'+h(t('stopAll'))+'</button></div>';
-    return '<div class="panel-grid equal">'+card('devspaceServiceTitle',svc.devspace)+card('tunnelServiceTitle',svc.tunnel)+'</div>'+
-      panel(t('connectionDetails'),t('servicesDesc'),'<div class="panel-body">'+access+all+'</div>');
+    return '<div class="panel-grid equal">'+serviceCard('devspaceServiceTitle','devspace',svc.devspace)+serviceCard('tunnelServiceTitle','tunnel',svc.tunnel)+'</div>'+
+      panel(t('allServices'),t('servicesDesc'),'<div class="panel-body">'+all+'</div>');
   }
   function renderConnection(d){
-    const s=formSettingsOverride||d.management?.settings||{};
+    const s=(stagedConfig.connection&&formSettingsOverride)||d.management?.settings||{};
     const roots=(s.allowed_roots||[]).join('\n');
     const tokenState=s.tunnel_token_present?t('tokenStored'):t('tokenMissing');
     const quick=s.tunnel_mode==='Quick';
     const modeOptions=['Remote','Quick'].map(x=>'<option value="'+x+'" '+(s.tunnel_mode===x?'selected':'')+'>'+x+'</option>').join('');
     const effective=s.effective_public_base_url||d.management?.settings?.effective_public_base_url||'';
-    return panel(t('connectionConfig'),t('connectionDesc'),'<div class="panel-body"><div class="form-grid">'+
-      '<div class="field full"><label for="cfg-roots">'+h(t('allowedRoots'))+'</label><textarea id="cfg-roots" class="text-area">'+h(roots)+'</textarea></div>'+
-      '<div class="field"><label for="cfg-port">'+h(t('localPort'))+'</label><input id="cfg-port" class="text-input" type="number" min="1" max="65535" value="'+h(v(s.local_port,''))+'"></div>'+
+    return panel(t('tunnelSettings'),t('connectionDesc'),'<div class="panel-body"><div class="form-grid">'+
+      '<div class="field full"><label for="cfg-roots">'+h(t('allowedRoots'))+'</label><textarea id="cfg-roots" name="allowed-roots" class="text-area" autocomplete="off" spellcheck="false">'+h(roots)+'</textarea></div>'+
+      '<div class="field"><label for="cfg-port">'+h(t('localPort'))+'</label><input id="cfg-port" name="local-port" class="text-input" type="number" inputmode="numeric" autocomplete="off" min="1" max="65535" value="'+h(v(s.local_port,''))+'"></div>'+
       '<div class="field"><label for="cfg-tunnel-mode">'+h(t('tunnelMode'))+'</label><select id="cfg-tunnel-mode" class="select-input">'+modeOptions+'</select></div>'+
-      '<div class="field full"><label for="cfg-public">'+h(t('fixedEndpoint'))+'</label><input id="cfg-public" class="text-input mono" type="text" value="'+h(v(s.public_base_url,''))+'" '+(quick?'disabled':'')+'></div>'+
-      '<div class="field full"><label>'+h(t('effectivePublic'))+'</label><input class="text-input mono" type="text" readonly value="'+h(v(effective,''))+'"></div>'+
+      '<div class="field full"><label for="cfg-public">'+h(t('fixedEndpoint'))+'</label><input id="cfg-public" name="public-base-url" class="text-input mono" type="url" autocomplete="off" spellcheck="false" value="'+h(v(s.public_base_url,''))+'" '+(quick?'disabled':'')+'></div>'+
+      '<div class="field full"><label for="cfg-effective-public">'+h(t('effectivePublic'))+'</label><input id="cfg-effective-public" class="text-input mono" type="url" readonly value="'+h(v(effective,''))+'"></div>'+
       '<div class="field"><label>'+h(t('autoStart'))+'</label><label class="check-row"><input id="cfg-autostart" type="checkbox" '+(s.auto_start?'checked':'')+'> '+h(t('autoStart'))+'</label></div>'+
       '<div class="field"><label>'+h(t('tunnelToken'))+'</label><div class="muted">'+h(tokenState)+'</div></div>'+
       '<div class="field full"><label for="cfg-token">'+h(t('tunnelToken'))+'</label><input id="cfg-token" class="text-input" type="password" autocomplete="off" placeholder="••••••••" '+(quick?'disabled':'')+'><div><button class="secondary-button" data-save-tunnel-token '+(quick?'disabled':'')+'>'+h(t('saveToken'))+'</button></div></div>'+
       '<div class="field full"><label for="legacy-config-file">'+h(t('legacyImport'))+'</label><input id="legacy-config-file" class="text-input" type="file" accept=".json,application/json"><div><button class="secondary-button" data-import-legacy>'+h(t('legacyImportButton'))+'</button></div></div>'+
-      '</div><div class="button-row"><button class="primary-button" data-save-connection>'+h(t('saveConfig'))+'</button></div>'+note(quick?t('quickModeDesc'):t('remoteModeDesc'))+note(t('saveConfigNote'))+'</div>');
+      '</div><div class="button-row"><button class="primary-button" data-save-connection>'+h(t('saveConfig'))+'</button></div>'+(stagedConfig.connection?note(t('stagedHistory'),'warning'):'')+note(quick?t('quickModeDesc'):t('remoteModeDesc'))+note(t('saveConfigNote'))+'</div>');
   }
   function renderDevspace(d){
-    const s=formSettingsOverride||d.management?.settings||{},log=s.logging||{};
+    const s=(stagedConfig.devspace&&formSettingsOverride)||d.management?.settings||{},log=s.logging||{};
     const options=['codex','claude','minimal','full'].map(x=>'<option value="'+x+'" '+(s.tool_mode===x?'selected':'')+'>'+x+'</option>').join('');
     const level=['silent','error','warn','info','debug'].map(x=>'<option value="'+x+'" '+(log.level===x?'selected':'')+'>'+x+'</option>').join('');
     const format=['pretty','json'].map(x=>'<option value="'+x+'" '+(log.format===x?'selected':'')+'>'+x+'</option>').join('');
     return panel(t('devspaceConfig'),t('devspaceDesc'),'<div class="panel-body"><div class="form-grid">'+
-      '<div class="field"><label>'+h(t('runtimeVersion'))+'</label><input class="text-input mono" readonly value="'+h(v(d.management?.runtime_version))+'"></div>'+
+      '<div class="field"><label for="cfg-runtime-version">'+h(t('runtimeVersion'))+'</label><input id="cfg-runtime-version" class="text-input mono" readonly value="'+h(v(d.management?.runtime_version))+'"></div>'+
       '<div class="field"><label for="cfg-tool-mode">'+h(t('toolMode'))+'</label><select id="cfg-tool-mode" class="select-input">'+options+'</select></div>'+
       '<label class="check-row"><input id="cfg-review-ui" type="checkbox" '+(s.review_ui_enabled?'checked':'')+'> '+h(t('reviewUi'))+'</label>'+
       '<label class="check-row"><input id="cfg-skills" type="checkbox" '+(s.skills_enabled?'checked':'')+'> '+h(t('skillsEnabled'))+'</label>'+
       '<div class="field full"><label for="cfg-skill-paths">'+h(t('skillPaths'))+'</label><textarea id="cfg-skill-paths" class="text-area">'+h((s.skill_paths||[]).join('\n'))+'</textarea></div>'+
-      '<div class="field"><label>'+h(t('subagents'))+'</label><input class="text-input" readonly value="'+h(s.subagents_enabled?'enabled':'disabled')+'"></div>'+
+      '<div class="field"><label for="cfg-subagents">'+h(t('subagents'))+'</label><input id="cfg-subagents" class="text-input" readonly value="'+h(s.subagents_enabled?'enabled':'disabled')+'"></div>'+
       '<div class="field"><label for="cfg-log-level">'+h(t('logLevel'))+'</label><select id="cfg-log-level" class="select-input">'+level+'</select></div>'+
       '<div class="field"><label for="cfg-log-format">'+h(t('logFormat'))+'</label><select id="cfg-log-format" class="select-input">'+format+'</select></div>'+
       '<label class="check-row"><input id="cfg-log-requests" type="checkbox" '+(log.requests?'checked':'')+'> '+h(t('requestLogs'))+'</label>'+
       '<label class="check-row"><input id="cfg-log-tools" type="checkbox" '+(log.tool_calls?'checked':'')+'> '+h(t('toolCallLogs'))+'</label>'+
       '<label class="check-row"><input id="cfg-log-shell" type="checkbox" '+(log.shell_commands?'checked':'')+'> '+h(t('shellCommandLogs'))+'</label>'+
-      '</div><div class="button-row"><button class="primary-button" data-save-devspace>'+h(t('saveConfig'))+'</button></div>'+note(t('saveConfigNote'))+'</div>');
+      '</div><div class="button-row"><button class="primary-button" data-save-devspace>'+h(t('saveConfig'))+'</button></div>'+(stagedConfig.devspace?note(t('stagedHistory'),'warning'):'')+note(t('saveConfigNote'))+'</div>');
   }
   function renderProjects(d){
     const projects=d.management?.projects||[];
@@ -320,7 +396,7 @@
     const stats='<div class="stats-grid">'+[[t('requestCount'),fmt(info.total_observed)], [t('aborted'),fmt(info.aborted_observed)], [t('scope'),cap(info.observation_scope,30)], [t('status'),info.available?'OK':t('unknown')]].map((a)=>'<article class="stat"><div class="stat-head">'+h(a[0])+'</div><div class="stat-value">'+h(a[1])+'</div></article>').join('')+'</div>';
     const head='<div class="panel-head"><div><h2>'+h(t('requests'))+'</h2><p>'+h(t('requestsNoClient'))+'</p></div><div class="filters"><input class="filter-input" type="search" id="request-filter" aria-label="'+h(t('filter'))+'" placeholder="'+h(t('filter'))+'" value="'+h(requestFilter)+'"></div></div>';
     const rows=filtered.map((x)=>'<tr><td class="mono">'+h(stamp(x.ts))+'</td><td class="mono">'+h(v(x.request_id,x.requestId))+'</td><td class="mono">'+h(v(x.cf_ray,x.cfRay))+'</td><td>'+state(x.status||x.outcome||x.event)+'</td><td>'+h(v(x.duration_ms,x.durationMs))+' ms</td></tr>');
-    return stats+'<article class="panel">'+head+dataTable([t('time'),t('requestId'),t('cfRay'),t('status'),t('duration')],rows,t('noRequests'))+'</article>';
+    return stats+'<article class="panel request-table">'+head+dataTable([t('time'),t('requestId'),t('cfRay'),t('status'),t('duration')],rows,t('noRequests'))+'</article>';
   }
   function renderActivity(d){
     const inv=d.inventory||{},workspaces=inv.workspaces||[],workflows=inv.workflow_sessions||[],jobs=inv.jobs||[];
@@ -331,40 +407,48 @@
     return caution+panel(t('activeWorkspaces'),t('of')+' '+fmt(inv.workspace_count),dataTable([t('workspaceId'),t('path'),t('lastUsed')],workRows))+panel(t('sessions'),t('of')+' '+fmt(inv.workflow_session_count),dataTable([t('workflowId'),t('path'),t('status')],flowRows))+panel(t('jobs'),t('of')+' '+fmt(inv.job_count),dataTable([t('jobId'),t('command'),t('status')],jobRows));
   }
   function renderDeployment(d){
-    const dep=d.deployment||{},rt=d.runtime||{},actions=d.actions||{};
-    const rows=[row(t('activeSlot'),dep.active_slot||rt.active_slot),row(t('previousSlot'),dep.previous_slot),row(t('deploymentRoot'),dep.runtime_root,true),row(t('source'),rt.actual?.package_root,true)];
-    const buttons=(actions.restart_devspace?'<button class="danger-button" data-action="restart-devspace">'+h(t('restartDevspace'))+'</button>':'')+(actions.restart_tunnel?'<button class="secondary-button" data-action="restart-tunnel">'+h(t('restartTunnel'))+'</button>':'');
+    const dep=d.deployment||{},actions=d.actions||{};
     const targets=Array.isArray(dep.rollback_targets)?dep.rollback_targets:[];
     const eligible=targets.filter(x=>x.verified&&!x.current);
     if(!eligible.some(x=>x.id===selectedRollbackId))selectedRollbackId='';
     const chosen=eligible.find(x=>x.id===selectedRollbackId);
-    const options='<option value="">'+h(t('selectTarget'))+'</option>'+targets.map(x=>'<option value="'+h(x.id)+'" '+(x.current?'disabled ':'')+(chosen?.id===x.id?'selected':'')+'>'+h(x.id+' · '+x.version+(x.current?' · '+t('currentRuntime'):''))+'</option>').join('');
+    const options='<option value="">'+h(t('selectTarget'))+'</option>'+targets.map(x=>'<option value="'+h(x.id)+'" '+(x.current||!x.verified?'disabled ':'')+(chosen?.id===x.id?'selected':'')+'>'+h(x.id+' / '+x.version+(x.current?' / '+t('currentRuntime'):'')+(!x.verified?' / '+t('unknown'):''))+'</option>').join('');
     const selector=targets.length?'<label for="rollback-target" class="mini-label">'+h(t('selectTarget'))+'</label><select id="rollback-target" class="filter-input rollback-select">'+options+'</select>':empty(t('rollbackNotAvailable'));
     const preview=chosen?'<div class="rollback-preview">'+row(t('version'),chosen.version)+row(t('packageRoot'),chosen.package_root,true)+row(t('rollbackSha'),chosen.server_sha256,true)+row(t('rollbackStatus'),t('notCurrent'))+'</div>':note(eligible.length?t('selectTargetFirst'):t('rollbackNotAvailable'),eligible.length?'':'warning');
-    const control='<div class="panel-body">'+selector+preview+'<button class="danger-button rollback-button" data-action="rollback-runtime" '+(!chosen||!actions.rollback_runtime?'disabled':'')+'>'+h(t('runRollback'))+'</button>'+note(t('rollbackConfirmText'),'warning')+'</div>';
-    return panel(t('deployment'),t('runtimeInfo'),'<div class="panel-body">'+rows.join('')+'</div>')+
-      panel(t('rollback'),t('rollbackSummary'),control)+
-      panel(t('backups'),'',list(dep.recent_backups))+
-      '<div class="action-zone"><div><h2>'+h(t('protectedOps'))+'</h2><p>'+h(t('protectedDesc'))+'</p></div><div class="action-buttons">'+(buttons||badge(t('controlsUnavailable'),'warn'))+'</div></div>';
+    const recovery='<div class="panel-body">'+row(t('activeSlot'),dep.active_slot)+row(t('previousSlot'),dep.previous_slot)+selector+preview+'<button class="danger-button rollback-button" data-action="rollback-runtime" '+(!chosen||!actions.rollback_runtime?'disabled':'')+'>'+h(t('runRollback'))+'</button>'+note(t('rollbackConfirmText'),'warning')+'</div>';
+    return panel(t('rollbackSection'),t('rollbackSummary'),recovery)+panel(t('backups'),'',list(dep.recent_backups));
+  }
+  function sectionIntro(title,description=''){
+    return '<div class="section-intro"><h2>'+h(title)+'</h2>'+(description?'<p>'+h(description)+'</p>':'')+'</div>';
   }
   function render(){
     if(!snapshot)return;
-    const focused=document.activeElement?.id==='request-filter', selection=focused?document.activeElement.selectionStart:0;
+    const focused=document.activeElement?.id==='request-filter';
+    const selection=focused?document.activeElement.selectionStart:0;
     $('footer-instance').textContent=v(snapshot.instance);
     $('updated-at').textContent=t('updated')+': '+stamp(snapshot.generated_at);
     const contents={
-      services:renderServices,connection:renderConnection,devspace:renderDevspace,projects:renderProjects,
-      diagnostics:renderDiagnostics,history:renderHistory,overview:renderOverview,runtime:renderRuntime,
-      connectivity:renderConnectivity,requests:renderRequests,activity:renderActivity,deployment:renderDeployment
+      overview:renderOverview,
+      services:renderServices,
+      connection:(d)=>sectionIntro(t('accessSection'))+renderAccess(d)+sectionIntro(t('tunnelSection'))+renderConnection(d)+sectionIntro(t('tunnelHealthSection'))+renderConnectivity(d),
+      deployment:(d)=>sectionIntro(t('runtimeSection'))+renderRuntime(d)+renderDeployment(d),
+      devspace:renderDevspace,
+      projects:(d)=>renderProjects(d)+'<details class="section-disclosure"><summary>'+h(t('activitySection'))+'</summary><div class="disclosure-body">'+renderActivity(d)+'</div></details>',
+      history:renderHistory,
+      diagnostics:(d)=>sectionIntro(t('requestsSection'))+renderRequests(d)+renderDiagnostics(d)
     };
-    for(const key of views)$(key+'-content').innerHTML=contents[key](snapshot);
-    if(focused&&activeView==='requests'){const input=$('request-filter');input.focus();try{input.setSelectionRange(selection,selection)}catch{}}
+    $(activeView+'-content').innerHTML=contents[activeView](snapshot);
+    restoreDraft();
+    if(focused&&activeView==='diagnostics'){
+      const input=$('request-filter');input.focus();try{input.setSelectionRange(selection,selection)}catch{}
+    }
   }
-  async function refresh(){
+  async function refresh(preserveDraft=true){
     const el=$('refresh');el.disabled=true;
     try{
       const r=await fetch('/api/status',{cache:'no-store',credentials:'same-origin'});
       if(!r.ok)throw new Error('HTTP '+r.status);
+      if(preserveDraft)captureDraft();
       snapshot=await r.json();
       $('poll-indicator').classList.remove('is-error');
       notice('');
@@ -407,24 +491,30 @@
     $('rollback-confirm-area').hidden=true;
     $('rollback-confirm-input').value='';
     $('confirm-submit').disabled=false;
-    $('confirm-title').textContent=t(kind==='project-rollback'?'confirmCodeRollback':'confirmRestoreConfig');
-    $('confirm-description').textContent=t(kind==='project-rollback'?'confirmCodeRollbackText':'confirmRestoreConfigText');
+    $('confirm-title').textContent=t(kind==='service'?'confirmServiceAction':kind==='project-rollback'?'confirmCodeRollback':'confirmRestoreConfig');
+    $('confirm-description').textContent=kind==='service'
+      ?t('confirmServiceActionText')+' '+payload.target+' / '+payload.action
+      :t(kind==='project-rollback'?'confirmCodeRollbackText':'confirmRestoreConfigText');
     $('confirm-dialog').showModal();
   }
   async function executeManagementConfirmation(){
     const task=pendingManagement;pendingManagement=null;if(!task)return;
     try{
-      if(task.kind==='project-rollback'){
+      if(task.kind==='service'){
+        await managementPost('/api/management/service',task.payload);
+        await refresh();notice(t('operationComplete'));
+      }else if(task.kind==='project-rollback'){
         const result=await managementPost('/api/management/project/rollback',task.payload);
         selectedReviewRef='';notice(result.message||t('operationComplete'));await loadProjectDetails();
       }else if(task.kind==='config-restore'){
-        await managementPost('/api/management/config/restore',task.payload);historyData=null;selectedHistoryId='';notice(t('operationComplete')+' '+t('restartRequired'));await refresh();
+        await managementPost('/api/management/config/restore',task.payload);historyData=null;selectedHistoryId='';formSettingsOverride=null;stagedConfig.connection=false;stagedConfig.devspace=false;formDrafts.connection=null;formDrafts.devspace=null;formDirty.connection=false;formDirty.devspace=false;await refresh(false);notice(t('operationComplete')+' '+t('restartRequired'));
       }
     }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
   }
   async function action(name){
     const allowed={'restart-devspace':'restart_devspace','restart-tunnel':'restart_tunnel','rollback-runtime':'rollback_runtime','copy-owner':'copy_owner_password'};
     if(!allowed[name]||!snapshot?.actions?.[allowed[name]])return;
+    pendingManagement=null;
     pendingRollback=null;
     const isRollback=name==='rollback-runtime';
     if(isRollback){
@@ -492,6 +582,7 @@
       if(pendingManagement)executeManagementConfirmation();
       else if(pendingAction)executeAction(pendingAction,pendingRollback);
     }
+    else pendingManagement=null;
     pendingAction='';pendingRollback=null;
   });
   document.addEventListener('click',async(event)=>{
@@ -500,8 +591,10 @@
     if(event.target.closest('[data-copy-owner]')){action('copy-owner');return;}
     const serviceButton=event.target.closest('[data-service-target]');
     if(serviceButton){
+      const payload={target:serviceButton.dataset.serviceTarget,action:serviceButton.dataset.serviceAction};
+      if(payload.action!=='start'){managementConfirm('service',payload);return;}
       try{
-        await managementPost('/api/management/service',{target:serviceButton.dataset.serviceTarget,action:serviceButton.dataset.serviceAction});
+        await managementPost('/api/management/service',payload);
         notice(t('operationComplete'));await refresh();
       }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
       return;
@@ -515,7 +608,8 @@
         };
         await managementPost('/api/management/config/save',body);
         await managementPost('/api/management/autostart',{enabled:!!$('cfg-autostart')?.checked});
-        formSettingsOverride=null;notice(t('saved')+' '+t('restartRequired'));await refresh();
+        stagedConfig.connection=false;if(!stagedConfig.devspace)formSettingsOverride=null;
+        formDrafts.connection=null;formDirty.connection=false;await refresh(false);notice(t('saved')+' '+t('restartRequired'));
       }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
       return;
     }
@@ -524,7 +618,9 @@
         const body={tool_mode:$('cfg-tool-mode')?.value,review_ui_enabled:!!$('cfg-review-ui')?.checked,skills_enabled:!!$('cfg-skills')?.checked,
           skill_paths:($('cfg-skill-paths')?.value||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),
           logging:{level:$('cfg-log-level')?.value,format:$('cfg-log-format')?.value,requests:!!$('cfg-log-requests')?.checked,tool_calls:!!$('cfg-log-tools')?.checked,shell_commands:!!$('cfg-log-shell')?.checked}};
-        await managementPost('/api/management/config/save',body);formSettingsOverride=null;notice(t('saved')+' '+t('restartRequired'));await refresh();
+        await managementPost('/api/management/config/save',body);
+        stagedConfig.devspace=false;if(!stagedConfig.connection)formSettingsOverride=null;
+        formDrafts.devspace=null;formDirty.devspace=false;await refresh(false);notice(t('saved')+' '+t('restartRequired'));
       }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
       return;
     }
@@ -541,7 +637,7 @@
         if(file.size>1024*1024)throw new Error('Legacy settings.json is too large.');
         const legacy=JSON.parse(await file.text());
         const result=await managementPost('/api/management/legacy-import',{legacy});
-        formSettingsOverride=result.settings;
+        formSettingsOverride=result.settings;stagedConfig.connection=true;stagedConfig.devspace=true;formDrafts.connection=null;formDrafts.devspace=null;formDirty.connection=true;formDirty.devspace=true;
         notice((result.notes||[]).join(' '));render();
       }catch(error){notice(t('actionFailed')+': '+error.message,'error');}
       return;
@@ -560,7 +656,7 @@
     if(historyButton){await loadHistoryItem(historyButton.dataset.historyId);return;}
     if(event.target.closest('[data-load-history-form]')){
       if(!historyData?.config)return;
-      formSettingsOverride=settingsFromConfig(historyData.config,snapshot.management?.settings||{},historyData.control||{});
+      formSettingsOverride=settingsFromConfig(historyData.config,snapshot.management?.settings||{},historyData.control||{});stagedConfig.connection=true;stagedConfig.devspace=true;formDrafts.connection=null;formDrafts.devspace=null;formDirty.connection=true;formDirty.devspace=true;
       notice(t('loadedIntoForm'));changeView('connection');return;
     }
     if(event.target.closest('[data-restore-history]')){if(selectedHistoryId)managementConfirm('config-restore',{history_id:selectedHistoryId});return;}
@@ -599,6 +695,7 @@
     const button=event.target.closest('[data-action]');if(button)action(button.dataset.action);
   });
   document.addEventListener('change',(event)=>{
+    if(['connection','devspace'].includes(activeView)&&event.target.id?.startsWith('cfg-'))formDirty[activeView]=true;
     if(event.target.id==='rollback-target'){selectedRollbackId=event.target.value;render();return;}
     if(event.target.id==='project-selector'){selectedProjectId=event.target.value;projectData=null;selectedReviewRef='';render();loadProjectDetails();return;}
     if(event.target.name==='review-version'){selectedReviewRef=event.target.value;render();return;}
@@ -611,8 +708,15 @@
       return;
     }
   });
-  document.addEventListener('input',(event)=>{if(event.target.id==='request-filter'){requestFilter=event.target.value;document.querySelectorAll('#requests-content tbody tr').forEach((row)=>row.hidden=!row.textContent.toLowerCase().includes(requestFilter.toLowerCase()));}});
-  setTheme(theme);setLanguage(lang);changeView('services');refresh();setInterval(()=>{
+  document.addEventListener('input',(event)=>{
+    if(['connection','devspace'].includes(activeView)&&event.target.id?.startsWith('cfg-'))formDirty[activeView]=true;
+    if(event.target.id==='request-filter'){requestFilter=event.target.value;document.querySelectorAll('#diagnostics-content .request-table tbody tr').forEach((row)=>row.hidden=!row.textContent.toLowerCase().includes(requestFilter.toLowerCase()));}
+  });
+  window.addEventListener('beforeunload',(event)=>{
+    if(!formDirty.connection&&!formDirty.devspace)return;
+    event.preventDefault();event.returnValue='';
+  });
+  setTheme(theme);setLanguage(lang);changeView('overview');refresh();setInterval(()=>{
     if(document.hidden)return;
     if(['connection','devspace','projects','history'].includes(activeView))return;
     refresh();

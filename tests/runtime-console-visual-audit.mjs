@@ -45,6 +45,8 @@ try{
   const variants=[
     {name:'desktop-zh-dark',width:1440,height:900,lang:'zh',theme:'dark',view:'services'},
     {name:'desktop-en-light',width:1440,height:900,lang:'en',theme:'light',view:'projects'},
+    {name:'desktop-1024-en-dark',width:1024,height:900,lang:'en',theme:'dark',view:'overview'},
+    {name:'tablet-768-zh-light',width:768,height:900,lang:'zh',theme:'light',view:'connection'},
     {name:'mobile-zh-dark',width:390,height:844,lang:'zh',theme:'dark',view:'connection'},
     {name:'mobile-en-light',width:390,height:844,lang:'en',theme:'light',view:'devspace'},
   ];
@@ -79,25 +81,81 @@ try{
     })()`);
     const png=await send('Page.captureScreenshot',{format:'png',fromSurface:true,captureBeyondViewport:false});
     writeFileSync(path.join(out,variant.name+'.png'),Buffer.from(png.data,'base64'));
-    const pass=report.width===variant.width&&report.documentWidth<=variant.width&&report.theme===variant.theme&&report.view==='view-'+variant.view&&report.loaded&&report.navCount===12&&report.skipLink&&report.textContrast>=4.5&&report.mutedContrast>=4.5&&report.accentContrast>=4.5;
+    const pass=report.width===variant.width&&report.documentWidth<=variant.width&&report.theme===variant.theme&&report.view==='view-'+variant.view&&report.loaded&&report.navCount===8&&report.skipLink&&report.textContrast>=4.5&&report.mutedContrast>=4.5&&report.accentContrast>=4.5;
     observations.push({...variant,...report,pass});
+  }
+  // Clean, comparable renders for the WebMaker Fresh-Eyes review pack.
+  for(const width of [1440,1024,768,390]){
+    await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<600});
+    await send('Page.navigate',{url:target});
+    for(let i=0;i<70;i++){if(await evaluate("Boolean(document.querySelector('#overview-content .hero'))"))break;await sleep(100);}
+    await evaluate("document.querySelector('#language').value='zh';document.querySelector('#language').dispatchEvent(new Event('change',{bubbles:true}));");
+    await evaluate("if(document.documentElement.dataset.theme!=='dark')document.querySelector('#theme-toggle').click();");
+    await evaluate("document.querySelector('[data-view=\"connection\"]').click();");
+    const png=await send('Page.captureScreenshot',{format:'png',fromSurface:true,captureBeyondViewport:false});
+    writeFileSync(path.join(out,'clean-'+width+'.png'),Buffer.from(png.data,'base64'));
+  }
+  // Every destination must be usable at both breakpoints, not just the four
+  // representative screenshots. Hidden old pages do not count as navigation.
+  for(const width of [1440,390]){
+    await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<600});
+    await send('Page.navigate',{url:target});
+    for(let i=0;i<70;i++){if(await evaluate("Boolean(document.querySelector('#overview-content .hero'))"))break;await sleep(100);}
+    for(const view of ['overview','services','connection','deployment','devspace','projects','history','diagnostics']){
+      await evaluate("document.querySelector('[data-view="+JSON.stringify(view)+"]').click();");
+      await sleep(35);
+      const report=await evaluate(`(()=>{
+        const root=document.querySelector('.view.active');
+        const panels=[...root.querySelectorAll('.panel')].filter(x=>x.getBoundingClientRect().height>0);
+        const overlap=(a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return x.bottom>y.top+1&&y.bottom>x.top+1&&x.right>y.left+1&&y.right>x.left+1;};
+        return {width:innerWidth,documentWidth:document.documentElement.scrollWidth,view:root?.id,
+          panels:panels.length,overlap:panels.some((x,i)=>panels.slice(i+1).some(y=>overlap(x,y))),
+          heading:document.querySelector('#page-title')?.textContent,
+          ownerCopies:root.querySelectorAll('[data-copy-owner]').length,
+          serviceControls:root.querySelectorAll('[data-service-target]').length,
+          rollbackControls:root.querySelectorAll('[data-action="rollback-runtime"]').length};
+      })()`);
+      const ownsControls=(view==='connection'?report.ownerCopies===1:report.ownerCopies===0)&&
+        (view==='services'?report.serviceControls>=6:report.serviceControls===0)&&
+        (view==='deployment'?report.rollbackControls===1:report.rollbackControls===0);
+      observations.push({name:'full-navigation-'+width+'-'+view,...report,
+        pass:report.width===width&&report.documentWidth<=width&&report.view==='view-'+view&&
+          report.panels>0&&!report.overlap&&ownsControls&&!!report.heading});
+    }
   }
   // Explicit connection and rollback controls are reviewed against a fixture,
   // without ever requesting or handling a real owner credential.
   await evaluate("document.querySelector('[data-view=\"services\"]').click();");
-  const access=await evaluate("({view:document.querySelector('.view.active')?.id,copies:document.querySelectorAll('#services-content [data-copy-url]:not([disabled])').length,ownerButton:!!document.querySelector('#services-content [data-copy-owner]:not([disabled])'),masked:document.querySelector('#services-content').textContent.includes('••••'),hasPublic:document.querySelector('#services-content').textContent.includes('/server/mcp'),serviceActions:document.querySelectorAll('#services-content [data-service-target]').length})");
-  observations.push({name:'mandatory-service-and-access-controls',...access,pass:access.view==='view-services'&&access.copies>=2&&access.ownerButton&&access.masked&&access.hasPublic&&access.serviceActions>=6});
+  const services=await evaluate("({view:document.querySelector('.view.active')?.id,serviceActions:document.querySelectorAll('#services-content [data-service-target]').length,duplicateOwner:!!document.querySelector('#services-content [data-copy-owner]'),duplicateUrls:!!document.querySelector('#services-content [data-copy-url]')})");
+  observations.push({name:'service-controls-no-duplicate-access',...services,pass:services.view==='view-services'&&services.serviceActions>=6&&!services.duplicateOwner&&!services.duplicateUrls});
+  await evaluate("document.querySelector('[data-service-target=\"all\"][data-service-action=\"stop\"]').click();");
+  const serviceGuard=await evaluate("({open:document.querySelector('#confirm-dialog').open,description:document.querySelector('#confirm-description').textContent.includes('all / stop')})");
+  observations.push({name:'destructive-service-action-requires-confirmation',...serviceGuard,pass:serviceGuard.open&&serviceGuard.description});
+  await evaluate("document.querySelector('#confirm-dialog').close('cancel');");
   const accessImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
   writeFileSync(path.join(out,'connection-controls.png'),Buffer.from(accessImage.data,'base64'));
   await evaluate("document.querySelector('[data-view=\"connection\"]').click();");
+  const access=await evaluate("({view:document.querySelector('.view.active')?.id,copies:document.querySelectorAll('#connection-content [data-copy-url]:not([disabled])').length,ownerButton:!!document.querySelector('#connection-content [data-copy-owner]:not([disabled])'),masked:(()=>{const s=document.querySelector('#connection-content [data-copy-owner]')?.previousElementSibling?.querySelector('.code-text')?.textContent||'';return s.length>0&&!/[A-Za-z0-9]/.test(s)})(),hasPublic:document.querySelector('#connection-content').textContent.includes('/server/mcp')})");
+  observations.push({name:'single-connection-and-credential-home',...access,pass:access.view==='view-connection'&&access.copies>=2&&access.ownerButton&&access.masked&&access.hasPublic});
+  const unique=await evaluate("({navigation:document.querySelectorAll('.nav-item').length,sections:document.querySelectorAll('main .view').length,ids:new Set([...document.querySelectorAll('main .view')].map(x=>x.id)).size})");
+  observations.push({name:'unified-information-architecture',...unique,pass:unique.navigation===8&&unique.sections===8&&unique.ids===8});
   const connectionConfig=await evaluate("({view:document.querySelector('.view.active')?.id,roots:!!document.querySelector('#cfg-roots'),port:document.querySelector('#cfg-port')?.value,publicUrl:document.querySelector('#cfg-public')?.value,tunnelMode:document.querySelector('#cfg-tunnel-mode')?.value,modeChoices:document.querySelector('#cfg-tunnel-mode')?.options.length,autoStart:!!document.querySelector('#cfg-autostart'),tunnelToken:!!document.querySelector('#cfg-token'),legacyImport:!!document.querySelector('#legacy-config-file')&&!!document.querySelector('[data-import-legacy]'),save:!!document.querySelector('[data-save-connection]')})");
   observations.push({name:'mandatory-connection-config',...connectionConfig,pass:connectionConfig.view==='view-connection'&&connectionConfig.roots&&connectionConfig.port==='17677'&&connectionConfig.publicUrl.includes('dev.sanqi.org/server')&&connectionConfig.tunnelMode==='Remote'&&connectionConfig.modeChoices===2&&connectionConfig.autoStart&&connectionConfig.tunnelToken&&connectionConfig.legacyImport&&connectionConfig.save});
   await evaluate("document.querySelector('#cfg-tunnel-mode').value='Quick';document.querySelector('#cfg-tunnel-mode').dispatchEvent(new Event('change',{bubbles:true}));");
   const quickMode=await evaluate("({mode:document.querySelector('#cfg-tunnel-mode')?.value,publicDisabled:document.querySelector('#cfg-public')?.disabled,tokenDisabled:document.querySelector('#cfg-token')?.disabled,saveTokenDisabled:document.querySelector('[data-save-tunnel-token]')?.disabled})");
   observations.push({name:'windows-parity-quick-tunnel-selector',...quickMode,pass:quickMode.mode==='Quick'&&quickMode.publicDisabled&&quickMode.tokenDisabled&&quickMode.saveTokenDisabled});
+  await evaluate("document.querySelector('#cfg-port').value='18000';");
   await evaluate("document.querySelector('[data-view=\"devspace\"]').click();");
   const devspaceConfig=await evaluate("({view:document.querySelector('.view.active')?.id,toolMode:document.querySelector('#cfg-tool-mode')?.value,review:!!document.querySelector('#cfg-review-ui'),skills:!!document.querySelector('#cfg-skills'),skillPaths:!!document.querySelector('#cfg-skill-paths'),logLevel:!!document.querySelector('#cfg-log-level'),logFormat:!!document.querySelector('#cfg-log-format'),requestLogs:!!document.querySelector('#cfg-log-requests'),toolLogs:!!document.querySelector('#cfg-log-tools'),shellLogs:!!document.querySelector('#cfg-log-shell'),save:!!document.querySelector('[data-save-devspace]')})");
   observations.push({name:'mandatory-devspace-config',...devspaceConfig,pass:devspaceConfig.view==='view-devspace'&&devspaceConfig.toolMode==='codex'&&devspaceConfig.review&&devspaceConfig.skills&&devspaceConfig.skillPaths&&devspaceConfig.logLevel&&devspaceConfig.logFormat&&devspaceConfig.requestLogs&&devspaceConfig.toolLogs&&devspaceConfig.shellLogs&&devspaceConfig.save});
+  await evaluate("document.querySelector('[data-view=\"connection\"]').click();");
+  const draft=await evaluate("({port:document.querySelector('#cfg-port')?.value,mode:document.querySelector('#cfg-tunnel-mode')?.value,tokenDisabled:document.querySelector('#cfg-token')?.disabled})");
+  observations.push({name:'unsaved-settings-survive-navigation',...draft,pass:draft.port==='18000'&&draft.mode==='Quick'&&draft.tokenDisabled});
+  await evaluate("document.querySelector('#refresh').click();");
+  await sleep(150);
+  const refreshedDraft=await evaluate("({port:document.querySelector('#cfg-port')?.value,mode:document.querySelector('#cfg-tunnel-mode')?.value,paused:document.querySelector('#poll-indicator').classList.contains('is-paused')})");
+  observations.push({name:'manual-refresh-preserves-unsaved-form',...refreshedDraft,pass:refreshedDraft.port==='18000'&&refreshedDraft.mode==='Quick'&&refreshedDraft.paused});
+  await evaluate("document.querySelector('[data-view=\"devspace\"]').click();");
   await evaluate("document.querySelector('[data-view=\"diagnostics\"]').click();");
   const diagnostics=await evaluate("({view:document.querySelector('.view.active')?.id,validate:!!document.querySelector('[data-validate-config]'),doctor:!!document.querySelector('[data-run-doctor]'),config:!!document.querySelector('[data-show-config]'),logs:document.querySelectorAll('[data-load-log]').length,conversation:!!document.querySelector('#conversation-selector'),statePaths:document.querySelector('#diagnostics-content')?.textContent.includes('devspace-state')})");
   observations.push({name:'mandatory-diagnostics-controls',...diagnostics,pass:diagnostics.view==='view-diagnostics'&&diagnostics.validate&&diagnostics.doctor&&diagnostics.config&&diagnostics.logs===2&&diagnostics.conversation&&diagnostics.statePaths});
@@ -121,6 +179,9 @@ try{
   await evaluate("document.querySelector('[data-load-history-form]').click();");
   const loadedForm=await evaluate("({view:document.querySelector('.view.active')?.id,port:document.querySelector('#cfg-port')?.value,publicUrl:document.querySelector('#cfg-public')?.value,tunnelMode:document.querySelector('#cfg-tunnel-mode')?.value})");
   observations.push({name:'windows-style-history-load-into-form',...loadedForm,pass:loadedForm.view==='view-connection'&&loadedForm.port==='17677'&&loadedForm.publicUrl.includes('dev.sanqi.org/server')&&loadedForm.tunnelMode==='Remote'});
+  await evaluate("document.querySelector('[data-view=\"devspace\"]').click();");
+  const staged=await evaluate("({view:document.querySelector('.view.active')?.id,mode:document.querySelector('#cfg-tool-mode')?.value,warning:document.querySelector('#devspace-content')?.textContent.includes('historical snapshot')||document.querySelector('#devspace-content')?.textContent.includes('历史快照')})");
+  observations.push({name:'history-stages-both-config-pages',...staged,pass:staged.view==='view-devspace'&&staged.mode==='minimal'&&staged.warning});
   await evaluate("document.querySelector('[data-view=\"projects\"]').click();");
   for(let i=0;i<40;i++){
     if(await evaluate("Boolean(document.querySelector('#projects-content input[name=\"review-version\"]'))"))break;
@@ -140,11 +201,10 @@ try{
   observations.push({name:'select-specific-rollback',...rollback,pass:rollback.view==='view-deployment'&&rollback.selected==='runtime-local12'&&rollback.preview&&rollback.enabled&&rollback.currentDisabled});
   const noOverlap=await evaluate(`(()=>{
     const panels=[...document.querySelectorAll('#deployment-content .panel')];
-    const action=document.querySelector('#deployment-content .action-zone');
     const overlap=(a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return x.bottom>y.top&&y.bottom>x.top&&x.right>y.left&&y.right>x.left;};
-    return {panels:panels.length,action:!!action,overlap:panels.some(x=>overlap(x,action))};
+    return {panels:panels.length,rollback:!!document.querySelector('#deployment-content [data-action="rollback-runtime"]'),overlap:panels.some((x,i)=>panels.slice(i+1).some(y=>overlap(x,y)))};
   })()`);
-  observations.push({name:'runtime-rollback-layout-not-obstructed',...noOverlap,pass:noOverlap.panels>=3&&noOverlap.action&&!noOverlap.overlap});
+  observations.push({name:'runtime-rollback-layout-not-obstructed',...noOverlap,pass:noOverlap.panels>=5&&noOverlap.rollback&&!noOverlap.overlap});
   const rollbackImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
   writeFileSync(path.join(out,'rollback-selection.png'),Buffer.from(rollbackImage.data,'base64'));
   await evaluate("document.querySelector('[data-action=\"rollback-runtime\"]').click();");
@@ -159,9 +219,9 @@ try{
   await evaluate("document.querySelector('#menu-toggle').click();");
   const drawer=await evaluate("({open:document.querySelector('#sidebar').classList.contains('open'),expanded:document.querySelector('#menu-toggle').getAttribute('aria-expanded'),scrim:!document.querySelector('#mobile-scrim').hidden})");
   observations.push({name:'mobile-drawer',...drawer,pass:drawer.open&&drawer.expanded==='true'&&drawer.scrim});
-  await evaluate("document.querySelector('[data-view=\"activity\"]').click();");
+  await evaluate("document.querySelector('[data-view=\"projects\"]').click();");
   const navigation=await evaluate("({view:document.querySelector('.view.active')?.id,closed:!document.querySelector('#sidebar').classList.contains('open'),heading:document.querySelector('h1')?.textContent})");
-  observations.push({name:'mobile-navigation',...navigation,pass:navigation.view==='view-activity'&&navigation.closed});
+  observations.push({name:'mobile-navigation',...navigation,pass:navigation.view==='view-projects'&&navigation.closed});
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
   await evaluate("document.querySelector('#refresh').focus();");
   const focused=await evaluate("({focused:document.activeElement?.id,outline:getComputedStyle(document.activeElement).outlineStyle})");
