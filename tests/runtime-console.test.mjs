@@ -26,6 +26,11 @@ const fixture=()=>{
   }
   return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+test('nested GitHub Actions runtime checkout does not dirty Control release provenance',()=>{
+  const root=fileURLToPath(new URL('..',import.meta.url));
+  const result=spawnSync('git',['-C',root,'check-ignore','--quiet','runtime-src/package.json'],{encoding:'utf8'});
+  assert.equal(result.status,0,`Nested runtime checkout must be ignored by the Control repository: ${result.stderr}`);
+});
 test('parsing rejects invalid service units and ports',()=>{
   assert.throws(()=>parseOptions(['--serve','99999']),/Invalid --serve/);
   assert.throws(()=>parseOptions(['--service-unit','../evil']),/Invalid service unit/);
