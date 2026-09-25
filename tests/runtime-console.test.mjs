@@ -31,6 +31,30 @@ test('nested GitHub Actions runtime checkout does not dirty Control release prov
   const result=spawnSync('git',['-C',root,'check-ignore','--quiet','runtime-src/package.json'],{encoding:'utf8'});
   assert.equal(result.status,0,`Nested runtime checkout must be ignored by the Control repository: ${result.stderr}`);
 });
+test('release scripts and workflow agree on Control, Runtime and Windows slot versions',()=>{
+  const root=fileURLToPath(new URL('..',import.meta.url));
+  const read=(file)=>readFileSync(path.join(root,file),'utf8');
+  const pkg=JSON.parse(read('package.json'));
+  const dependency=pkg.dependencies['@waishnav/devspace'];
+  const runtimeVersion=/^file:waishnav-devspace-(.+)\.tgz$/.exec(dependency)?.[1];
+  assert.ok(runtimeVersion,`Unexpected packaged Runtime dependency: ${dependency}`);
+  const suffix=/\.local\.(\d+)$/.exec(runtimeVersion)?.[1];
+  assert.ok(suffix,`Unexpected canonical Runtime version: ${runtimeVersion}`);
+  const slot=`windows-beta4-local${suffix}`;
+  const workflow=read('.github/workflows/release.yml');
+  const prepare=read('prepare-offline-windows-runtime.ps1');
+  const packer=read('package-release-windows-payload.ps1');
+  assert.equal(/^VERSION="\$\{1:-([^}]+)\}"/m.exec(read('package-release-linux.sh'))?.[1],pkg.version);
+  assert.equal(/\$Version = '([^']+)'/.exec(read('package-release.ps1'))?.[1],pkg.version);
+  assert.equal(/\$Version = '([^']+)'/.exec(packer)?.[1],pkg.version);
+  assert.equal(/CANONICAL_RUNTIME_REF: (\S+)/.exec(workflow)?.[1],`runtime-${runtimeVersion}`);
+  assert.equal(/CANONICAL_RUNTIME_VERSION: (\S+)/.exec(workflow)?.[1],runtimeVersion);
+  assert.ok(prepare.includes(`$devSpaceVersion = '${runtimeVersion}'`));
+  assert.ok(prepare.includes(`$devSpacePackageName = 'waishnav-devspace-${runtimeVersion}.tgz'`));
+  assert.ok(prepare.includes(`$slotName = '${slot}'`));
+  assert.ok(packer.includes(`runtime/slots/${slot}/READY`));
+  assert.ok(workflow.includes(`DevSpaceControlRuntime-${slot}.tar`));
+});
 test('parsing rejects invalid service units and ports',()=>{
   assert.throws(()=>parseOptions(['--serve','99999']),/Invalid --serve/);
   assert.throws(()=>parseOptions(['--service-unit','../evil']),/Invalid service unit/);
