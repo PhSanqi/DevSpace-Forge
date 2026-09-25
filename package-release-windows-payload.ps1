@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.3.0',
+    [string]$Version = '0.6.1',
     [Parameter(Mandatory = $true)]
     [string]$RuntimePayloadPath
 )
@@ -55,7 +55,7 @@ New-Item -ItemType Directory -Force (Join-Path $stage 'ops') | Out-Null
 foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'control-management.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
     Copy-Item (Join-Path $root ('ops\' + $file)) (Join-Path $stage 'ops') -Force
 }
-& node (Join-Path $root 'ops\write-provenance.mjs') --source-root $root --server-file (Join-Path $stage 'ops\runtime-console.mjs') --package-file (Join-Path $root 'package.json') --output (Join-Path $stage 'control-provenance.json') --version $Version --artifact-id $packageName --strict
+& node (Join-Path $root 'ops\write-provenance.mjs') --source-root $root --server-file (Join-Path $stage 'ops\runtime-console.mjs') --ui-dir (Join-Path $stage 'ops') --package-file (Join-Path $root 'package.json') --output (Join-Path $stage 'control-provenance.json') --version $Version --artifact-id $packageName --strict
 if ($LASTEXITCODE -ne 0) { throw 'Control provenance generation failed.' }
 Copy-Item (Join-Path $root 'update-control-platform-out-of-band.ps1') $stage -Force
 

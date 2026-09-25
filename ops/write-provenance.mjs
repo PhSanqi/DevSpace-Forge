@@ -2,7 +2,7 @@
 // Build-time only: freeze source identity into the deployed artifact.
 import { createHash } from 'node:crypto';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const args=process.argv.slice(2);
@@ -28,6 +28,11 @@ const entry={
   version:value('version')||pkg.version||null,artifact_id:value('artifact-id')||null,
   server_sha256:digest,source_dirty:dirty,built_at:new Date().toISOString()
 };
+const uiDir=value('ui-dir');
+if(uiDir){
+  entry.ui_sha256=Object.fromEntries(['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js']
+    .map((name)=>[name,createHash('sha256').update(readFileSync(join(resolve(uiDir),name))).digest('hex')]));
+}
 mkdirSync(dirname(resolve(output)),{recursive:true});
 writeFileSync(resolve(output),JSON.stringify(entry,null,2)+'\n',{mode:0o644});
 console.log('provenance='+resolve(output)+' commit='+commit+' sha256='+digest);

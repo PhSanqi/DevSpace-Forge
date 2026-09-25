@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.3.0}"
+VERSION="${1:-0.6.1}"
 RUNTIME_PACKAGE="${2:?usage: package-release-linux.sh VERSION RUNTIME_PACKAGE}"
 RUNTIME_SOURCE="${3:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +77,7 @@ chmod 0755 "$STAGE/cloudflared" "$STAGE/runtime/node/bin/node"
 
 DEVSPACE_VERSION="$($STAGE/runtime/node/bin/node -p "require(process.argv[1]).version" "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/package.json")"
 NODE="$STAGE/runtime/node/bin/node"
-"$NODE" "$ROOT/ops/write-provenance.mjs" --source-root "$ROOT" --server-file "$STAGE/ops/runtime-console.mjs" --package-file "$ROOT/package.json" --output "$STAGE/control-provenance.json" --version "$VERSION" --artifact-id "$NAME" --strict
+"$NODE" "$ROOT/ops/write-provenance.mjs" --source-root "$ROOT" --server-file "$STAGE/ops/runtime-console.mjs" --ui-dir "$STAGE/ops" --package-file "$ROOT/package.json" --output "$STAGE/control-provenance.json" --version "$VERSION" --artifact-id "$NAME" --strict
 if [[ -n "$RUNTIME_SOURCE" ]]; then
   "$NODE" "$ROOT/ops/write-provenance.mjs" --source-root "$RUNTIME_SOURCE" --server-file "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/dist/server.js" --package-file "$RUNTIME_SOURCE/package.json" --output "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/runtime-provenance.json" --artifact-id "runtime-$DEVSPACE_VERSION" --strict
 fi

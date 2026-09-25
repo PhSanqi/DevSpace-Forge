@@ -237,6 +237,28 @@ try{
   observations.push({name:'error-state',...error,pass:error.visible});
   const errorImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
   writeFileSync(path.join(out,'error-state.png'),Buffer.from(errorImage.data,'base64'));
+  // A long runtime identifier must remain inside the confirmation dialog on mobile.
+  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  await send('Page.navigate',{url:target});
+  for(let i=0;i<70;i++){if(await evaluate("Boolean(document.querySelector('#overview-content .hero'))"))break;await sleep(100);}
+  await evaluate("document.querySelector('[data-view=\"projects\"]').click();");
+  const longDescription=await evaluate(`(()=>{
+    const dialog=document.querySelector('#confirm-dialog');
+    const description=document.querySelector('#confirm-description');
+    description.textContent='Runtime target: '+ 'a'.repeat(180);
+    dialog.showModal();
+    return {open:dialog.open,descriptionWidth:description.clientWidth,descriptionScrollWidth:description.scrollWidth,
+      dialogWidth:dialog.clientWidth,dialogScrollWidth:dialog.scrollWidth,
+      wrap:getComputedStyle(description).overflowWrap,
+      sidebarHidden:document.querySelector('#sidebar').getBoundingClientRect().right<=0};
+  })()`);
+  observations.push({name:'mobile-long-confirmation-wrap',...longDescription,
+    pass:longDescription.open&&longDescription.sidebarHidden&&longDescription.wrap==='anywhere'&&
+      longDescription.descriptionScrollWidth<=longDescription.descriptionWidth+1&&
+      longDescription.dialogScrollWidth<=longDescription.dialogWidth+1});
+  const longDescriptionImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
+  writeFileSync(path.join(out,'mobile-long-confirmation.png'),Buffer.from(longDescriptionImage.data,'base64'));
+  await evaluate("document.querySelector('#confirm-dialog').close();");
   await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
   const reduced=await evaluate("({matches:matchMedia('(prefers-reduced-motion: reduce)').matches,transition:getComputedStyle(document.querySelector('#sidebar')).transitionDuration})");
   observations.push({name:'reduced-motion',...reduced,pass:reduced.matches&&reduced.transition.split(',').every((x)=>parseFloat(x)===0)});

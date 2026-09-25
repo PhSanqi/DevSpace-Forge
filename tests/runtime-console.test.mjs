@@ -54,6 +54,55 @@ test('runtime identity distinguishes configured pointer from actual running proc
     assert.equal(runtimeInfo(options).provenance.runtime,null,'stale manifests must fail closed');
   }finally{f.clean();}
 });
+test('Control provenance verifies the deployed UI files, not just the backend script',()=>{
+  const f=fixture();
+  try{
+    const bin=path.join(f.root,'bin');
+    mkdirSync(bin,{recursive:true});
+    const backend='control backend';
+    writeFileSync(path.join(bin,'runtime-console.mjs'),backend);
+    const assets=['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'];
+    const digest=(s)=>createHash('sha256').update(s).digest('hex');
+    const ui_sha256=Object.fromEntries(assets.map((name)=>{
+      writeFileSync(path.join(bin,name),name);
+      return [name,digest(name)];
+    }));
+    const controlManifest=path.join(f.root,'control-provenance.json');
+    const entry={git_commit:'a'.repeat(40),server_sha256:digest(backend),ui_sha256};
+    writeFileSync(controlManifest,JSON.stringify(entry));
+    const options={platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
+    assert.equal(runtimeInfo(options).provenance.control.ui_manifest_verified,true);
+    writeFileSync(controlManifest,JSON.stringify({...entry,ui_sha256:null}));
+    assert.equal(runtimeInfo(options).provenance.control,null,'an explicitly malformed UI manifest must not be treated as legacy');
+    writeFileSync(controlManifest,JSON.stringify({...entry,ui_sha256:{...ui_sha256,'runtime-console-ui.js':undefined}}));
+    assert.equal(runtimeInfo(options).provenance.control,null,'a declared UI manifest must contain all three hashes');
+    writeFileSync(controlManifest,JSON.stringify(entry));
+    writeFileSync(controlManifest,JSON.stringify({...entry,source_dirty:true}));
+    assert.equal(runtimeInfo(options).provenance.control,null,'a dirty source cannot attest an exact Git revision');
+    writeFileSync(controlManifest,JSON.stringify(entry));
+    writeFileSync(path.join(bin,assets[0]),'changed UI after packaging');
+    assert.equal(runtimeInfo(options).provenance.control,null,'a mismatched UI asset must invalidate source provenance');
+    writeFileSync(controlManifest,JSON.stringify({git_commit:entry.git_commit,server_sha256:entry.server_sha256}));
+    assert.equal(runtimeInfo(options).provenance.control.ui_manifest_verified,false,'legacy manifests only attest the backend');
+  }finally{f.clean();}
+});
+test('provenance writer includes UI hashes in the frozen artifact',()=>{
+  const f=fixture();
+  try{
+    const bin=path.join(f.root,'ops');
+    mkdirSync(bin,{recursive:true});
+    writeFileSync(path.join(bin,'runtime-console.mjs'),'control backend');
+    for(const name of ['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'])writeFileSync(path.join(bin,name),name);
+    const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+    const output=path.join(f.root,'control-provenance.json');
+    const result=spawnSync(process.execPath,[path.join(repo,'ops','write-provenance.mjs'),'--source-root',repo,
+      '--server-file',path.join(bin,'runtime-console.mjs'),'--ui-dir',bin,'--package-file',path.join(repo,'package.json'),'--output',output],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    const manifest=JSON.parse(readFileSync(output,'utf8'));
+    for(const name of ['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'])
+      assert.equal(manifest.ui_sha256[name],createHash('sha256').update(name).digest('hex'));
+  }finally{f.clean();}
+});
 test('CLI package discovery does not accept unrelated process arguments',()=>{
   const f=fixture();
   try{

@@ -20,6 +20,7 @@
     }
   };
   Object.assign(labels.en,{
+    uiIntegrity:'Control UI integrity',uiVerified:'UI asset hashes verified',uiUnverified:'UI asset hashes not verified',
     accessDesc:'Copy the connection URL or explicitly request an operator credential.',
     noCredentials:'Secrets are excluded from routine diagnostics.',
     publicMcpUrl:'Public MCP endpoint',publicBaseUrl:'Public origin',localMcpUrl:'Local MCP endpoint',
@@ -38,6 +39,7 @@
     access:'Connection & access',accessDesc:'Copy the endpoint and retrieve the owner credential through an explicit local-only action.',
   });
   Object.assign(labels.zh,{
+    uiIntegrity:'控制台页面完整性',uiVerified:'UI 资产哈希已校验',uiUnverified:'UI 资产哈希未校验',
     accessDesc:'复制连接地址，并通过单独确认的操作获取 Owner Password。',
     noCredentials:'常规诊断接口不包含密钥。',
     publicMcpUrl:'公网 MCP 连接地址',publicBaseUrl:'公网入口',localMcpUrl:'本机 MCP 地址',
@@ -378,7 +380,7 @@
     const control=prov.control||{},source=prov.runtime||{};
     const actualRows=[row(t('pid'),actual.pid),row(t('packageRoot'),actual.package_root,true),row(t('version'),actual.version),row(t('serverHash'),actual.server_sha256,true),row(t('source'),actual.evidence)];
     const declaredRows=[row(t('activeSlot'),rt.active_slot),row(t('packageRoot'),rt.package_root,true),row(t('version'),rt.version),row(t('serverHash'),rt.server_sha256,true)];
-    const provenance=[row(t('gitBranch'),source.git_branch||prov.git_branch),row(t('gitCommit'),source.git_commit||prov.git_commit,true),row(t('artifact'),source.artifact_id||prov.artifact_id),row(t('controlVersion'),control.version||prov.control_version),row(t('gitCommit')+' · Control',control.git_commit,true),row(t('origin'),prov.evidence||prov.source)];
+    const provenance=[row(t('gitBranch'),source.git_branch||prov.git_branch),row(t('gitCommit'),source.git_commit||prov.git_commit,true),row(t('artifact'),source.artifact_id||prov.artifact_id),row(t('controlVersion'),control.version||prov.control_version),row(t('gitCommit')+' · Control',control.git_commit,true),row(t('uiIntegrity'),control.ui_manifest_verified===true?t('uiVerified'):t('uiUnverified')),row(t('origin'),prov.evidence||prov.source)];
     const warning=rt.pointer_mismatch?note(t('pointerMismatch')+(rt.hashes_equal?' '+t('hashMatch'):''),'warning'):'';
     const unverified=!source.git_commit&&!prov.git_commit?note(t('noManifest'),'warning'):'';
     return '<div class="panel-grid equal">'+panel(t('actual'),t('sourceInfo'),'<div class="panel-body">'+actualRows.join('')+'</div>')+panel(t('declared'),t('runtimeInfo'),'<div class="panel-body">'+declaredRows.join('')+'</div>')+'</div>'+warning+panel(t('provenance'),t('sourceInfo'),'<div class="panel-body">'+provenance.join('')+unverified+'</div>');

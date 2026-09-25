@@ -119,12 +119,19 @@ function runningPackage(unit,explicitPid) {
     return {pid,packageRoot,evidence:packageRoot?(process.platform==='win32'?'Windows ProcessId + command line':'systemd MainPID + /proc cmdline'):'Process command line is not a DevSpace CLI'};
   }catch{return {pid,packageRoot:'',evidence:'MainPID cmdline unavailable'};}
 }
-function manifest(file,expectedHash) {
+const uiAssets=['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'];
+function manifest(file,expectedHash,uiRoot='') {
   const data=file&&readJson(file);
-  if (!data || typeof data!=='object' || !data.git_commit) return null;
+  if (!data || typeof data!=='object' || !data.git_commit || data.source_dirty===true) return null;
   const commit=String(data.git_commit);
   if (!/^[0-9a-f]{40,64}$/i.test(commit)) return null;
   if (!expectedHash || !data.server_sha256 || data.server_sha256!==expectedHash) return null;
+  const hasUiManifest=Object.hasOwn(data,'ui_sha256');
+  const recordedUi=data.ui_sha256;
+  if(uiRoot&&hasUiManifest){
+    if(!recordedUi||typeof recordedUi!=='object'||Array.isArray(recordedUi)||!uiAssets.every((name)=>
+      /^[0-9a-f]{64}$/i.test(recordedUi[name]||'')&&recordedUi[name]===fileHash(path.join(uiRoot,name))))return null;
+  }
   const result={
     git_branch:clip(data.git_branch||data.source_ref||'',120)||null,
     git_commit:commit,
@@ -133,6 +140,7 @@ function manifest(file,expectedHash) {
     server_sha256:data.server_sha256||null,
     manifest_verified:true,
   };
+  if(uiRoot)result.ui_manifest_verified=hasUiManifest;
   return result;
 }
 export function runtimeInfo(options) {
@@ -149,8 +157,10 @@ export function runtimeInfo(options) {
   const runtimeManifest=options.runtimeManifest || (actual?path.join(actual,'runtime-provenance.json'):'');
   const source=manifest(runtimeManifest,actualHash);
   const controlManifest=options.controlManifest || path.join(options.platformRoot,'control-provenance.json');
-  const controlHash=fileHash(path.join(options.platformRoot,'bin','runtime-console.mjs'))||fileHash(path.join(options.platformRoot,'ops','runtime-console.mjs'));
-  const control=manifest(controlManifest,controlHash);
+  const controlDir=existsSync(path.join(options.platformRoot,'bin','runtime-console.mjs'))?'bin':'ops';
+  const controlRoot=path.join(options.platformRoot,controlDir);
+  const controlHash=fileHash(path.join(controlRoot,'runtime-console.mjs'));
+  const control=manifest(controlManifest,controlHash,controlRoot);
   return {
     active_slot:active||null,previous_slot:previous||null,
     version:declaredVersion||null,package_root:declared||null,server_sha256:declaredHash,
