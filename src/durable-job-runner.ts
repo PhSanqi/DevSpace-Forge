@@ -1,4 +1,4 @@
-import { renameSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { resolveShellCommand } from "./process-platform.js";
 
@@ -16,23 +16,45 @@ function writeMarker(path: string, marker: CompletionMarker): void {
 
 async function main(): Promise<void> {
   const markerPath = process.argv[2];
-  const command = process.argv[3];
+  let command = process.argv[3];
+  const environmentPath = process.argv[4];
   if (!markerPath || command === undefined) {
     throw new Error("durable-job-runner requires marker path and command");
   }
 
-  const shell = resolveShellCommand(command, process.platform, process.env);
+  let environment = process.env;
+  if (environmentPath) {
+    let restored: NodeJS.ProcessEnv;
+    try {
+      const handoff = JSON.parse(readFileSync(environmentPath, "utf8")) as { command?: unknown; env?: NodeJS.ProcessEnv };
+      if (typeof handoff?.command !== "string" || !handoff.env || typeof handoff.env !== "object" || Array.isArray(handoff.env)) {
+        throw new Error("Invalid durable job launch specification");
+      }
+      command = handoff.command;
+      restored = handoff.env;
+    } catch {
+      // JSON parser diagnostics can contain fragments of the environment.
+      throw new Error("Durable job environment hand-off could not be read.");
+    } finally {
+      // Also remove the hand-off when JSON parsing fails. The manager
+      // separately reaps files left by a runner that never reached this point.
+      try { unlinkSync(environmentPath); } catch {}
+    }
+    environment = { ...process.env, ...restored };
+  }
+
+  const shell = resolveShellCommand(command, process.platform, environment);
   const child = process.platform === "win32"
     ? spawn(command, {
         cwd: process.cwd(),
-        env: process.env,
+        env: environment,
         stdio: "inherit",
         windowsHide: true,
         shell: shell.executable,
       })
     : spawn(shell.executable, shell.args, {
         cwd: process.cwd(),
-        env: process.env,
+        env: environment,
         stdio: "inherit",
         windowsHide: true,
       });

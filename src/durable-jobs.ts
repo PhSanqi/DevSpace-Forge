@@ -1,13 +1,16 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   openSync,
   closeSync,
   existsSync,
   mkdirSync,
+  rmdirSync,
   statSync,
   readSync,
   readFileSync,
+  readdirSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,6 +89,69 @@ export interface DurableJobManagerOptions {
 
 const DEFAULT_COMPLETED_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_MAX_COMPLETED_JOBS = 1_000;
+
+export function durableJobSystemdUnitName(id: string): string {
+  return `devspace-job-${id}.service`;
+}
+
+let systemdUserIsolationAvailable: boolean | undefined;
+export function canUseSystemdUserJobIsolation(): boolean {
+  if (process.platform !== "linux") return false;
+  if (process.env.DEVSPACE_DISABLE_SYSTEMD_DURABLE_JOBS === "1") return false;
+  if (systemdUserIsolationAvailable !== undefined) return systemdUserIsolationAvailable;
+  const control = spawnSync("systemctl", ["--user", "show-environment"], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+  const runner = spawnSync("systemd-run", ["--user", "--version"], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+  systemdUserIsolationAvailable = control.status === 0 && runner.status === 0;
+  return systemdUserIsolationAvailable;
+}
+
+function systemdJobUnitActive(id: string): boolean {
+  if (process.platform !== "linux") return false;
+  const result = spawnSync("systemctl", ["--user", "is-active", "--quiet", durableJobSystemdUnitName(id)], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+  if (result.status === 0) return true;
+  if (result.status === 3 || result.status === 4) return false;
+  // A disconnected user bus or a timed-out status query is UNKNOWN, not
+  // evidence that the process has stopped. Preserve the running record.
+  return true;
+}
+
+function stopSystemdJobUnit(id: string): boolean {
+  if (process.platform !== "linux") return false;
+  const result = spawnSync("systemctl", ["--user", "stop", durableJobSystemdUnitName(id)], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+  return result.status === 0;
+}
+
+const CANCELLATION_PENDING = "Cancellation requested; process exit not yet confirmed";
+const TIMEOUT_REASON = "Job exceeded maxRuntimeSeconds";
+
+function processPidActive(pid: number | null): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM (or an indeterminate query) is not evidence of termination.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function trackedJobActive(id: string, pid: number | null): boolean {
+  return systemdJobUnitActive(id) || processPidActive(pid);
+}
+
+function requestTrackedJobStop(id: string, pid: number | null, signal: NodeJS.Signals): void {
+  const stoppedUnit = process.platform === "linux" && stopSystemdJobUnit(id);
+  if (!stoppedUnit && pid) {
+    const processHandle = {
+      pid,
+      kill: (requested?: NodeJS.Signals) => {
+        try { return process.kill(pid, requested); }
+        catch { return false; }
+      },
+    };
+    try { terminateProcessTree(processHandle, signal, true); } catch {}
+  }
+}
 
 export class DurableJobManager {
   private db: Database.Database;
@@ -219,13 +285,42 @@ export class DurableJobManager {
     return join(this.metadataDir, `${id}.exit`);
   }
 
+  private reapOrphanLaunchSpecs(): void {
+    if (process.platform !== "linux") return;
+    // Do not race a launch that has written its hand-off but has not yet
+    // inserted the job row. This directory is the shared launch/switch gate.
+    if (existsSync(join(this.jobsDir, "..", ".runtime-switch-gate"))) return;
+    const cutoffMs = Date.now() - 60_000;
+    for (const name of readdirSync(this.metadataDir)) {
+      const match = /^(job_[0-9a-f]{16})\.env\.json$/.exec(name);
+      if (!match) continue;
+      const path = join(this.metadataDir, name);
+      try {
+        if (statSync(path).mtimeMs > cutoffMs) continue;
+        const row = this.db.prepare("SELECT status FROM durable_jobs WHERE id = ?").get(match[1]) as { status: string } | undefined;
+        if (row?.status === "running" || systemdJobUnitActive(match[1])) continue;
+        unlinkSync(path);
+      } catch {
+        // An unknown unit state or filesystem error is not permission to
+        // remove a potentially live job's launch credentials.
+      }
+    }
+  }
+
   private checkCompletionMarker(id: string): void {
     const markerPath = this.getMarkerPath(id);
     if (existsSync(markerPath)) {
       try {
         const raw = readFileSync(markerPath, "utf8").trim();
         const parsed = JSON.parse(raw) as { exitCode: number; signal: string | null; endedAt: number };
-        const finalStatus = parsed.exitCode === 0 ? "succeeded" : "failed";
+        const row = this.db.prepare("SELECT error FROM durable_jobs WHERE id = ? AND status = 'running'").get(id) as
+          | { error: string | null }
+          | undefined;
+        const finalStatus = row?.error?.startsWith(CANCELLATION_PENDING)
+          ? "cancelled"
+          : row?.error?.startsWith(TIMEOUT_REASON)
+            ? "failed"
+            : parsed.exitCode === 0 ? "succeeded" : "failed";
         this.db
           .prepare(
             `
@@ -234,6 +329,7 @@ export class DurableJobManager {
         `
           )
           .run(finalStatus, parsed.exitCode, parsed.signal, parsed.endedAt, parsed.endedAt, id);
+        try { unlinkSync(join(this.metadataDir, `${id}.env.json`)); } catch {}
       } catch {}
     }
   }
@@ -245,8 +341,22 @@ export class DurableJobManager {
       params.maxRuntimeSeconds && params.maxRuntimeSeconds > 0 ? params.maxRuntimeSeconds : 86400;
     const logPath = join(this.logsDir, `${id}.log`);
     const markerPath = this.getMarkerPath(id);
+    const recordFailedStart = (reason: string): JobRecord => {
+      this.db.prepare(`
+        INSERT INTO durable_jobs (id, workspace_id, workspace_root, command, working_directory, pid, pgid, status, exit_code, signal, log_path, created_at, started_at, ended_at, last_heartbeat, max_runtime_seconds, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, params.workspaceId, params.workspaceRoot, params.command, params.workingDirectory,
+        null, null, "failed", null, null, logPath, now, now, now, now, maxRuntime, reason);
+      return this.getJob(id)!;
+    };
 
-    const outFd = openSync(logPath, "a", 0o600);
+    // mkdir is atomic across the Runtime and Console processes. The Console
+    // holds this gate while checking jobs and switching Runtime; a concurrent
+    // job start must fail closed instead of racing that check.
+    const gate = join(this.jobsDir, "..", ".runtime-switch-gate");
+    try { mkdirSync(gate); }
+    catch { return recordFailedStart("Job start blocked by the runtime switch gate."); }
+    try {
 
     const mergedEnv = {
       ...process.env,
@@ -254,122 +364,129 @@ export class DurableJobManager {
       DEVSPACE_JOB_ID: id,
     };
 
+    const compiledRunnerPath = fileURLToPath(new URL("./durable-job-runner.js", import.meta.url));
+    const sourceRunnerPath = fileURLToPath(new URL("./durable-job-runner.ts", import.meta.url));
+    const runnerPrefix = existsSync(compiledRunnerPath)
+      ? [process.execPath, compiledRunnerPath]
+      : [process.execPath, "--import", "tsx", sourceRunnerPath];
+
     let child;
-    try {
-      const compiledRunnerPath = fileURLToPath(new URL("./durable-job-runner.js", import.meta.url));
-      const sourceRunnerPath = fileURLToPath(new URL("./durable-job-runner.ts", import.meta.url));
-      const runnerArgs = existsSync(compiledRunnerPath)
-        ? [compiledRunnerPath, markerPath, params.command]
-        : ["--import", "tsx", sourceRunnerPath, markerPath, params.command];
-      child = spawn(process.execPath, runnerArgs, {
-        cwd: params.workingDirectory,
-        env: mergedEnv,
-        detached: true,
-        stdio: ["ignore", outFd, outFd],
-        windowsHide: true,
-      });
-    } catch (err: unknown) {
-      closeSync(outFd);
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const insert = this.db.prepare(`
-        INSERT INTO durable_jobs (
-          id, workspace_id, workspace_root, command, working_directory,
-          pid, pgid, status, exit_code, signal, log_path,
-          created_at, started_at, ended_at, last_heartbeat, max_runtime_seconds, error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      insert.run(
-        id,
-        params.workspaceId,
-        params.workspaceRoot,
-        params.command,
-        params.workingDirectory,
-        null,
-        null,
-        "failed",
-        null,
-        null,
-        logPath,
-        now,
-        now,
-        now,
-        now,
-        maxRuntime,
-        errMsg
-      );
-      return this.getJob(id)!;
-    } finally {
-      // Fix finding 2: Close parent FD copy immediately so parent does not leak file descriptors
+    let pid: number | null = null;
+    let pgid: number | null = null;
+    let systemdStarted = false;
+    let startWarning: string | null = null;
+    if (process.platform === "linux") {
+      if (!canUseSystemdUserJobIsolation())
+        return recordFailedStart("Linux user-systemd durable job isolation is unavailable.");
+      const environmentPath = join(this.metadataDir, `${id}.env.json`);
       try {
-        closeSync(outFd);
-      } catch {}
+        writeFileSync(environmentPath, JSON.stringify({ command: params.command, env: mergedEnv }), { mode: 0o600, flag: "wx" });
+        const unit = durableJobSystemdUnitName(id);
+        const result = spawnSync("systemd-run", [
+          "--user", `--unit=${unit}`, "--collect", "--property=Type=exec",
+          `--property=StandardOutput=append:${logPath}`, `--property=StandardError=append:${logPath}`,
+          `--working-directory=${params.workingDirectory}`, ...runnerPrefix, markerPath, "", environmentPath,
+        ], { encoding: "utf8", timeout: 5_000, windowsHide: true });
+        if (result.status === 0 && !result.error) {
+          systemdStarted = true;
+          const shown = spawnSync("systemctl", ["--user", "show", unit, "-p", "MainPID", "--value"], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+          const candidate = Number.parseInt((shown.stdout || "").trim(), 10);
+          pid = Number.isInteger(candidate) && candidate > 0 ? candidate : null;
+          pgid = null;
+        } else {
+          // A timed-out client may have registered a unit; stop it before
+          // discarding the hand-off, and never run a fallback in our cgroup.
+          stopSystemdJobUnit(id);
+          if (systemdJobUnitActive(id)) {
+            // An ambiguous systemctl timeout must remain visible as RUNNING:
+            // otherwise a rollback could kill an untracked live unit.
+            systemdStarted = true;
+            startWarning = "User-systemd launch confirmation failed; unit remains active.";
+            const shown = spawnSync("systemctl", ["--user", "show", unit, "-p", "MainPID", "--value"], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+            const candidate = Number.parseInt((shown.stdout || "").trim(), 10);
+            pid = Number.isInteger(candidate) && candidate > 0 ? candidate : null;
+          } else {
+            try { unlinkSync(environmentPath); } catch {}
+            return recordFailedStart("User-systemd durable job launch failed.");
+          }
+        }
+      } catch {
+        if (!systemdStarted) {
+          stopSystemdJobUnit(id);
+          if (systemdJobUnitActive(id)) {
+            systemdStarted = true;
+            startWarning = "User-systemd launch confirmation failed; unit remains active.";
+          } else {
+            try { unlinkSync(environmentPath); } catch {}
+            return recordFailedStart("User-systemd durable job launch failed.");
+          }
+        }
+      }
     }
 
-    const pid = child.pid ?? null;
-    const pgid = process.platform === "win32" ? null : pid;
-    child.unref();
+    if (process.platform !== "linux") {
+      const outFd = openSync(logPath, "a", 0o600);
+      try {
+        const runnerArgs = existsSync(compiledRunnerPath)
+          ? [compiledRunnerPath, markerPath, params.command]
+          : ["--import", "tsx", sourceRunnerPath, markerPath, params.command];
+        child = spawn(process.execPath, runnerArgs, {
+          cwd: params.workingDirectory, env: mergedEnv, detached: true, stdio: ["ignore", outFd, outFd], windowsHide: true,
+        });
+      } catch (err: unknown) {
+        closeSync(outFd);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const insert = this.db.prepare(`
+          INSERT INTO durable_jobs (id, workspace_id, workspace_root, command, working_directory, pid, pgid, status, exit_code, signal, log_path, created_at, started_at, ended_at, last_heartbeat, max_runtime_seconds, error)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        insert.run(id, params.workspaceId, params.workspaceRoot, params.command, params.workingDirectory, null, null, "failed", null, null, logPath, now, now, now, now, maxRuntime, errMsg);
+        return this.getJob(id)!;
+      } finally {
+        try { closeSync(outFd); } catch {}
+      }
+      pid = child.pid ?? null;
+      pgid = process.platform === "win32" ? null : pid;
+      child.unref();
+    }
 
     const insert = this.db.prepare(`
-      INSERT INTO durable_jobs (
-        id, workspace_id, workspace_root, command, working_directory,
-        pid, pgid, status, exit_code, signal, log_path,
-        created_at, started_at, ended_at, last_heartbeat, max_runtime_seconds, error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO durable_jobs (id, workspace_id, workspace_root, command, working_directory, pid, pgid, status, exit_code, signal, log_path, created_at, started_at, ended_at, last_heartbeat, max_runtime_seconds, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    try {
+      insert.run(id, params.workspaceId, params.workspaceRoot, params.command, params.workingDirectory, pid, pgid, "running", null, null, logPath, now, now, null, now, maxRuntime, startWarning);
+    } catch (error) {
+      // Never leave a live unit untracked if the durable record cannot be written.
+      if (systemdStarted) stopSystemdJobUnit(id);
+      if (child) try { terminateProcessTree(child, "SIGTERM", true); } catch {}
+      throw error;
+    }
 
-    insert.run(
-      id,
-      params.workspaceId,
-      params.workspaceRoot,
-      params.command,
-      params.workingDirectory,
-      pid,
-      pgid,
-      "running",
-      null,
-      null,
-      logPath,
-      now,
-      now,
-      null,
-      now,
-      maxRuntime,
-      null
-    );
-
-    // Fix finding 4: Handle asynchronous spawn error event
-    child.on("error", (err: Error) => {
-      const finishTime = Math.floor(Date.now() / 1000);
-      try {
-        this.db
-          .prepare(
-            `
-          UPDATE durable_jobs SET status = 'failed', error = ?, ended_at = ?, last_heartbeat = ?
-          WHERE id = ? AND status = 'running'
-        `
-          )
-          .run(err.message, finishTime, finishTime, id);
-      } catch {}
-    });
-
-    child.on("close", (code, sig) => {
-      if (!this.db || !this.db.open) return;
-      const finishTime = Math.floor(Date.now() / 1000);
-      const finalStatus =
-        code === 0 ? "succeeded" : sig === "SIGTERM" || sig === "SIGKILL" ? "cancelled" : "failed";
-      try {
-        this.db
-          .prepare(
-            `
-          UPDATE durable_jobs SET status = ?, exit_code = ?, signal = ?, ended_at = ?, last_heartbeat = ?
-          WHERE id = ? AND status = 'running'
-        `
-          )
-          .run(finalStatus, code, sig, finishTime, finishTime, id);
-      } catch {}
-    });
+    if (child) {
+      child.on("error", (err: Error) => {
+        const finishTime = Math.floor(Date.now() / 1000);
+        try {
+          this.db.prepare(`UPDATE durable_jobs SET status = 'failed', error = ?, ended_at = ?, last_heartbeat = ? WHERE id = ? AND status = 'running'`)
+            .run(err.message, finishTime, finishTime, id);
+        } catch {}
+      });
+      child.on("close", (code, sig) => {
+        if (!this.db || !this.db.open) return;
+        const finishTime = Math.floor(Date.now() / 1000);
+        const finalStatus = code === 0 ? "succeeded" : sig === "SIGTERM" || sig === "SIGKILL" ? "cancelled" : "failed";
+        try {
+          this.db.prepare(`UPDATE durable_jobs SET status = ?, exit_code = ?, signal = ?, ended_at = ?, last_heartbeat = ? WHERE id = ? AND status = 'running'`)
+            .run(finalStatus, code, sig, finishTime, finishTime, id);
+        } catch {}
+      });
+    }
 
     return this.getJob(id)!;
+    } finally {
+      // Only the process that successfully created this gate releases it.
+      try { rmdirSync(gate); } catch {}
+    }
   }
 
   public cancelJob(id: string): { success: boolean; message: string; record: JobRecord | null } {
@@ -381,15 +498,18 @@ export class DurableJobManager {
       return { success: false, message: `Job ${id} is already ${record.status}`, record };
     }
 
-    if (record.pid) {
-      const processHandle = {
-        pid: record.pid,
-        kill: (signal?: NodeJS.Signals) => {
-          try { return process.kill(record.pid!, signal); }
-          catch { return false; }
-        },
-      };
-      try { terminateProcessTree(processHandle, "SIGTERM", true); } catch {}
+    // Persist intent before sending signals: a manager restart must not lose
+    // the cancellation request while the process is still terminating.
+    this.db.prepare("UPDATE durable_jobs SET error = ? WHERE id = ? AND status = 'running'")
+      .run(CANCELLATION_PENDING, id);
+    requestTrackedJobStop(id, record.pid, "SIGTERM");
+    if (!trackedJobActive(id, record.pid)) {
+      try { unlinkSync(join(this.metadataDir, `${id}.env.json`)); } catch {}
+    }
+    if (trackedJobActive(id, record.pid)) {
+      // A failed stop must not turn an executing unit into a terminal
+      // database row, which would make the rollback preflight miss it.
+      return { success: false, message: `Job ${id} is still active; cancellation is not yet confirmed`, record: this.getJob(id) };
     }
 
     const now = Math.floor(Date.now() / 1000);
@@ -397,7 +517,7 @@ export class DurableJobManager {
       .prepare(
         `
       UPDATE durable_jobs SET status = 'cancelled', signal = 'SIGTERM', ended_at = ?, last_heartbeat = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'running'
     `
       )
       .run(now, now, id);
@@ -479,16 +599,17 @@ export class DurableJobManager {
         continue;
       }
 
-      const pid = row.pid;
-      let isAlive = false;
-      if (pid) {
-        try {
-          process.kill(pid, 0);
-          isAlive = true;
-        } catch {
-          isAlive = false;
+      const cancellationPending = row.error?.startsWith(CANCELLATION_PENDING) ?? false;
+      const timedOut = row.error?.startsWith(TIMEOUT_REASON) ||
+        Boolean(row.started_at && now - row.started_at > row.max_runtime_seconds);
+      if (cancellationPending || timedOut) {
+        if (timedOut && !cancellationPending) {
+          this.db.prepare("UPDATE durable_jobs SET error = ? WHERE id = ? AND status = 'running'")
+            .run(TIMEOUT_REASON, row.id);
         }
+        requestTrackedJobStop(row.id, row.pid, cancellationPending ? "SIGTERM" : "SIGKILL");
       }
+      const isAlive = trackedJobActive(row.id, row.pid);
 
       if (!isAlive) {
         // Fix finding 1: Double-check marker again before failing
@@ -498,37 +619,25 @@ export class DurableJobManager {
           this.db
             .prepare(
               `
-            UPDATE durable_jobs SET status = 'failed', error = 'Process terminated without exit marker across restart', ended_at = ?, last_heartbeat = ?
-            WHERE id = ?
+            UPDATE durable_jobs SET status = ?, error = ?, ended_at = ?, last_heartbeat = ?
+            WHERE id = ? AND status = 'running'
           `
             )
-            .run(now, now, row.id);
+            .run(cancellationPending ? "cancelled" : "failed",
+              cancellationPending ? CANCELLATION_PENDING :
+                timedOut ? TIMEOUT_REASON : "Process terminated without exit marker across restart",
+              now, now, row.id);
+        }
+        if (!trackedJobActive(row.id, row.pid)) {
+          try { unlinkSync(join(this.metadataDir, `${row.id}.env.json`)); } catch {}
         }
       } else {
-        if (row.started_at && now - row.started_at > row.max_runtime_seconds) {
-          if (row.pid) {
-            const processHandle = {
-              pid: row.pid,
-              kill: (signal?: NodeJS.Signals) => {
-                try { return process.kill(row.pid!, signal); }
-                catch { return false; }
-              },
-            };
-            try { terminateProcessTree(processHandle, "SIGKILL", true); } catch {}
-          }
-          this.db
-            .prepare(
-              `
-            UPDATE durable_jobs SET status = 'failed', error = 'Job exceeded maxRuntimeSeconds', ended_at = ?, last_heartbeat = ?
-            WHERE id = ?
-          `
-            )
-            .run(now, now, row.id);
-        } else {
-          this.db.prepare("UPDATE durable_jobs SET last_heartbeat = ? WHERE id = ?").run(now, row.id);
-        }
+        // A stop request is not proof of process death. Keep the active row
+        // blocking Runtime switches and retry at the next heartbeat.
+        this.db.prepare("UPDATE durable_jobs SET last_heartbeat = ? WHERE id = ? AND status = 'running'").run(now, row.id);
       }
     }
+    this.reapOrphanLaunchSpecs();
   }
 
   public pruneCompleted(now = Math.floor(Date.now() / 1000)): number {
