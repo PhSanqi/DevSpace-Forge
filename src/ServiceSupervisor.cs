@@ -1361,6 +1361,7 @@ namespace DevSpaceControlPlatform
     {
         private const uint JobObjectExtendedLimitInformationClass = 9;
         private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private const uint JobObjectLimitSilentBreakawayOk = 0x00001000;
         private IntPtr handle;
 
         public ChildProcessJob()
@@ -1368,7 +1369,12 @@ namespace DevSpaceControlPlatform
             handle = CreateJobObject(IntPtr.Zero, null);
             if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
             var information = new JobObjectExtendedLimitInformation();
-            information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            // Keep the directly managed DevSpace/Cloudflare processes tied to
+            // the GUI lifetime, but do not inherit that kill-on-close policy
+            // into grandchildren. Durable Runtime jobs must be able to outlive
+            // an unexpected GUI termination.
+            information.BasicLimitInformation.LimitFlags =
+                JobObjectLimitKillOnJobClose | JobObjectLimitSilentBreakawayOk;
             var length = Marshal.SizeOf(typeof(JobObjectExtendedLimitInformation));
             var pointer = Marshal.AllocHGlobal(length);
             try

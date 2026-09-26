@@ -173,3 +173,17 @@ pending/running/cancelling rows; the two most recent OursMemory records are
 terminal `failed` (exit 2). This supersedes the earlier historical claim
 that job_87aa008eaff74745 is *still running*. No production rollback was
 attempted: clean preflight alone is not authorization for switching Runtime.
+
+Windows forced-GUI-close follow-up: the native JobObject now combines
+`KILL_ON_JOB_CLOSE` for the directly assigned DevSpace/Cloudflare processes
+with `SILENT_BREAKAWAY_OK` so Runtime grandchildren do not inherit the GUI
+kill-on-close policy. A Windows integration fixture assigns a real Node parent
+to the JobObject, waits until assignment is complete, then launches a detached
+grandchild. Closing the JobObject kills the direct parent while the grandchild
+survives long enough to write its completion marker. This models the remaining
+unexpected-GUI-termination boundary instead of only testing orderly shutdown.
+
+Cloudflare gateway follow-up: canonical HTTP requests now redirect to the same
+`dev.sanqi.org` URL over HTTPS before origin routing, and all hidden origin
+fetches force `https:`. This prevents an origin-host Always-HTTPS redirect
+from leaking `server-origin.sanqi.org` or `group-origin.sanqi.org` to users.

@@ -10,6 +10,7 @@ import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, 
 import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from '../ops/runtime-jobs-guard.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
+import { gatewayRoute, resolveInstance } from '../ops/cloudflare-gateway-worker.mjs';
 import {
   configHistoryItem, importLegacyQuickConfigCandidate, managementPublicBaseUrl,
   projectChoices, projectDetails, observeProject, restoreConfigHistory, rollbackReview, updateManagedConfig
@@ -27,6 +28,20 @@ const fixture=(prefix='devspace-console-')=>{
   }
   return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+test('Cloudflare gateway preserves canonical hostname on HTTP upgrade and forces HTTPS origin fetch',()=>{
+  assert.equal(resolveInstance('/server/healthz'),'server');
+  assert.equal(resolveInstance('/group/mcp'),'group');
+  const redirected=gatewayRoute('http://dev.sanqi.org/server/healthz?probe=1');
+  assert.equal(redirected.kind,'redirect');
+  assert.equal(redirected.url.href,'https://dev.sanqi.org/server/healthz?probe=1');
+  const routed=gatewayRoute('https://dev.sanqi.org/server/healthz?probe=1');
+  assert.equal(routed.kind,'origin');
+  assert.equal(routed.url.href,'https://server-origin.sanqi.org/server/healthz?probe=1');
+  const oauth=gatewayRoute('https://dev.sanqi.org/.well-known/oauth-protected-resource/server/mcp');
+  assert.equal(oauth.kind,'origin');
+  assert.equal(oauth.url.hostname,'server-origin.sanqi.org');
+  assert.equal(gatewayRoute('https://dev.sanqi.org/unmanaged').kind,'not-found');
+});
 test('release provenance accepts clean source and refuses dirty candidate in strict mode',()=>{
   const temp=mkdtempSync(path.join(tmpdir(),'devspace-provenance-gate-'));
   const repo=path.join(temp,'repo');

@@ -33,6 +33,7 @@ internal static class DevSpaceConfigurationTests
         Run("setup detects existing configuration in place", TestSetupExistingConfiguration);
         Run("setup updates existing installation without reconfiguration", TestSetupUpdateExisting);
         Run("native GUI Runtime stop and restart respect the shared gate", TestNativeGuiRuntimeGate);
+        Run("native JobObject forced close preserves Runtime grandchildren", TestNativeJobObjectBreakaway);
         Run("setup expands offline runtime payload", TestSetupOfflinePayload);
         Run("runtime PATH exposes project Serena and uv tools", TestRuntimeToolPath);
         Run("runtime slot pointer selects isolated node and DevSpace", TestRuntimeSlotSelection);
@@ -410,6 +411,79 @@ internal static class DevSpaceConfigurationTests
             }
             Directory.Delete(root, true);
         }
+    }
+
+    private static void TestNativeJobObjectBreakaway()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-job-breakaway-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var marker = Path.Combine(root, "child-finished.txt");
+        var pidFile = Path.Combine(root, "child-pid.txt");
+        var readyFile = Path.Combine(root, "parent-ready.txt");
+        var goFile = Path.Combine(root, "spawn-child.txt");
+        var childScript = Path.Combine(root, "child.js");
+        var parentScript = Path.Combine(root, "parent.js");
+        File.WriteAllText(childScript,
+            "const fs=require('fs'); const marker=process.argv[2]; " +
+            "setTimeout(()=>fs.writeFileSync(marker,'finished'),1200); setTimeout(()=>{},1800);\n",
+            new UTF8Encoding(false));
+        File.WriteAllText(parentScript,
+            "const fs=require('fs'),{spawn}=require('child_process'); " +
+            "fs.writeFileSync(process.argv[5],'ready'); " +
+            "const launch=()=>{if(!fs.existsSync(process.argv[6]))return setTimeout(launch,25);" +
+            "const c=spawn(process.execPath,[process.argv[2],process.argv[3]],{detached:true,stdio:'ignore'});" +
+            "c.unref();fs.writeFileSync(process.argv[4],String(c.pid));}; launch(); setInterval(()=>{},1000);\n",
+            new UTF8Encoding(false));
+        Process parent = null;
+        Process escapedChild = null;
+        try
+        {
+            parent = Process.Start(new ProcessStartInfo
+            {
+                FileName = RuntimeResolver.ResolveNodePath(root),
+                Arguments = QuoteForTest(parentScript) + " " + QuoteForTest(childScript) + " " +
+                    QuoteForTest(marker) + " " + QuoteForTest(pidFile) + " " +
+                    QuoteForTest(readyFile) + " " + QuoteForTest(goFile),
+                WorkingDirectory = root,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            AssertTrue(parent != null && !parent.HasExited, "JobObject parent started");
+            using (var job = new ChildProcessJob())
+            {
+                for (var i = 0; i < 50 && !File.Exists(readyFile); i++) System.Threading.Thread.Sleep(50);
+                AssertTrue(File.Exists(readyFile), "parent is ready before JobObject assignment");
+                job.Add(parent);
+                File.WriteAllText(goFile, "go");
+                for (var i = 0; i < 50 && !File.Exists(pidFile); i++) System.Threading.Thread.Sleep(50);
+                AssertTrue(File.Exists(pidFile), "parent published grandchild PID");
+                escapedChild = Process.GetProcessById(int.Parse(File.ReadAllText(pidFile).Trim()));
+                job.Dispose(); // model forced GUI close: KILL_ON_JOB_CLOSE fires here
+            }
+            AssertTrue(parent.WaitForExit(3000), "direct managed parent is killed when JobObject closes");
+            for (var i = 0; i < 60 && !File.Exists(marker); i++) System.Threading.Thread.Sleep(50);
+            AssertTrue(File.Exists(marker), "Runtime grandchild survives forced JobObject close");
+            AssertEqual("finished", File.ReadAllText(marker), "escaped child completed after parent kill");
+        }
+        finally
+        {
+            if (parent != null)
+            {
+                try { if (!parent.HasExited) { parent.Kill(); parent.WaitForExit(3000); } } catch { }
+                parent.Dispose();
+            }
+            if (escapedChild != null)
+            {
+                try { if (!escapedChild.HasExited) { escapedChild.Kill(); escapedChild.WaitForExit(3000); } } catch { }
+                escapedChild.Dispose();
+            }
+            Directory.Delete(root, true);
+        }
+    }
+
+    private static string QuoteForTest(string value)
+    {
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
     private static void TestSetupUpdateExisting()
