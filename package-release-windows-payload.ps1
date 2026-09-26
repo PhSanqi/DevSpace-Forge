@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.7',
+    [string]$Version = '0.6.8',
     [Parameter(Mandatory = $true)]
     [string]$RuntimePayloadPath
 )
@@ -51,6 +51,11 @@ Copy-Item -LiteralPath $payload -Destination (Join-Path $stage 'payload\runtime.
 foreach ($file in @('README.md', 'README.zh-CN.md', 'LICENSE')) {
     Copy-Item (Join-Path $root $file) $stage -Force
 }
+foreach ($file in @('PLATFORMS.md', 'CURRENT_TRUTH.md', 'ROADMAP.md')) {
+    Copy-Item (Join-Path $root $file) $stage -Force
+}
+New-Item -ItemType Directory -Force (Join-Path $stage 'docs') | Out-Null
+Copy-Item (Join-Path $root 'docs\releases-and-upgrades.md') (Join-Path $stage 'docs') -Force
 New-Item -ItemType Directory -Force (Join-Path $stage 'ops') | Out-Null
 foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'runtime-jobs-guard.mjs', 'check-runtime-jobs.mjs', 'control-management.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
     Copy-Item (Join-Path $root ('ops\' + $file)) (Join-Path $stage 'ops') -Force

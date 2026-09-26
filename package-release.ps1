@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.7',
+    [string]$Version = '0.6.8',
     [string]$RuntimeBundleRoot,
     [ValidateSet('All', 'Validate', 'Stage', 'Archive')]
     [string]$Phase = 'All'
@@ -65,6 +65,11 @@ if ($Phase -in @('All', 'Stage')) {
     foreach ($file in @('README.md', 'README.zh-CN.md', 'LICENSE')) {
         Copy-Item (Join-Path $root $file) $stage -Force
     }
+    foreach ($file in @('PLATFORMS.md', 'CURRENT_TRUTH.md', 'ROADMAP.md')) {
+        Copy-Item (Join-Path $root $file) $stage -Force
+    }
+    New-Item -ItemType Directory -Force (Join-Path $stage 'docs') | Out-Null
+    Copy-Item (Join-Path $root 'docs\releases-and-upgrades.md') (Join-Path $stage 'docs') -Force
 
     # Developer fallback only. GitHub-hosted Windows runners have 7-Zip and the
     # archive phase reads the runtime directly from $bundleRoot, avoiding a full
@@ -108,7 +113,7 @@ if ($Phase -in @('All', 'Archive')) {
         Push-Location $stage
         try {
             & $sevenZip a -tzip -mx=0 -mmt=on -bd -bb0 $zip `
-                'DevSpaceControlPlatform.exe' 'Setup.exe' 'README.md' 'README.zh-CN.md' 'LICENSE'
+                'DevSpaceControlPlatform.exe' 'Setup.exe' 'README.md' 'README.zh-CN.md' 'LICENSE' 'PLATFORMS.md' 'CURRENT_TRUTH.md' 'ROADMAP.md' 'docs'
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             & $sevenZip t -bd -bb0 $zip
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

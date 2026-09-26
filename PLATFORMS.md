@@ -1,34 +1,20 @@
-# DevSpace Control Platform platform map
+# Platforms and release channels / 平台与版本
 
-## Current versions
+Updated: 2026-09-26. The canonical release line is **DevSpace-Forge Control v0.6.8**, bundling **DevSpace Runtime 1.1.0-beta.4.local.15**. Control and Runtime have independent versions and Git tags; do not infer a deployed version from a checkout or a filename.
 
-| Platform / component | Branch | Version |
+| Deliverable | Git tag / source | Distribution |
 | --- | --- | --- |
-| Windows Control Platform | `main` | `v0.4.0` released; newer main changes pending next release |
-| Windows DevSpace runtime | `runtime/beta4-unified` | deployed and serving `1.1.0-beta.4.local.12` |
-| Linux DevSpace runtime/control | `runtime/beta4-unified` | deployed `1.1.0-beta.4.local.12` |
+| Windows x64 Control + Runtime | `v0.6.8` / Control `main` | `DevSpace-Forge-v0.6.8-win-x64.zip` with `Setup.exe` |
+| Linux x64 Control + Runtime | `v0.6.8` / Control `main` | `DevSpace-Forge-v0.6.8-linux-x64.tar.gz` with `setup-linux.sh` |
+| Shared Runtime source | `runtime-1.1.0-beta.4.local.15` / `runtime/beta4-unified` | Canonical Runtime archive; bundled into both OS packages |
+| Cloudflare path gateway | Control `ops/cloudflare-gateway-worker.mjs` | Independently deployed Worker, not installed by Setup |
 
-The Windows and Linux runtime branches share the same `local.7` Context Intelligence baseline: canonical workspace containment, lazy path-scoped instructions, `context_pack`, Serena semantic queries, bounded reads, compact `run_id` evidence, cached camelCase client compatibility, unborn-repository reviews, and explicit non-zero process logging.
+The Windows and Linux offline packages contain Node.js, the pinned Runtime and cloudflared. They are separate build artifacts from the same Control tag and Runtime tag, with independent SHA-256 sidecars and provenance. The Runtime is not assumed to match a Control version number.
 
-Windows additionally carries official upstream commit `eaf8f3e` for native artifact downloads. Linux keeps its own PTY fallback; Windows deliberately does not import that Linux-specific layer.
+**Deployment is a separate fact.** The Linux Server instance has been verified running Control 0.6.7 and Runtime local15 before this v0.6.8 release; a new GitHub Release does not itself update a deployed machine. The Group Windows machine must be checked separately before claiming its installed version. Maintain the prior verified runtime and backup until an explicit local upgrade/rollback is accepted.
 
-## Source relationships
+The server's independent loopback-only management UI is not a public Cloudflare endpoint. Path-routed public MCP/OAuth use `https://dev.sanqi.org/server` and `https://dev.sanqi.org/group`. The gateway Worker handles HTTP→same-host HTTPS and HSTS; Tunnel origin hostnames are distinct.
 
-- Primary upstream: [Waishnav/devspace](https://github.com/Waishnav/devspace)
-- Context/runtime reference: [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)
-- Serena: [oraios/serena](https://github.com/oraios/serena)
+For version selection, installation, preservation rules and release checks see [Release and upgrade guide](docs/releases-and-upgrades.md). Historical tags/releases are immutable recovery and audit evidence, not alternate current binaries.
 
-`devspace-verge` is a reference for compact output and Serena integration, not the replacement upstream. Official DevSpace contracts remain authoritative.
-
-## Windows installation model
-
-The `v0.3.0` Windows release remains lightweight. Core runtime setup and Serena setup are separate. Existing installations use a side-by-side runtime-slot workflow: prepare and validate a new slot while the current instance remains online, inject the pinned Koffi 3.2.1 Windows native dependency, verify Serena 1.7.0 semantically, then switch a small `active-slot.txt` pointer at cutover time. The final cutover/rollback scripts are offline and fail closed. Runtime/state/secrets remain local and are not committed to Git.
-
-## 中文说明
-
-- Windows 控制器：`main` / `v0.3.0`
-- Windows Runtime：`runtime/beta4-unified` / `1.1.0-beta.4.local.12`，
-  已完成 live/public 复验。
-- Linux Runtime：`runtime/beta4-unified` / `1.1.0-beta.4.local.12`
-
-Windows 和 Linux 共享 `local.7` Context Intelligence；Windows 额外包含官方 Windows native artifact 修复，Linux 则保留 Linux 专用 PTY fallback。Windows `v0.3.0` 对已有实例默认采用旁路 Runtime slot：在线准备、独立验证、指针切换、可立即回滚。`devspace-verge` 是 compact output 和 Serena 语义层的重要参考，但官方 DevSpace 仍是主上游。
+中文：Windows、Linux 是同一产品的两个离线成品包；Control 与 Runtime 各自维护版本和标签。发布新 Release 不代表已经切换生产。不要删除运行中、启动器引用、备份引用或尚待验证的 Runtime。

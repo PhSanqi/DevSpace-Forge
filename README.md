@@ -6,6 +6,15 @@ DevSpace-Forge is the project and release line. Its DevSpace Control Platform tu
 
 Project data stays on your machine. The public surface is the MCP endpoint you explicitly expose through your tunnel.
 
+**Current distribution:** [Control v0.6.8](https://github.com/PhSanqi/DevSpace-Forge/releases/tag/v0.6.8), with the same pinned [Runtime 1.1.0-beta.4.local.15](https://github.com/PhSanqi/DevSpace-Forge/releases/tag/runtime-1.1.0-beta.4.local.15) on Windows and Linux. The Control and Runtime versions are independent. Publishing a release does not upgrade an already running machine.
+
+| Download | Format | Included |
+| --- | --- | --- |
+| Windows x64 | `DevSpace-Forge-v0.6.8-win-x64.zip` | `Setup.exe`, Control UI, Node.js, Runtime, cloudflared |
+| Linux x64 | `DevSpace-Forge-v0.6.8-linux-x64.tar.gz` | `setup-linux.sh`, local management Console, Node.js, Runtime, cloudflared |
+
+Download the matching `.sha256.txt` beside the archive and verify it before installation. See [versions, safe upgrades and cleanup](docs/releases-and-upgrades.md) and the [platform matrix](PLATFORMS.md).
+
 This project is built around the DevSpace ecosystem and maintains its runtime work against both [Waishnav/devspace](https://github.com/Waishnav/devspace) and [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge). See [Upstream projects](#upstream-projects) below.
 
 ## What you get
@@ -20,6 +29,9 @@ This project is built around the DevSpace ecosystem and maintains its runtime wo
 - **Independent review history and rollback.** DevSpace Review checkpoints are separate from normal Git commits and support safe rollback without forcing `git reset --hard`.
 - **Long command evidence without flooding model context.** Full command output stays local while the model receives bounded previews and a stable `run_id`; stored output can be read, tailed, or searched later.
 - **Runtime diagnostics and recovery.** Health checks, effective configuration, `doctor` information, service restart, and side-by-side Runtime slots help diagnose or roll back runtime problems.
+- **Private management UI on Linux.** Independent loopback-only Console for services, connection/configuration history, projects and Review, Runtime versions and rollback, jobs, request diagnostics and Tunnel health. It supports Chinese/English, light/dark and responsive layouts; it is **not** the public MCP endpoint.
+- **Durable work and restart protection.** Stable job identity/status/logs and reconnection. Linux local15 runs long jobs in independent user-systemd units. Runtime switches use an active-job check and shared gate; Windows native GUI and JobObject lifecycle guards have dedicated regression tests.
+- **Optional multi-instance Cloudflare gateway.** Route `/server` and `/group` under one public hostname; HTTP is upgraded to HTTPS on the same host without losing the path/query, with HTTPS origin fetch and HSTS for both. The gateway Worker is deployed separately from the offline installer.
 - **Optional semantic source navigation.** Serena/LSP-backed semantic navigation can be added for symbol-aware source work; it is not required for the basic Control Platform.
 - **No automatic remote push.** Project Git is local unless you explicitly ask the model to push.
 - **Subagents remain disabled** in the current Control Platform product scope.
@@ -35,7 +47,7 @@ The normal setup has four parts:
 
 The first client connection is protected by the locally generated Owner password.
 
-You do **not** need a Cloudflare API key. DevSpace Control Platform does not create or modify Cloudflare account resources for you; the only Cloudflare-side task is creating the Tunnel/public hostname and copying its token.
+You do **not** need a Cloudflare API key for an ordinary remotely-managed Tunnel install. DevSpace Control Platform does not automatically create or modify Cloudflare account resources. The optional **unified multi-instance gateway Worker** is a separate Cloudflare deployment, requiring authorized Cloudflare account access (for example Wrangler OAuth).
 
 ## Windows
 
@@ -77,6 +89,8 @@ After setup, `DevSpaceControlPlatform.exe` manages DevSpace and cloudflared. The
 Starting with v0.6.0, a newly extracted `Setup.exe` looks for an existing Control installation in the current directory, the running Control process, and the current-user startup entry. When one is found, Setup switches to **update existing installation** mode instead of asking you to configure the machine again.
 
 The update keeps the existing `settings.json`, Tunnel token, Owner password, state database, worktrees, and project configuration. It replaces the Control binaries, bundled Runtime, and cloudflared, then restarts Control. Legacy installs pinned to `http2` are migrated to `auto`, allowing cloudflared to choose QUIC or HTTP/2 according to the network instead of forcing TCP/7844 on every start.
+
+Runtime-affecting GUI operations and updates use the shared active-job preflight. Do not force-close an installation during a migration; the native JobObject forced-close test is separate from acceptance on your own installed instance.
 
 ### Windows daily use
 
@@ -135,6 +149,10 @@ systemctl --user restart devspace-control-cloudflared.service
 
 If an existing Linux configuration is detected and no configuration-changing flags are supplied, rerunning `./setup-linux.sh` performs an in-place update: it preserves `config.jsonc`, `auth.json`, the Tunnel token, state, and worktrees while replacing the bundled Runtime, cloudflared, launch scripts, and service definitions. The regenerated Tunnel launcher uses `auto` instead of carrying forward a legacy fixed HTTP/2 launch. Use `--reconfigure` when you intentionally want to enter configuration mode again.
 
+An existing named sidecar instance (such as `server`) uses its own services, for example `devspace-control-server.service`, `devspace-control-server-console.service` and `devspace-server-cloudflared.service`. Inspect its actual instance name and launcher before running commands. Its Console is local-only, usually the MCP port plus one; do not publish that management port through the Tunnel.
+
+Durable jobs in Runtime local15 are supervised independently from the Linux Runtime service. A switch/restart refuses to proceed when an active job exists or when the job store cannot be safely read; this is intentional, not a reason to delete the job database.
+
 ## Cloudflare: exactly what to enter
 
 For a remotely-managed Cloudflare Tunnel:
@@ -147,6 +165,8 @@ For a remotely-managed Cloudflare Tunnel:
 | Tunnel token | Cloudflare remotely-managed Tunnel | stored locally as a protected secret |
 
 In Cloudflare, route the public hostname to the **local Origin**, not to `/mcp`. The MCP client uses the full public `/mcp` URL.
+
+For a unified hostname serving several machines, deploy the separately managed `devspace-gateway` Worker and keep the hidden `server-origin` / `group-origin` Tunnel hosts distinct. Public paths such as `https://dev.sanqi.org/server/mcp` are an example of the path-routed topology. The Worker must preserve MCP/OAuth routes, upgrade HTTP to same-host HTTPS and provide HSTS; it is not part of the basic Tunnel setup.
 
 ## Using it from ChatGPT
 
@@ -217,6 +237,8 @@ powershell -ExecutionPolicy Bypass -File .\build-setup.ps1
 ```
 
 Release packaging is handled by `package-release.ps1`, `package-release-linux.sh`, and the GitHub Actions release workflow. Normal users should use the prebuilt release archives instead.
+
+For the independent Runtime source/tag, artifact checks, version/installed-state distinction, and safe removal of superseded local files, use [the release and cleanup guide](docs/releases-and-upgrades.md). Official historical tags/releases are retained for traceability and rollback, even when their one-off build scripts have been removed from the current source tree.
 
 ## Upstream projects
 

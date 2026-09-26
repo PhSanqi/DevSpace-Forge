@@ -6,6 +6,15 @@ DevSpace-Forge 是项目与 Release 的统一名称；其中的 DevSpace Control
 
 项目文件和运行数据仍然保存在你的电脑上。真正暴露到公网的，是你主动通过 Tunnel 提供的 MCP Endpoint。
 
+**当前发行：** [Control v0.6.8](https://github.com/PhSanqi/DevSpace-Forge/releases/tag/v0.6.8)，Windows/Linux 均内置相同的 [Runtime 1.1.0-beta.4.local.15](https://github.com/PhSanqi/DevSpace-Forge/releases/tag/runtime-1.1.0-beta.4.local.15)。Control 和 Runtime 独立编号；发布新版本不代表已有机器自动升级。
+
+| 下载 | 格式 | 内容 |
+| --- | --- | --- |
+| Windows x64 | `DevSpace-Forge-v0.6.8-win-x64.zip` | `Setup.exe`、Control GUI、Node.js、Runtime、cloudflared |
+| Linux x64 | `DevSpace-Forge-v0.6.8-linux-x64.tar.gz` | `setup-linux.sh`、本地 Web 管理页、Node.js、Runtime、cloudflared |
+
+请同时下载对应的 `.sha256.txt` 校验文件。版本关系、升级与清理原则见[发行与升级指南](docs/releases-and-upgrades.md)和[平台版本表](PLATFORMS.md)。
+
 本项目建立在 DevSpace 生态之上，Runtime 方向持续参考和维护于 [Waishnav/devspace](https://github.com/Waishnav/devspace) 与 [yuezhihuafou/devspace-verge](https://github.com/yuezhihuafou/devspace-verge)。详细说明见后面的[上游项目](#上游项目)。
 
 ## 能做什么
@@ -20,6 +29,9 @@ DevSpace-Forge 是项目与 Release 的统一名称；其中的 DevSpace Control
 - **独立 Review 历史与安全回滚。** DevSpace Review checkpoint 不等同于 Git commit，可以用于检查和回滚，不需要粗暴执行 `git reset --hard`。
 - **长命令完整证据保存在本机。** 模型只收到有界输出和 `run_id`，完整日志可以之后 read / tail / grep，不会因为一次构建输出几万行就把上下文塞满。
 - **Runtime 诊断和恢复。** 可以查看健康状态、有效配置、`doctor` 信息，进行服务重启、旁路 Runtime slot 验证与回滚。
+- **Linux 本地管理网页。** 独立、仅监听 loopback 的 Console，管理服务、连接和配置历史、项目/Review、Runtime 版本与回滚、任务、请求诊断和 Tunnel；支持中英双语、明暗主题和响应式布局。此页面不是公网 MCP 地址。
+- **长任务生命周期保护。** 稳定的 job ID、状态、日志与断线重连。Linux local15 采用独立 user-systemd 单元运行长任务；Runtime 切换需要活动任务检查和共享锁。Windows 原生 GUI 与 JobObject 有专项生命周期回归测试。
+- **可选的统一域名网关。** 在一个域名按 `/server`、`/group` 分流，HTTP 保持原域名/路径/查询参数升级到 HTTPS，隐藏 origin 使用 HTTPS，server/group 均有 HSTS。Worker 与离线安装器独立部署。
 - **可选 Serena / LSP 语义源码导航。** 需要更强 symbol-level 导航时可以安装 Serena，但不是基本运行所必需。
 - **不会自动 push。** 项目 Git 默认只在本地工作，除非你明确要求模型推送远端。
 - **当前 Control 产品范围继续关闭 Subagents。**
@@ -35,7 +47,7 @@ DevSpace-Forge 是项目与 Release 的统一名称；其中的 DevSpace Control
 
 第一次客户端连接还需要使用安装器生成的 Owner password 完成授权。
 
-不需要 Cloudflare API Key。Control Platform 不会替你修改 Cloudflare 账号资源；Cloudflare 侧唯一需要手工做的，就是创建 Tunnel / public hostname，然后复制它的 token。
+普通 remotely-managed Tunnel 安装不需要 Cloudflare API Key；Control 不会擅自修改 Cloudflare 账户配置。可选的**统一多实例 Gateway Worker**是独立的 Cloudflare 部署，需要通过 Wrangler OAuth 等方式获得账户授权。
 
 ## Windows
 
@@ -77,6 +89,8 @@ Cloudflare 本地 Origin   http://127.0.0.1:7677
 从 v0.6.0 开始，新版本解压后的 `Setup.exe` 会依次检查当前目录、正在运行的 Control 进程以及当前用户启动项，自动定位已有安装。检测到已有配置后会直接进入**更新现有安装**模式，不再要求重新填写 Allowed Root、端口、Tunnel hostname 或 token。
 
 更新会保留原来的 `settings.json`、Tunnel token、Owner password、状态数据库、worktree 和项目配置，只替换 Control 程序、Bundled Runtime 与 cloudflared，然后重新启动 Control。历史版本若固定使用 `http2`，更新时会迁移为 `auto`，让 cloudflared 根据当前网络自动选择 QUIC 或 HTTP/2，而不是每次启动都强制走 TCP/7844。
+
+GUI 的 Runtime 停止/重启/更新会执行共享的活动任务检查。不要在安装迁移中强制结束进程；JobObject 的强制退出测试不等于你自己安装环境的全部验收。
 
 ### Windows 日常怎么用
 
@@ -135,6 +149,8 @@ systemctl --user restart devspace-control-cloudflared.service
 
 如果检测到已有 Linux 配置，并且本次没有传入会修改配置的参数，直接再次运行 `./setup-linux.sh` 会自动进入原地更新模式：保留 `config.jsonc`、`auth.json`、Tunnel token、state 和 worktree，只替换 Bundled Runtime、cloudflared、启动脚本与 user service 定义。更新后的 Tunnel 启动器统一使用 `auto`，不会继续继承旧版固定 HTTP/2。只有确实需要重新配置时才使用 `--reconfigure`。
 
+已有命名 sidecar 实例（例如 `server`）的服务名不同，示例为 `devspace-control-server.service`、`devspace-control-server-console.service` 和 `devspace-server-cloudflared.service`。操作前请核对实际实例及启动器。管理 Console 仅在本机访问，不应通过 Tunnel 公开。local15 的长任务在独立 user-systemd 单元中运行，活动任务或不可验证的任务库会阻止 Runtime 切换，这是预期的安全保护。
+
 ## Cloudflare 到底要填什么
 
 使用 remotely-managed Tunnel 时：
@@ -147,6 +163,8 @@ systemctl --user restart devspace-control-cloudflared.service
 | Tunnel token | Cloudflare remotely-managed Tunnel | 作为本地受保护 secret 保存 |
 
 Cloudflare 的 public hostname 要指向**本地 Origin**，不要把 `/mcp` 写到 Origin 里；真正给 ChatGPT / MCP Client 使用的是完整公网 `/mcp` 地址。
+
+多机器共用一个域名时，可另行部署 `devspace-gateway` Worker，用独立的 `server-origin` / `group-origin` Tunnel 入口分流，例如 `https://dev.sanqi.org/server/mcp`。Worker 需保留 MCP/OAuth 路由并提供同域名 HTTPS 升级和 HSTS；普通单实例安装不需要这个 Worker。
 
 ## 在 ChatGPT 里怎么用
 
@@ -217,6 +235,8 @@ powershell -ExecutionPolicy Bypass -File .\build-setup.ps1
 ```
 
 Release 打包由 `package-release.ps1`、`package-release-linux.sh` 和 GitHub Actions workflow 处理。普通用户建议直接下载预编译成品包，不需要自己构建 Runtime。
+
+独立 Runtime 标签、版本与实际安装状态的区别、SHA 校验，以及旧文件安全清理范围见[发行与升级指南](docs/releases-and-upgrades.md)。旧正式 Git 标签/Release 继续保留用于回滚和审计；当前源码中已清理不再被引用的旧版一次性脚本。
 
 ## 上游项目
 
