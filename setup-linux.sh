@@ -200,6 +200,7 @@ mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_D
 install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$ROOT/ops/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
 install -m 0644 "$ROOT/ops/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
+install -m 0644 "$ROOT/ops/runtime-jobs-guard.mjs" "$INSTALL_ROOT/bin/runtime-jobs-guard.mjs"
 install -m 0644 "$ROOT/ops/control-management.mjs" "$INSTALL_ROOT/bin/control-management.mjs"
 install -m 0644 "$ROOT/ops/managed-cloudflared.mjs" "$INSTALL_ROOT/bin/managed-cloudflared.mjs"
 install -m 0644 "$ROOT/ops/prepare-effective-config.mjs" "$INSTALL_ROOT/bin/prepare-effective-config.mjs"

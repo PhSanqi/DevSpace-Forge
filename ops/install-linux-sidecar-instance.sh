@@ -115,6 +115,7 @@ chmod 0700 "$CONFIG_DIR" "$STATE_DIR" "$AGENT_DIR" || true
 install -m 0755 "$SCRIPT_DIR/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$SCRIPT_DIR/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
+install -m 0644 "$SCRIPT_DIR/runtime-jobs-guard.mjs" "$INSTALL_ROOT/bin/runtime-jobs-guard.mjs"
 install -m 0644 "$SCRIPT_DIR/control-management.mjs" "$INSTALL_ROOT/bin/control-management.mjs"
 install -m 0644 "$SCRIPT_DIR/managed-cloudflared.mjs" "$INSTALL_ROOT/bin/managed-cloudflared.mjs"
 install -m 0644 "$SCRIPT_DIR/prepare-effective-config.mjs" "$INSTALL_ROOT/bin/prepare-effective-config.mjs"

@@ -1,8 +1,8 @@
 {
   "private": true,
   "name": "devspace-control-platform-runtime",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "dependencies": {
-    "@waishnav/devspace": "file:waishnav-devspace-1.1.0-beta.4.local.14.tgz"
+    "@waishnav/devspace": "file:waishnav-devspace-1.1.0-beta.4.local.15.tgz"
   }
 }

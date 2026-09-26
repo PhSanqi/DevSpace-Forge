@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.4',
+    [string]$Version = '0.6.5',
     [Parameter(Mandatory = $true)]
     [string]$RuntimePayloadPath
 )
@@ -24,9 +24,9 @@ $entries = @(& tar.exe -tf $payload)
 if ($LASTEXITCODE -ne 0) { throw 'Windows runtime payload is not a readable tar archive.' }
 $required = @(
     'runtime/active-slot.txt',
-    'runtime/slots/windows-beta4-local14/READY',
-    'runtime/slots/windows-beta4-local14/node/node.exe',
-    'runtime/slots/windows-beta4-local14/devspace/node_modules/@waishnav/devspace/package.json',
+    'runtime/slots/windows-beta4-local15/READY',
+    'runtime/slots/windows-beta4-local15/node/node.exe',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/package.json',
     'cloudflared.exe'
 )
 foreach ($item in $required) {
@@ -52,7 +52,7 @@ foreach ($file in @('README.md', 'README.zh-CN.md', 'LICENSE')) {
     Copy-Item (Join-Path $root $file) $stage -Force
 }
 New-Item -ItemType Directory -Force (Join-Path $stage 'ops') | Out-Null
-foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'control-management.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
+foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'runtime-jobs-guard.mjs', 'check-runtime-jobs.mjs', 'control-management.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
     Copy-Item (Join-Path $root ('ops\' + $file)) (Join-Path $stage 'ops') -Force
 }
 & node (Join-Path $root 'ops\write-provenance.mjs') --source-root $root --server-file (Join-Path $stage 'ops\runtime-console.mjs') --ui-dir (Join-Path $stage 'ops') --package-file (Join-Path $root 'package.json') --output (Join-Path $stage 'control-provenance.json') --version $Version --artifact-id $packageName --strict

@@ -32,6 +32,7 @@ internal static class DevSpaceConfigurationTests
         Run("setup normalizes tunnel hostname and MCP links", TestSetupHostnameNormalization);
         Run("setup detects existing configuration in place", TestSetupExistingConfiguration);
         Run("setup updates existing installation without reconfiguration", TestSetupUpdateExisting);
+        Run("native GUI Runtime stop and restart respect the shared gate", TestNativeGuiRuntimeGate);
         Run("setup expands offline runtime payload", TestSetupOfflinePayload);
         Run("runtime PATH exposes project Serena and uv tools", TestRuntimeToolPath);
         Run("runtime slot pointer selects isolated node and DevSpace", TestRuntimeSlotSelection);
@@ -299,6 +300,118 @@ internal static class DevSpaceConfigurationTests
             "existing explicit protocol remains readable until update migration");
     }
 
+    private static void TestNativeGuiRuntimeGate()
+    {
+        var sourceRoot = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
+        var root = Path.Combine(Path.GetTempPath(), "devspace-native-gui-gate-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var gate = Path.Combine(root, "state", "devspace-state", ".runtime-switch-gate");
+        Directory.CreateDirectory(gate);
+        var supervisor = new ServiceSupervisor(root);
+        Process dummyRuntime = null;
+        try
+        {
+            var refusedStop = false;
+            var refusedRestart = false;
+            var refusedAll = false;
+            var refusedRestartAll = false;
+            var refusedShutdown = false;
+            try { supervisor.StopDevSpace(); }
+            catch (InvalidOperationException) { refusedStop = true; }
+            try { supervisor.RestartDevSpace(); }
+            catch (InvalidOperationException) { refusedRestart = true; }
+            try { supervisor.StopAll(); }
+            catch (InvalidOperationException) { refusedAll = true; }
+            try { supervisor.RestartAll(); }
+            catch (InvalidOperationException) { refusedRestartAll = true; }
+            try { supervisor.Dispose(); }
+            catch (InvalidOperationException) { refusedShutdown = true; }
+            AssertTrue(refusedStop && refusedRestart && refusedAll && refusedRestartAll && refusedShutdown,
+                "native GUI Runtime actions and orderly shutdown all reject an existing switch gate");
+            AssertTrue(Directory.Exists(gate), "native GUI must not release another process's gate");
+            Directory.Delete(gate);
+
+            // Now exercise the real packaged JavaScript preflight from the
+            // C# GUI path, not only an artificial competing lock.
+            var ops = Path.Combine(root, "ops");
+            Directory.CreateDirectory(ops);
+            foreach (var file in new[] { "runtime-jobs-guard.mjs", "check-runtime-jobs.mjs" })
+            {
+                File.Copy(Path.Combine(sourceRoot, "ops", file),
+                    Path.Combine(ops, file));
+            }
+            var state = Path.Combine(root, "state", "devspace-state");
+            Action<string> seed = status =>
+            {
+                var p = new ProcessStartInfo
+                {
+                    FileName = RuntimeResolver.ResolveNodePath(root),
+                    Arguments = "\"" + Path.Combine(sourceRoot, "tests", "seed-native-job-store.mjs") +
+                        "\" \"" + state + "\" " + status,
+                    WorkingDirectory = sourceRoot,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true
+                };
+                using (var process = Process.Start(p))
+                {
+                    var error = process.StandardError.ReadToEnd();
+                    process.WaitForExit(10000);
+                    if (process.ExitCode != 0) throw new Exception("native job fixture failed: " + error);
+                }
+            };
+            seed("running");
+            // Use a sacrificial process owned by this test to prove that an
+            // active-job refusal does not just return an error after killing
+            // an existing Runtime process.
+            dummyRuntime = Process.Start(new ProcessStartInfo
+            {
+                FileName = RuntimeResolver.ResolveNodePath(root),
+                Arguments = "-e \"setInterval(()=>{},1000)\"",
+                WorkingDirectory = root,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            AssertTrue(dummyRuntime != null && !dummyRuntime.HasExited, "sacrificial Runtime started");
+            var runtimeField = typeof(ServiceSupervisor).GetField("devSpaceProcess",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            AssertTrue(runtimeField != null, "GUI supervisor Runtime handle field exists");
+            runtimeField.SetValue(supervisor, dummyRuntime);
+            refusedStop = false;
+            refusedRestart = false;
+            refusedAll = false;
+            refusedShutdown = false;
+            try { supervisor.StopDevSpace(); }
+            catch (InvalidOperationException) { refusedStop = true; }
+            try { supervisor.RestartDevSpace(); }
+            catch (InvalidOperationException) { refusedRestart = true; }
+            try { supervisor.StopAll(); }
+            catch (InvalidOperationException) { refusedAll = true; }
+            try { supervisor.Dispose(); }
+            catch (InvalidOperationException) { refusedShutdown = true; }
+            AssertTrue(refusedStop && refusedRestart && refusedAll && refusedShutdown,
+                "active durable job blocks the actual C# GUI preflight and orderly exit");
+            AssertTrue(!dummyRuntime.HasExited, "active-job preflight preserves the actual Runtime process");
+            AssertTrue(!Directory.Exists(gate), "C# GUI must release only its own gate after active-job refusal");
+            seed("succeeded");
+            supervisor.StopDevSpace();
+            AssertTrue(!Directory.Exists(gate), "successful GUI stop releases the switch gate");
+        }
+        finally
+        {
+            if (Directory.Exists(gate)) Directory.Delete(gate);
+            try { supervisor.Dispose(); } catch { }
+            if (dummyRuntime != null)
+            {
+                try { if (!dummyRuntime.HasExited) { dummyRuntime.Kill(); dummyRuntime.WaitForExit(3000); } }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { } // supervisor already disposed the confirmed-stopped handle
+                finally { dummyRuntime.Dispose(); }
+            }
+            Directory.Delete(root, true);
+        }
+    }
+
     private static void TestSetupUpdateExisting()
     {
         var root = Path.Combine(Path.GetTempPath(), "devspace-control-update-existing-" + Guid.NewGuid().ToString("N"));
@@ -361,6 +474,8 @@ internal static class DevSpaceConfigurationTests
 
         Directory.CreateDirectory(Path.Combine(bundle, "payload"));
         File.WriteAllText(Path.Combine(bundle, "README.md"), "new-readme");
+        Directory.CreateDirectory(Path.Combine(bundle, "ops"));
+        File.WriteAllText(Path.Combine(bundle, "ops", "runtime-jobs-guard.mjs"), "candidate-jobs-guard");
         var payload = Path.Combine(bundle, "payload", "runtime.tar");
         var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
         var startInfo = new ProcessStartInfo
@@ -398,6 +513,34 @@ internal static class DevSpaceConfigurationTests
         AssertTrue(Directory.Exists(oldSlot), "previous runtime slot retained for recovery");
         AssertEqual(2, (int)File.ReadAllBytes(Path.Combine(install, "cloudflared.exe"))[0], "cloudflared upgraded");
         AssertEqual("new-readme", File.ReadAllText(Path.Combine(install, "README.md")), "product files upgraded");
+        AssertEqual("candidate-jobs-guard", File.ReadAllText(Path.Combine(install, "ops", "runtime-jobs-guard.mjs")),
+            "runtime jobs guard survives Windows existing-install update");
+
+        // The native installer is outside the Node Console process. It must
+        // respect the same gate before any managed Runtime process is stopped.
+        var gate = Path.Combine(install, "state", "devspace-state", ".runtime-switch-gate");
+        Directory.CreateDirectory(gate);
+        var blocked = false;
+        try { SetupInstaller.UpdateExisting(bundle, install, false); }
+        catch (InvalidOperationException) { blocked = true; }
+        AssertTrue(blocked, "existing shared Runtime switch gate blocks native update");
+        AssertTrue(Directory.Exists(gate), "installer must not delete a gate it did not acquire");
+        AssertEqual("new-slot", File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
+            "blocked native update leaves active Runtime pointer unchanged");
+        Directory.Delete(gate);
+
+        // An existing but unreadable durable-job database also fails closed
+        // rather than treating it as an empty database and killing the job.
+        var jobsDir = Path.Combine(install, "state", "devspace-state", "jobs");
+        Directory.CreateDirectory(jobsDir);
+        File.WriteAllText(Path.Combine(jobsDir, "jobs.sqlite"), "unverifiable test store");
+        blocked = false;
+        try { SetupInstaller.UpdateExisting(bundle, install, false); }
+        catch (Exception) { blocked = true; }
+        AssertTrue(blocked, "unverifiable durable job store blocks native update");
+        AssertTrue(!Directory.Exists(gate), "failed preflight releases only its own temporary gate");
+        AssertEqual("new-slot", File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
+            "failed preflight never modifies the installed Runtime");
     }
 
     private static void TestModernPlan()

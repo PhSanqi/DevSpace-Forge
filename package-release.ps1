@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.4',
+    [string]$Version = '0.6.5',
     [string]$RuntimeBundleRoot,
     [ValidateSet('All', 'Validate', 'Stage', 'Archive')]
     [string]$Phase = 'All'

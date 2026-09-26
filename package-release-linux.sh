@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.6.4}"
+VERSION="${1:-0.6.5}"
 RUNTIME_PACKAGE="${2:?usage: package-release-linux.sh VERSION RUNTIME_PACKAGE}"
 RUNTIME_SOURCE="${3:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,7 @@ mkdir -p "$STAGE/runtime/devspace" "$STAGE/ops" "$DIST/.offline-cache/linux"
 
 cp "$ROOT/setup-linux.sh" "$STAGE/setup-linux.sh"
 cp "$ROOT/ops/runtime-console.sh" "$STAGE/ops/runtime-console.sh"
-cp "$ROOT/ops/runtime-console.mjs" "$ROOT/ops/runtime-rollback.mjs" "$ROOT/ops/control-management.mjs" "$ROOT/ops/managed-cloudflared.mjs" "$ROOT/ops/prepare-effective-config.mjs" "$ROOT/ops/runtime-console-ui.html" "$ROOT/ops/runtime-console-ui.css" "$ROOT/ops/runtime-console-ui.js" "$STAGE/ops/"
+cp "$ROOT/ops/runtime-console.mjs" "$ROOT/ops/runtime-rollback.mjs" "$ROOT/ops/runtime-jobs-guard.mjs" "$ROOT/ops/control-management.mjs" "$ROOT/ops/managed-cloudflared.mjs" "$ROOT/ops/prepare-effective-config.mjs" "$ROOT/ops/runtime-console-ui.html" "$ROOT/ops/runtime-console-ui.css" "$ROOT/ops/runtime-console-ui.js" "$STAGE/ops/"
 cp "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/LICENSE" "$STAGE/"
 chmod 0755 "$STAGE/setup-linux.sh" "$STAGE/ops/runtime-console.sh" "$STAGE/ops/runtime-console.mjs"
 

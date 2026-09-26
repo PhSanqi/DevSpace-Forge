@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using Microsoft.Win32;
@@ -511,21 +512,113 @@ namespace DevSpaceControlPlatform
                 throw new InvalidDataException("现有 Remote Tunnel 配置缺少本地 Token，无法无交互更新。");
             }
 
-            StopManagedRuntimeProcesses(root);
-            ApplyOfflinePayload(sourceRoot, root, true);
-            CopyProductFiles(sourceRoot, root);
-            var versionText = ValidateBundle(root);
+            // The native updater is not behind the Node Console's guard.
+            // Hold the same atomic directory while checking jobs and replacing
+            // the runtime, before the first process is stopped.
+            var restartGate = AcquireRuntimeUpdateGate(root, sourceRoot);
+            try
+            {
+                StopManagedRuntimeProcesses(root);
+                ApplyOfflinePayload(sourceRoot, root, true);
+                CopyProductFiles(sourceRoot, root);
+                var versionText = ValidateBundle(root);
 
             // Previous releases could persist http2 as the compatibility fallback.
             // Auto lets cloudflared select QUIC or HTTP/2 according to the current
             // network instead of pinning every restart to TCP/7844.
-            settings.CloudflaredProtocol = "auto";
-            PlatformSettingsStore.Save(settingsPath, settings);
-            if (applySystemIntegration) ApplyWindowsAutoStart(root, settings.AutoStart);
+                settings.CloudflaredProtocol = "auto";
+                PlatformSettingsStore.Save(settingsPath, settings);
+                if (applySystemIntegration) ApplyWindowsAutoStart(root, settings.AutoStart);
 
-            var result = FinalizeConfiguration(root, settings, versionText, true);
-            if (applySystemIntegration) RememberInstallationRoot(root);
-            return result;
+                var result = FinalizeConfiguration(root, settings, versionText, true);
+                if (applySystemIntegration) RememberInstallationRoot(root);
+                return result;
+            }
+            finally
+            {
+                // Only the updater that acquired this gate removes it. Never
+                // auto-clear a pre-existing gate, even if its owner is gone.
+                Directory.Delete(restartGate);
+            }
+        }
+
+        private static string ManagedRuntimeStateDirectory(string platformRoot)
+        {
+            var fallback = Path.GetFullPath(Path.Combine(platformRoot, "state", "devspace-state"));
+            var config = Path.Combine(platformRoot, "state", "devspace-config", "config.jsonc");
+            if (!File.Exists(config)) return fallback;
+            var raw = File.ReadAllText(config, Encoding.UTF8);
+            // A generated config has a JSON string value; preserve JSONC
+            // comments without attempting to reinterpret arbitrary JavaScript.
+            var matches = Regex.Matches(raw, @"""stateDir""\s*:\s*(""(?:\\.|[^""\\])*"")");
+            if (matches.Count == 0)
+            {
+                if (raw.Contains("\"stateDir\""))
+                    throw new InvalidDataException("Unable to verify the managed Runtime state directory.");
+                return fallback;
+            }
+            if (matches.Count != 1)
+                throw new InvalidDataException("Ambiguous managed Runtime state directory.");
+            var candidate = new JavaScriptSerializer().Deserialize<string>(matches[0].Groups[1].Value);
+            if (string.IsNullOrWhiteSpace(candidate) || !Path.IsPathRooted(candidate))
+                throw new InvalidDataException("The managed Runtime state directory must be absolute.");
+            return Path.GetFullPath(candidate);
+        }
+
+        internal static string AcquireRuntimeUpdateGate(string platformRoot, string bundleRoot)
+        {
+            var stateDir = ManagedRuntimeStateDirectory(platformRoot);
+            Directory.CreateDirectory(stateDir);
+            var proposed = Path.Combine(stateDir, ".runtime-update-gate-" + Guid.NewGuid().ToString("N"));
+            var gate = Path.Combine(stateDir, ".runtime-switch-gate");
+            Directory.CreateDirectory(proposed);
+            try
+            {
+                // Move within one parent is atomic, unlike CreateDirectory
+                // which succeeds even if the target already exists on Windows.
+                Directory.Move(proposed, gate);
+            }
+            catch
+            {
+                Directory.Delete(proposed);
+                throw new InvalidOperationException("Runtime switch gate is held or unavailable; update was not started.");
+            }
+            try
+            {
+                if (Directory.Exists(Path.Combine(stateDir, "jobs")))
+                {
+                    var script = Path.Combine(bundleRoot, "ops", "check-runtime-jobs.mjs");
+                    if (!File.Exists(script))
+                        throw new InvalidDataException("Update payload is missing the durable job preflight.");
+                    var node = RuntimeResolver.ResolveNodePath(platformRoot);
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = node,
+                        Arguments = Quote(script) + " " + Quote(stateDir),
+                        WorkingDirectory = bundleRoot,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    using (var process = Process.Start(psi))
+                    {
+                        if (process == null || !process.WaitForExit(10000))
+                        {
+                            if (process != null) try { process.Kill(); } catch { }
+                            throw new InvalidOperationException("Durable job preflight timed out; update was not started.");
+                        }
+                        if (process.ExitCode != 0)
+                            throw new InvalidOperationException("Durable job state is active or unavailable; update was not started.");
+                    }
+                }
+                return gate;
+            }
+            catch
+            {
+                Directory.Delete(gate);
+                throw;
+            }
         }
 
         private static void CopyProductFiles(string bundleRoot, string targetRoot)
@@ -557,6 +650,8 @@ namespace DevSpaceControlPlatform
             {
                 "runtime-console.mjs",
                 "runtime-rollback.mjs",
+                "runtime-jobs-guard.mjs",
+                "check-runtime-jobs.mjs",
                 "control-management.mjs",
                 "runtime-console-ui.html",
                 "runtime-console-ui.css",

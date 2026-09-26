@@ -36,6 +36,7 @@ New-Item -ItemType Directory -Force (Split-Path $output) | Out-Null
     (Join-Path $PSScriptRoot 'src\RuntimeConsole.cs') `
     (Join-Path $PSScriptRoot 'src\ConversationLogStore.cs') `
     (Join-Path $PSScriptRoot 'src\RuntimeResolver.cs') `
+    (Join-Path $PSScriptRoot 'src\SetupInstaller.cs') `
     (Join-Path $PSScriptRoot 'src\PlatformSettings.cs') `
     (Join-Path $PSScriptRoot 'src\CloudflareTunnelSecretStore.cs') `
     (Join-Path $PSScriptRoot 'src\LegacyQuickConfigImporter.cs') `

@@ -7,6 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
 
 const sha256=(file)=>createHash('sha256').update(readFileSync(file)).digest('hex');
 const pause=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
@@ -67,6 +68,7 @@ export async function switchRuntime({
   if(sha256(path.join(target.package_root,'dist','server.js'))!==expectedHash) {
     return {ok:false,status:409,error:'Selected runtime changed after the preview.'};
   }
+  return withRuntimeRestartGuard(options,async()=>{
   const folder=path.join(root,'state','runtime-rollback');
   mkdirSync(folder,{recursive:true,mode:0o700});
   const id=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomBytes(4).toString('hex');
@@ -130,6 +132,7 @@ export async function switchRuntime({
     }
     return {ok:false,status:500,error:restored?'Rollback failed and the previous launcher was restored.':'Rollback failed; inspect the preserved launcher backup.',reason_code,restored,backup_id:id};
   }
+  });
 }
 
 export async function localRuntimeProbe(options,target) {

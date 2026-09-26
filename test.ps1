@@ -36,6 +36,7 @@ New-Item -ItemType Directory -Force (Split-Path $output) | Out-Null
     (Join-Path $PSScriptRoot 'src\DevSpaceCliRunner.cs') `
     (Join-Path $PSScriptRoot 'src\RuntimeResolver.cs') `
     (Join-Path $PSScriptRoot 'src\RuntimeConsole.cs') `
+    (Join-Path $PSScriptRoot 'src\ServiceSupervisor.cs') `
     (Join-Path $PSScriptRoot 'src\SetupInstaller.cs') `
     (Join-Path $PSScriptRoot 'src\DevSpaceReviewRollback.cs') `
     (Join-Path $PSScriptRoot 'src\ManagedAgentInstructions.cs') `

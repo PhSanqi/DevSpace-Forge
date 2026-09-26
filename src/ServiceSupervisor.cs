@@ -357,14 +357,27 @@ namespace DevSpaceControlPlatform
 
         public void StopAll()
         {
-            StopCloudflare();
-            StopDevSpace();
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            try
+            {
+                // Block before stopping Tunnel: a refusal must leave both
+                // services unchanged, including the current public endpoint.
+                StopDevSpaceCore();
+                StopCloudflare();
+            }
+            finally { Directory.Delete(gate); }
         }
 
         public void RestartAll()
         {
-            StopAll();
-            StartAll();
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            try
+            {
+                StopDevSpaceCore();
+                StopCloudflare();
+                StartAll();
+            }
+            finally { Directory.Delete(gate); }
         }
 
         public void StartDevSpace()
@@ -430,23 +443,57 @@ namespace DevSpaceControlPlatform
 
         public void StopDevSpace()
         {
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            try { StopDevSpaceCore(); }
+            finally { Directory.Delete(gate); }
+        }
+
+        private void StopDevSpaceCore()
+        {
             Process process;
+            lock (sync) process = devSpaceProcess;
+            if (process != null)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill();
+                        if (!process.WaitForExit(3000))
+                            throw new InvalidOperationException("DevSpace process did not exit within the stop timeout.");
+                    }
+                    if (!process.HasExited)
+                        throw new InvalidOperationException("DevSpace process exit could not be confirmed.");
+                }
+                catch (Exception error)
+                {
+                    // Keep the original handle and desired state on failure;
+                    // otherwise a later Runtime switch might proceed while
+                    // an unmanaged old Runtime process remains alive.
+                    throw new InvalidOperationException(
+                        "DevSpace process stop could not be confirmed; Runtime operation was not completed.", error);
+                }
+            }
             lock (sync)
             {
-                process = devSpaceProcess;
-                devSpaceProcess = null;
+                if (ReferenceEquals(devSpaceProcess, process)) devSpaceProcess = null;
                 devSpaceMessage = "已停止";
                 devSpaceDesired = false;
                 devSpaceOriginHealthy = false;
                 consecutiveDevSpaceHealthFailures = 0;
             }
-            StopProcess(process);
+            if (process != null) process.Dispose();
         }
 
         public void RestartDevSpace()
         {
-            StopDevSpace();
-            StartDevSpace();
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            try
+            {
+                StopDevSpaceCore();
+                StartDevSpace();
+            }
+            finally { Directory.Delete(gate); }
         }
 
         public void StartCloudflare()
@@ -1298,8 +1345,10 @@ namespace DevSpaceControlPlatform
 
         public void Dispose()
         {
-            disposing = true;
+            // Refuse a GUI shutdown while the Runtime stop is blocked: the
+            // process JobObject below uses KILL_ON_JOB_CLOSE.
             StopAll();
+            disposing = true;
             if (processJob != null)
             {
                 processJob.Dispose();

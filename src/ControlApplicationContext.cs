@@ -124,7 +124,17 @@ namespace DevSpaceControlPlatform
             if (exiting) return;
             exiting = true;
             statusTimer.Stop();
-            supervisor.Dispose();
+            try { supervisor.Dispose(); }
+            catch (Exception exception)
+            {
+                // Do not close the JobObject and silently kill active jobs
+                // after the common Runtime stop gate rejected the operation.
+                exiting = false;
+                statusTimer.Start();
+                MessageBox.Show(exception.Message, "无法退出：Runtime 长任务或切换锁仍在使用",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             trayIcon.Visible = false;
             trayIcon.Dispose();
             mainForm.AllowApplicationClose();

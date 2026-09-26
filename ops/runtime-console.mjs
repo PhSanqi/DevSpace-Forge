@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { switchRuntime, localRuntimeProbe } from './runtime-rollback.mjs';
+import { runtimeRestartPreflight, withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
 import {
   managementSnapshot, projectDetails, observeProject, rollbackReview,
   updateManagedConfig, setTunnelToken, importLegacyQuickConfigCandidate, setAutostart, serviceAction,
@@ -491,6 +492,8 @@ export function createConsoleServer(options,services={}) {
           const target=rollbackTargets(options,info).find(x=>x.id===request?.target_id);
           if(!target||target.current||target.server_sha256!==request?.expected_sha256||info.actual.pid!==request?.observed_pid)
             return json(res,409,{ok:false,error:'The selected runtime is no longer valid. Refresh and try again.'});
+          const gate=await runtimeRestartPreflight(options);
+          if(!gate.ok)return json(res,gate.status,gate);
           const result=await changeRuntime({
             options,live:info.actual,target,expectedHash:request?.expected_sha256,
             observedPid:request?.observed_pid,
@@ -502,7 +505,9 @@ export function createConsoleServer(options,services={}) {
       }
       const unit=name==='restart-devspace'?options.serviceUnit:name==='restart-tunnel'?options.tunnelUnit:'';
       if(!unit)return json(res,404,{ok:false,error:'Unknown or disabled action.'});
-      const result=restart(unit);
+      const result=name==='restart-devspace'
+        ? await withRuntimeRestartGuard(options,async()=>restart(unit))
+        : restart(unit);
       return json(res,result.status,result);
     }
     return json(res,404,{error:'Not found.'});

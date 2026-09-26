@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
 import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
+import { runtimeRestartPreflight, withRuntimeRestartGuard } from '../ops/runtime-jobs-guard.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
 import {
   configHistoryItem, importLegacyQuickConfigCandidate, managementPublicBaseUrl,
@@ -26,6 +27,156 @@ const fixture=(prefix='devspace-console-')=>{
   }
   return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+test('release provenance accepts clean source and refuses dirty candidate in strict mode',()=>{
+  const temp=mkdtempSync(path.join(tmpdir(),'devspace-provenance-gate-'));
+  const repo=path.join(temp,'repo');
+  const server=path.join(repo,'server.js');
+  const pkg=path.join(repo,'package.json');
+  const out=path.join(temp,'control-provenance.json');
+  mkdirSync(repo,{recursive:true});
+  const git=(...args)=>spawnSync('git',['-C',repo,...args],{encoding:'utf8',timeout:5000,windowsHide:true});
+  const run=(strict)=>spawnSync(process.execPath,[
+    fileURLToPath(new URL('../ops/write-provenance.mjs',import.meta.url)),
+    '--source-root',repo,'--server-file',server,'--package-file',pkg,'--output',out,
+    '--version','test-only','--artifact-id','isolated-test',
+    ...(strict?['--strict']:[]),
+  ],{encoding:'utf8',timeout:8000,windowsHide:true});
+  try{
+    writeFileSync(server,'const candidate = 1;\n');
+    writeFileSync(pkg,JSON.stringify({name:'isolated-test',version:'0.0.0'}));
+    assert.equal(git('init','-q').status,0);
+    assert.equal(git('add','.').status,0);
+    assert.equal(git('-c','user.name=Candidate Test','-c','user.email=test@example.invalid',
+      '-c','commit.gpgsign=false','commit','-q','-m','isolated fixture').status,0);
+    assert.equal(run(true).status,0,'clean source must allow strict provenance');
+    const clean=JSON.parse(readFileSync(out,'utf8'));
+    assert.equal(clean.source_dirty,false);
+    assert.equal(clean.server_sha256,createHash('sha256').update(readFileSync(server)).digest('hex'));
+    writeFileSync(server,'const candidate = 2;\n');
+    const denied=run(true);
+    assert.notEqual(denied.status,0,'uncommitted candidate must not be a strict release');
+    assert.match(denied.stderr,/Refusing dirty release provenance/);
+    assert.equal(run(false).status,0,'an explicitly non-release audit may record dirty source');
+    const audited=JSON.parse(readFileSync(out,'utf8'));
+    assert.equal(audited.source_dirty,true);
+    assert.equal(audited.git_commit,clean.git_commit);
+    assert.equal(audited.server_sha256,createHash('sha256').update(readFileSync(server)).digest('hex'));
+  }finally{rmSync(temp,{recursive:true,force:true});}
+});
+test('read-only job restart gate fails closed for active or unverifiable state',async()=>{
+  const f=fixture();
+  try{
+    const state=path.join(f.root,'devspace-state');
+    const jobs=path.join(state,'jobs');mkdirSync(jobs,{recursive:true});
+    const dbFile=path.join(jobs,'jobs.sqlite');
+    const {DatabaseSync}=await import('node:sqlite');
+    let db=new DatabaseSync(dbFile);
+    db.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_test_1','running');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_test_2','succeeded');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_pending','pending');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_cancelling','cancelling');
+    db.close();
+    const options={platformRoot:f.root,stateDir:state};
+    const blocked=await runtimeRestartPreflight(options);
+    assert.deepEqual(blocked,{ok:false,status:409,reason_code:'active_jobs',active_job_count:3,error:'Durable jobs are running; Runtime operation was not started.'});
+    assert.equal(JSON.stringify(blocked).includes('job_test_1'),false);
+    db=new DatabaseSync(dbFile);
+    db.prepare("UPDATE durable_jobs SET status = 'succeeded' WHERE id = ?").run('job_test_1');
+    db.prepare("UPDATE durable_jobs SET status = 'cancelled' WHERE id IN ('job_pending','job_cancelling')").run();
+    db.close();
+    assert.deepEqual(await runtimeRestartPreflight(options),{ok:true,active_job_count:0});
+    writeFileSync(dbFile,'invalid SQLite');
+    assert.equal((await runtimeRestartPreflight(options)).reason_code,'job_state_unavailable');
+    assert.deepEqual(await runtimeRestartPreflight({platformRoot:path.join(f.root,'fresh')}),{ok:true,active_job_count:0});
+    const damaged=path.join(f.root,'missing-db-state');
+    mkdirSync(path.join(damaged,'jobs'),{recursive:true});
+    assert.equal((await runtimeRestartPreflight({stateDir:damaged})).reason_code,'job_state_unavailable');
+  }finally{f.clean();}
+});
+test('runtime switch gate holds across action and checks active jobs after acquisition',async()=>{
+  const f=fixture();
+  try{
+    const state=path.join(f.root,'devspace-state');
+    const jobs=path.join(state,'jobs');mkdirSync(jobs,{recursive:true});
+    const {DatabaseSync}=await import('node:sqlite');
+    const db=new DatabaseSync(path.join(jobs,'jobs.sqlite'));
+    db.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    const options={platformRoot:f.root,stateDir:state};
+    let release;
+    let entered;
+    const started=new Promise(resolve=>{entered=resolve;});
+    const pending=withRuntimeRestartGuard(options,async()=>{
+      entered();
+      await new Promise(resolve=>{release=resolve;});
+      return {ok:true,status:200};
+    });
+    await started;
+    const lock=path.join(state,'.runtime-switch-gate');
+    assert.equal(existsSync(lock),true);
+    const concurrent=await withRuntimeRestartGuard(options,async()=>({ok:true,status:200}));
+    assert.equal(concurrent.reason_code,'runtime_switch_in_progress');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_late','running');
+    release();
+    assert.equal((await pending).ok,true);
+    assert.equal(existsSync(lock),false);
+    let called=false;
+    const late=await withRuntimeRestartGuard(options,async()=>{called=true;return {ok:true};});
+    assert.equal(late.reason_code,'active_jobs');
+    assert.equal(called,false);
+    assert.equal(existsSync(lock),false);
+    db.close();
+  }finally{f.clean();}
+});
+test('Windows uses the shared job gate without invoking Linux systemd',{skip:process.platform!=='win32'},async()=>{
+  const f=fixture();
+  try{
+    const state=path.join(f.root,'state');
+    let calls=0;
+    const result=await withRuntimeRestartGuard({stateDir:state},async()=>{
+      calls++;
+      assert.equal(existsSync(path.join(state,'.runtime-switch-gate')),true);
+      return {ok:true,status:200};
+    });
+    assert.deepEqual(result,{ok:true,status:200});
+    assert.equal(calls,1);
+    assert.equal(existsSync(path.join(state,'.runtime-switch-gate')),false);
+  }finally{f.clean();}
+});
+test('Console refuses Runtime-affecting actions while durable jobs run, not Tunnel restart',async()=>{
+  const f=fixture();
+  const state=path.join(f.root,'devspace-state');
+  mkdirSync(path.join(state,'jobs'),{recursive:true});
+  const {DatabaseSync}=await import('node:sqlite');
+  const db=new DatabaseSync(path.join(state,'jobs','jobs.sqlite'));
+  db.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+  db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_active','running');
+  db.close();
+  const calls=[];
+  const opts={serve:0,platformRoot:f.root,stateDir:state,explicitRuntimePackage:f.declared,serviceUnit:'devspace-test.service',tunnelUnit:'tunnel-test.service',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
+  const server=createConsoleServer(opts,{snapshot:async()=>({schema_version:2}),restart:unit=>{calls.push(unit);return {ok:true,status:200,unit};},switchRuntime:async()=>{calls.push('rollback');return {ok:true,status:200};}});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const url='http://127.0.0.1:'+server.address().port;
+  try{
+    const token=(await (await fetch(url+'/api/action-token')).json()).token;
+    const headers={origin:url,'x-devspace-console-token':token,'content-type':'application/json'};
+    const post=(route,body={})=>fetch(url+route,{method:'POST',headers,body:JSON.stringify(body)});
+    let response=await post('/api/actions/restart-devspace');
+    assert.equal(response.status,409);
+    assert.equal((await response.json()).reason_code,'active_jobs');
+    response=await post('/api/management/service',{target:'devspace',action:'restart'});
+    assert.equal(response.status,409);
+    assert.equal((await response.json()).reason_code,'active_jobs');
+    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>!x.current);
+    response=await post('/api/actions/rollback-runtime',{target_id:target.id,expected_sha256:target.server_sha256,observed_pid:123});
+    assert.equal(response.status,409);
+    assert.equal((await response.json()).reason_code,'active_jobs');
+    assert.deepEqual(calls,[]);
+    response=await post('/api/actions/restart-tunnel');
+    assert.equal(response.status,200,'Tunnel is independently managed and not blocked by Runtime jobs');
+    assert.deepEqual(calls,['tunnel-test.service']);
+  }finally{await new Promise(resolve=>server.close(resolve));f.clean();}
+});
 test('systemd restart waits for graceful shutdown and classifies timeout without leaking stderr',()=>{
   let observed;
   restartUserService('devspace-test.service',(command,args,options)=>{
@@ -44,6 +195,48 @@ test('systemd restart waits for graceful shutdown and classifies timeout without
     ()=>restartUserService('devspace-test.service',()=>({status:1,stderr:'SECRET_MUST_NOT_APPEAR'})),
     error=>error.message.includes('did not succeed')&&!error.message.includes('SECRET_MUST_NOT_APPEAR')
   );
+});
+test('all packaged Control entry points include the runtime jobs guard dependency',()=>{
+  const root=fileURLToPath(new URL('..',import.meta.url));
+  const read=file=>readFileSync(path.join(root,file),'utf8');
+  for(const file of ['package-release-linux.sh','package-release-windows-payload.ps1','setup-linux.sh','ops/install-linux-sidecar-instance.sh']){
+    assert.match(read(file),/runtime-jobs-guard\.mjs/,`${file} must deliver the imported guard module`);
+  }
+  for(const file of ['ops/runtime-console.mjs','ops/runtime-rollback.mjs','ops/control-management.mjs']){
+    assert.match(read(file),/runtimeRestartPreflight|withRuntimeRestartGuard/,`${file} must protect runtime-affecting operations`);
+  }
+  for(const file of ['package-release-windows-payload.ps1','src/SetupInstaller.cs']){
+    assert.match(read(file),/check-runtime-jobs\.mjs/,`${file} must deliver the native updater preflight`);
+    assert.match(read(file),/runtime-jobs-guard\.mjs/,`${file} must deliver its imported guard`);
+  }
+});
+test('native installer job preflight CLI fails closed on live or unreadable state',async()=>{
+  const f=fixture();
+  const state=path.join(f.root,'durable-state');
+  const script=fileURLToPath(new URL('../ops/check-runtime-jobs.mjs',import.meta.url));
+  const check=()=>spawnSync(process.execPath,[script,state],{encoding:'utf8',timeout:5000,windowsHide:true});
+  try{
+    assert.equal(check().status,0,'a fresh state directory is safe');
+    const jobs=path.join(state,'jobs');mkdirSync(jobs,{recursive:true});
+    const dbPath=path.join(jobs,'jobs.sqlite');
+    const {DatabaseSync}=await import('node:sqlite');
+    const db=new DatabaseSync(dbPath);
+    db.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_running','running');
+    db.close();
+    let result=check();
+    assert.equal(result.status,3,'active job must block a native update');
+    assert.match(result.stderr,/active_jobs/);
+    assert.doesNotMatch(result.stderr,/job_running/,'job identifiers must not leak into installer output');
+    const resumed=new DatabaseSync(dbPath);
+    resumed.prepare("UPDATE durable_jobs SET status = 'succeeded' WHERE id = ?").run('job_running');
+    resumed.close();
+    assert.equal(check().status,0,'completed job no longer blocks');
+    writeFileSync(dbPath,'unreadable fixture');
+    result=check();
+    assert.equal(result.status,3,'corrupt job state must fail closed');
+    assert.match(result.stderr,/job_state_unavailable/);
+  }finally{f.clean();}
 });
 test('nested GitHub Actions runtime checkout does not dirty Control release provenance',()=>{
   const root=fileURLToPath(new URL('..',import.meta.url));
@@ -316,6 +509,21 @@ test('selected runtime switch validates identity and restores launcher on failed
     const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
     const options={platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual};
     const params={options,live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux'};
+    const {DatabaseSync}=await import('node:sqlite');
+    options.stateDir=path.join(f.root,'active-jobs-state');
+    mkdirSync(path.join(options.stateDir,'jobs'),{recursive:true});
+    let jobsDb=new DatabaseSync(path.join(options.stateDir,'jobs','jobs.sqlite'));
+    jobsDb.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    jobsDb.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_running','running');
+    jobsDb.close();
+    const inUse=await switchRuntime({...params,restart:()=>assert.fail('Runtime restart must not run while job is active'),probe:async()=>true});
+    assert.equal(inUse.status,409);
+    assert.equal(inUse.reason_code,'active_jobs');
+    assert.equal(readFileSync(wrapper,'utf8'),original);
+    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
+    jobsDb=new DatabaseSync(path.join(options.stateDir,'jobs','jobs.sqlite'));
+    jobsDb.prepare("UPDATE durable_jobs SET status='succeeded' WHERE id='job_running'").run();
+    jobsDb.close();
     assert.equal((await switchRuntime({...params,expectedHash:'0'.repeat(64)})).status,409);
     assert.equal(readFileSync(wrapper,'utf8'),original);
     assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);

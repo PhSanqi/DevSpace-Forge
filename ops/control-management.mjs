@@ -6,6 +6,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
 
 const BASE_REF='refs/devspace/control-platform/history/base';
 const HEAD_REF='refs/devspace/control-platform/history/head';
@@ -307,6 +308,7 @@ export async function serviceAction(options,target,action) {
   if(!['start','stop','restart'].includes(action))return {ok:false,status:400,error:'Unknown service action.'};
   if(!['devspace','tunnel','all'].includes(target))return {ok:false,status:404,error:'Unknown service target.'};
   if(!options.serviceUnit||(target!=='devspace'&&!options.tunnelUnit))return {ok:false,status:404,error:'Managed service is unavailable.'};
+  const perform=async()=>{
   const mode=loadControlSettings(options).tunnel_mode;
   if(mode==='Quick'){
     if(!options.tunnelUnit)return {ok:false,status:409,error:'Quick Tunnel requires a managed cloudflared service.'};
@@ -357,6 +359,10 @@ export async function serviceAction(options,target,action) {
     if(error)return {ok:false,status:500,error};
   }
   return {ok:true,status:200,target,action};
+  };
+  return target!=='tunnel'&&(action!=='start'||target==='all')
+    ? withRuntimeRestartGuard(options,perform)
+    : perform();
 }
 
 function workspaceRoot(row){return row?.root||row?.workspace_root||'';}
