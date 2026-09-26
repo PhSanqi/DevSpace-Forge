@@ -92,6 +92,14 @@ function packageRootFromCli(cli) {
   const pkg=path.dirname(path.dirname(normalized));
   return existsSync(path.join(pkg,'package.json')) ? pkg : '';
 }
+function directRuntimeId(root,packageRoot) {
+  if(!packageRoot)return '';
+  const absoluteRoot=path.resolve(root);
+  const runtimeRoot=path.dirname(path.dirname(path.dirname(path.resolve(packageRoot))));
+  if(path.dirname(runtimeRoot)!==absoluteRoot)return '';
+  const id=path.basename(runtimeRoot);
+  return /^runtime-local[0-9]+(?:-[A-Za-z0-9_-]+)*$/.test(id)?id:'';
+}
 export function resolveRunningPackage(cmdline) {
   const args=Array.isArray(cmdline) ? cmdline : String(cmdline||'').split('\0');
   for(const entry of args) {
@@ -152,6 +160,8 @@ export function runtimeInfo(options) {
   const actualHash=actual?fileHash(path.join(actual,'dist','server.js')):null;
   const declaredHash=declared?fileHash(path.join(declared,'dist','server.js')):null;
   const pointerMismatch=!!actual&&!!declared&&path.resolve(actual)!==path.resolve(declared);
+  const actualRuntimeId=directRuntimeId(options.platformRoot,actual);
+  const configuredRuntimeId=directRuntimeId(options.platformRoot,declared);
   const actualVersion=actual?readJson(path.join(actual,'package.json'))?.version:null;
   const declaredVersion=declared?readJson(path.join(declared,'package.json'))?.version:null;
   const runtimeManifest=options.runtimeManifest || (actual?path.join(actual,'runtime-provenance.json'):'');
@@ -163,6 +173,8 @@ export function runtimeInfo(options) {
   const control=manifest(controlManifest,controlHash,controlRoot);
   return {
     active_slot:active||null,previous_slot:previous||null,
+    runtime_topology:active?'slot-pointer':actualRuntimeId?'direct-launcher':'unresolved',
+    actual_runtime_id:actualRuntimeId||null,configured_runtime_id:configuredRuntimeId||null,
     version:declaredVersion||null,package_root:declared||null,server_sha256:declaredHash,
     configured:{package_root:declared||null,version:declaredVersion||null,server_sha256:declaredHash},
     actual:{pid:processInfo.pid,package_root:actual||null,version:actualVersion||null,server_sha256:actualHash,evidence:processInfo.evidence},
@@ -177,7 +189,14 @@ function deploymentInfo(options,rt) {
   const backupRoot=path.join(options.platformRoot,'state','backup');
   let backups=[];
   try {backups=readdirSync(backupRoot,{withFileTypes:true}).filter((x)=>x.isDirectory()).map((x)=>x.name).sort().reverse().slice(0,20);}catch{}
-  return {active_slot:rt.active_slot,previous_slot:rt.previous_slot,runtime_root:rt.actual.package_root ? path.dirname(path.dirname(path.dirname(rt.actual.package_root))) : null,configured_runtime_root:rt.package_root ? path.dirname(path.dirname(path.dirname(rt.package_root))) : null,rollback_candidates:rollback,rollback_targets:rollbackTargets(options,rt),backup_root_present:existsSync(backupRoot),recent_backups:backups};
+  return {
+    active_slot:rt.active_slot,previous_slot:rt.previous_slot,
+    runtime_topology:rt.runtime_topology,actual_runtime_id:rt.actual_runtime_id,configured_runtime_id:rt.configured_runtime_id,
+    runtime_root:rt.actual.package_root ? path.dirname(path.dirname(path.dirname(rt.actual.package_root))) : null,
+    configured_runtime_root:rt.package_root ? path.dirname(path.dirname(path.dirname(rt.package_root))) : null,
+    rollback_candidates:rollback,rollback_targets:rollbackTargets(options,rt),
+    backup_root_present:existsSync(backupRoot),recent_backups:backups
+  };
 }
 
 export function rollbackTargets(options,rt=runtimeInfo(options)) {

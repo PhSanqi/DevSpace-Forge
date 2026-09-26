@@ -14,8 +14,8 @@ import {
   projectChoices, projectDetails, observeProject, restoreConfigHistory, rollbackReview, updateManagedConfig
 } from '../ops/control-management.mjs';
 
-const fixture=()=>{
-  const root=mkdtempSync(path.join(tmpdir(),'devspace-console-'));
+const fixture=(prefix='devspace-console-')=>{
+  const root=mkdtempSync(path.join(tmpdir(),prefix));
   const declared=path.join(root,'runtime-local13','node_modules','@waishnav','devspace');
   const actual=path.join(root,'runtime-local13-candidate','node_modules','@waishnav','devspace');
   for(const dir of [declared,actual]){
@@ -69,6 +69,9 @@ test('runtime identity distinguishes configured pointer from actual running proc
     assert.equal(info.version,'1.1.0-beta.4.local.13');
     assert.equal(info.actual.package_root,f.actual);
     assert.equal(info.package_root,f.declared);
+    assert.equal(info.runtime_topology,'direct-launcher');
+    assert.equal(info.actual_runtime_id,'runtime-local13-candidate');
+    assert.equal(info.configured_runtime_id,'runtime-local13');
     assert.equal(info.actual.pid,1234);
     assert.equal(info.pointer_mismatch,true);
     assert.equal(info.hashes_equal,true);
@@ -285,13 +288,18 @@ test('selected runtime switch validates identity and restores launcher on failed
   try{
     const bin=path.join(f.root,'bin');mkdirSync(bin,{recursive:true});
     const wrapper=path.join(bin,'run-devspace');
-    const original='#!/bin/sh\nexec "node" '+JSON.stringify(path.join(f.actual,'dist','cli.js'))+' serve\n';
+    const consoleWrapper=path.join(bin,'run-runtime-console');
+    const original='#!/bin/sh\nexec node '+path.join(f.actual,'dist','cli.js')+' serve\n';
+    const consoleOriginal='#!/bin/sh\nexec node runtime-console.mjs --runtime-package "'+f.actual+'" --serve 17678\n';
     writeFileSync(wrapper,original,{mode:0o700});
+    writeFileSync(consoleWrapper,consoleOriginal,{mode:0o700});
     const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
     const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
-    const params={options:{platformRoot:f.root,serviceUnit:'test-runtime.service'},live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux'};
+    const options={platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual};
+    const params={options,live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux'};
     assert.equal((await switchRuntime({...params,expectedHash:'0'.repeat(64)})).status,409);
     assert.equal(readFileSync(wrapper,'utf8'),original);
+    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
     let restarts=0;
     const failed=await switchRuntime({
       ...params,restart:()=>{restarts++;},
@@ -302,10 +310,39 @@ test('selected runtime switch validates identity and restores launcher on failed
     assert.equal(failed.restored,true);
     assert.equal(restarts,2);
     assert.equal(readFileSync(wrapper,'utf8'),original);
+    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
+    assert.equal(options.explicitRuntimePackage,f.actual);
     const ok=await switchRuntime({...params,restart:()=>{},probe:async()=>true,probeAttempts:2,probeIntervalMs:1});
     assert.equal(ok.status,200);
     assert.match(readFileSync(wrapper,'utf8'),/runtime-local13[\\/]/);
+    assert.match(readFileSync(consoleWrapper,'utf8'),/runtime-local13[\\/]/);
+    assert.doesNotMatch(readFileSync(consoleWrapper,'utf8'),/runtime-local13-candidate[\\/]/);
+    assert.equal(options.explicitRuntimePackage,target.package_root);
     assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-devspace.bak'),'utf8'),original);
+    assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-runtime-console.bak'),'utf8'),consoleOriginal);
+  }finally{f.clean();}
+});
+test('runtime switch supports quoted launchers under space paths and rejects ambiguous launchers',async()=>{
+  const f=fixture('devspace console with spaces-');
+  try{
+    const bin=path.join(f.root,'bin');mkdirSync(bin,{recursive:true});
+    const wrapper=path.join(bin,'run-devspace');
+    const currentCli=path.join(f.actual,'dist','cli.js');
+    const original='#!/bin/sh\nexec "node" "'+currentCli+'" serve\n';
+    writeFileSync(wrapper,original,{mode:0o700});
+    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.actual,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
+    const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
+    const params={options:{platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual},live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux',restart:()=>{},probe:async()=>true,probeAttempts:1,probeIntervalMs:1};
+    const ok=await switchRuntime(params);
+    assert.equal(ok.status,200);
+    assert.match(readFileSync(wrapper,'utf8'),/runtime-local13[\\/]/);
+
+    const ambiguous=original+'# duplicate '+currentCli+'\n';
+    writeFileSync(wrapper,ambiguous,{mode:0o700});
+    const rejected=await switchRuntime(params);
+    assert.equal(rejected.status,409);
+    assert.match(rejected.error,/launcher does not match/i);
+    assert.equal(readFileSync(wrapper,'utf8'),ambiguous);
   }finally{f.clean();}
 });
 test('managed config save preserves unrelated config and creates a restorable history snapshot',()=>{

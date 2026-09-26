@@ -4,7 +4,7 @@
  * The console service remains independent from the runtime being restarted.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -43,11 +43,18 @@ export async function switchRuntime({
   const root=path.resolve(options.platformRoot);
   const launcher=path.join(root,'bin','run-devspace');
   const previous=readFileSync(launcher,'utf8');
-  const currentCli=JSON.stringify(path.join(live.package_root,'dist','cli.js'));
-  const nextCli=JSON.stringify(path.join(target.package_root,'dist','cli.js'));
+  const currentCli=path.join(live.package_root,'dist','cli.js');
+  const nextCli=path.join(target.package_root,'dist','cli.js');
+  const consoleLauncher=path.join(root,'bin','run-runtime-console');
+  const consolePrevious=existsSync(consoleLauncher)?readFileSync(consoleLauncher,'utf8'):null;
+  const consoleHasRuntimeFlag=consolePrevious?.includes('--runtime-package')===true;
+  const currentRuntimeOccurrences=consolePrevious===null?0:consolePrevious.split(live.package_root).length-1;
   const relative=path.relative(root,target.package_root);
   if(previous.split(currentCli).length!==2||!relative||relative==='..'||relative.startsWith('..'+path.sep)||path.isAbsolute(relative)) {
     return {ok:false,status:409,error:'The service launcher does not match the verified live runtime.'};
+  }
+  if(consoleHasRuntimeFlag&&currentRuntimeOccurrences!==1) {
+    return {ok:false,status:409,error:'The console launcher does not match the verified live runtime.'};
   }
   if(sha256(path.join(target.package_root,'dist','server.js'))!==expectedHash) {
     return {ok:false,status:409,error:'Selected runtime changed after the preview.'};
@@ -56,12 +63,23 @@ export async function switchRuntime({
   mkdirSync(folder,{recursive:true,mode:0o700});
   const id=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomBytes(4).toString('hex');
   const backup=path.join(folder,id+'.run-devspace.bak');
+  const consoleBackup=consolePrevious===null?null:path.join(folder,id+'.run-runtime-console.bak');
   const mode=statSync(launcher).mode&0o777;
+  const consoleMode=consolePrevious===null?null:(statSync(consoleLauncher).mode&0o777);
   copyFileSync(launcher,backup);
+  if(consoleBackup)copyFileSync(consoleLauncher,consoleBackup);
   let changed=false;
   try{
     atomicLauncher(launcher,previous.replace(currentCli,nextCli),mode,id);
     changed=true;
+    if(consolePrevious!==null&&consoleHasRuntimeFlag) {
+      atomicLauncher(
+        consoleLauncher,
+        consolePrevious.replace(live.package_root,target.package_root),
+        consoleMode,
+        id+'-console'
+      );
+    }
     await restart(options.serviceUnit);
     let ready=false;
     for(let n=0;n<probeAttempts;n++){
@@ -69,17 +87,26 @@ export async function switchRuntime({
       await pause(probeIntervalMs);
     }
     if(!ready)throw new Error('The target failed live-process and local MCP health checks.');
+    // The Console process intentionally remains independent and is not restarted
+    // with the MCP runtime. Keep its in-memory configured package aligned now;
+    // the persisted run-runtime-console launcher keeps the same value after a
+    // later Console or machine restart.
     writeFileSync(path.join(folder,id+'.json'),JSON.stringify({
       id,target_id:target.id,version:target.version,server_sha256:expectedHash,
       previous_package_root:live.package_root,launcher_backup:backup,
+      console_launcher_backup:consoleBackup,
       completed_at:new Date().toISOString()
     },null,2)+'\n',{flag:'wx',mode:0o600});
+    if(options.explicitRuntimePackage)options.explicitRuntimePackage=target.package_root;
     return {ok:true,status:200,target_id:target.id,version:target.version,backup_id:id,health:'verified'};
   }catch(error){
     let restored=false;
     if(changed){
       try{
         atomicLauncher(launcher,previous,mode,id+'-restore');
+        if(consolePrevious!==null&&consoleHasRuntimeFlag) {
+          atomicLauncher(consoleLauncher,consolePrevious,consoleMode,id+'-console-restore');
+        }
         await restart(options.serviceUnit);
         const previousTarget={package_root:live.package_root};
         for(let n=0;n<probeAttempts;n++){
