@@ -11,9 +11,17 @@ import { spawnSync } from 'node:child_process';
 const sha256=(file)=>createHash('sha256').update(readFileSync(file)).digest('hex');
 const pause=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
 
-function restartUserService(unit) {
-  const result=spawnSync('systemctl',['--user','restart',unit],{encoding:'utf8',timeout:15000,windowsHide:true});
-  if(result.status!==0)throw new Error('The service restart command did not succeed.');
+// A busy Runtime may need longer than 15 seconds to finish a graceful stop.
+// Do not kill the systemctl client while systemd is still completing a
+// restart: that races the automatic launcher restoration against the
+// outstanding start job.
+export const RUNTIME_SERVICE_RESTART_TIMEOUT_MS=120_000;
+export function restartUserService(unit,runner=spawnSync) {
+  const result=runner('systemctl',['--user','restart',unit],{
+    encoding:'utf8',timeout:RUNTIME_SERVICE_RESTART_TIMEOUT_MS,windowsHide:true
+  });
+  if(result.error?.code==='ETIMEDOUT')throw new Error('The service restart confirmation timed out.');
+  if(result.error||result.status!==0)throw new Error('The service restart command did not succeed.');
 }
 
 function processForService(unit) {
@@ -100,6 +108,11 @@ export async function switchRuntime({
     if(options.explicitRuntimePackage)options.explicitRuntimePackage=target.package_root;
     return {ok:true,status:200,target_id:target.id,version:target.version,backup_id:id,health:'verified'};
   }catch(error){
+    const reason_code=error?.message==='The service restart confirmation timed out.'
+      ? 'restart_timeout'
+      : error?.message==='The target failed live-process and local MCP health checks.'
+        ? 'target_not_healthy'
+        : 'switch_failed';
     let restored=false;
     if(changed){
       try{
@@ -115,7 +128,7 @@ export async function switchRuntime({
         }
       }catch{}
     }
-    return {ok:false,status:500,error:restored?'Rollback failed and the previous launcher was restored.':'Rollback failed; inspect the preserved launcher backup.',restored,backup_id:id};
+    return {ok:false,status:500,error:restored?'Rollback failed and the previous launcher was restored.':'Rollback failed; inspect the preserved launcher backup.',reason_code,restored,backup_id:id};
   }
 }
 

@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
-import { switchRuntime } from '../ops/runtime-rollback.mjs';
+import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
 import {
   configHistoryItem, importLegacyQuickConfigCandidate, managementPublicBaseUrl,
@@ -26,6 +26,25 @@ const fixture=(prefix='devspace-console-')=>{
   }
   return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+test('systemd restart waits for graceful shutdown and classifies timeout without leaking stderr',()=>{
+  let observed;
+  restartUserService('devspace-test.service',(command,args,options)=>{
+    observed={command,args,options};
+    return {status:0};
+  });
+  assert.equal(observed.command,'systemctl');
+  assert.deepEqual(observed.args,['--user','restart','devspace-test.service']);
+  assert.equal(observed.options.timeout,RUNTIME_SERVICE_RESTART_TIMEOUT_MS);
+  assert.ok(RUNTIME_SERVICE_RESTART_TIMEOUT_MS>=90_000);
+  assert.throws(
+    ()=>restartUserService('devspace-test.service',()=>({status:null,error:{code:'ETIMEDOUT'}})),
+    /restart confirmation timed out/
+  );
+  assert.throws(
+    ()=>restartUserService('devspace-test.service',()=>({status:1,stderr:'SECRET_MUST_NOT_APPEAR'})),
+    error=>error.message.includes('did not succeed')&&!error.message.includes('SECRET_MUST_NOT_APPEAR')
+  );
+});
 test('nested GitHub Actions runtime checkout does not dirty Control release provenance',()=>{
   const root=fileURLToPath(new URL('..',import.meta.url));
   const result=spawnSync('git',['-C',root,'check-ignore','--quiet','runtime-src/package.json'],{encoding:'utf8'});
@@ -308,7 +327,21 @@ test('selected runtime switch validates identity and restores launcher on failed
     });
     assert.equal(failed.status,500);
     assert.equal(failed.restored,true);
+    assert.equal(failed.reason_code,'target_not_healthy');
     assert.equal(restarts,2);
+    assert.equal(readFileSync(wrapper,'utf8'),original);
+    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
+    assert.equal(options.explicitRuntimePackage,f.actual);
+    let timeoutRestarts=0;
+    const timedOut=await switchRuntime({
+      ...params,
+      restart:()=>{if(++timeoutRestarts===1)throw new Error('The service restart confirmation timed out.');},
+      probe:async()=>true,probeAttempts:1,probeIntervalMs:1
+    });
+    assert.equal(timedOut.status,500);
+    assert.equal(timedOut.reason_code,'restart_timeout');
+    assert.equal(timedOut.restored,true);
+    assert.equal(timeoutRestarts,2);
     assert.equal(readFileSync(wrapper,'utf8'),original);
     assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
     assert.equal(options.explicitRuntimePackage,f.actual);

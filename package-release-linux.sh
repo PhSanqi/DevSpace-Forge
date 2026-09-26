@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.6.3}"
+VERSION="${1:-0.6.4}"
 RUNTIME_PACKAGE="${2:?usage: package-release-linux.sh VERSION RUNTIME_PACKAGE}"
 RUNTIME_SOURCE="${3:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
