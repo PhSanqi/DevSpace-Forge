@@ -10,7 +10,7 @@ import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, 
 import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from '../ops/runtime-jobs-guard.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
-import { gatewayRoute, resolveInstance } from '../ops/cloudflare-gateway-worker.mjs';
+import { gatewayRoute, resolveInstance, withGatewaySecurityHeaders } from '../ops/cloudflare-gateway-worker.mjs';
 import {
   configHistoryItem, importLegacyQuickConfigCandidate, managementPublicBaseUrl,
   projectChoices, projectDetails, observeProject, restoreConfigHistory, rollbackReview, updateManagedConfig
@@ -41,6 +41,23 @@ test('Cloudflare gateway preserves canonical hostname on HTTP upgrade and forces
   assert.equal(oauth.kind,'origin');
   assert.equal(oauth.url.hostname,'server-origin.sanqi.org');
   assert.equal(gatewayRoute('https://dev.sanqi.org/unmanaged').kind,'not-found');
+});
+test('Cloudflare gateway adds HSTS to proxied group responses without changing streaming, status or OAuth headers',async()=>{
+  const original=new Response('event: ready\n\n',{
+    status:200,
+    headers:{'content-type':'text/event-stream','cache-control':'no-cache','www-authenticate':'Bearer resource_metadata="https://dev.sanqi.org/.well-known/oauth-protected-resource/group/mcp"'}
+  });
+  const hardened=withGatewaySecurityHeaders(original);
+  assert.equal(hardened.status,200);
+  assert.equal(hardened.headers.get('strict-transport-security'),'max-age=3600');
+  assert.equal(hardened.headers.get('content-type'),'text/event-stream');
+  assert.equal(hardened.headers.get('cache-control'),'no-cache');
+  assert.equal(hardened.headers.get('www-authenticate'),original.headers.get('www-authenticate'));
+  assert.equal(await hardened.text(),'event: ready\n\n');
+  const unauthorized=withGatewaySecurityHeaders(new Response(null,{status:401,headers:{'www-authenticate':'Bearer'}}));
+  assert.equal(unauthorized.status,401);
+  assert.equal(unauthorized.headers.get('www-authenticate'),'Bearer');
+  assert.equal(unauthorized.headers.get('strict-transport-security'),'max-age=3600');
 });
 test('mobile Runtime version in overview metric wraps without clipping',()=>{
   const css=readFileSync(fileURLToPath(new URL('../ops/runtime-console-ui.css',import.meta.url)),'utf8');

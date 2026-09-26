@@ -32,11 +32,23 @@ export function gatewayRoute(input) {
   return { kind: "origin", instance, url: origin };
 }
 
+export function withGatewaySecurityHeaders(response) {
+  // 101 upgrades must retain the original WebSocket response object.
+  if (response.status === 101) return response;
+  const headers = new Headers(response.headers);
+  headers.set("strict-transport-security", "max-age=3600");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request) {
     const route = gatewayRoute(request.url);
     if (route.kind === "not-found") return new Response("Not found", { status: 404 });
     if (route.kind === "redirect") return Response.redirect(route.url, 308);
-    return fetch(new Request(route.url, request));
+    return withGatewaySecurityHeaders(await fetch(new Request(route.url, request)));
   },
 };
