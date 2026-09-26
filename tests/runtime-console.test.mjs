@@ -42,6 +42,11 @@ test('Cloudflare gateway preserves canonical hostname on HTTP upgrade and forces
   assert.equal(oauth.url.hostname,'server-origin.sanqi.org');
   assert.equal(gatewayRoute('https://dev.sanqi.org/unmanaged').kind,'not-found');
 });
+test('mobile Runtime version in overview metric wraps without clipping',()=>{
+  const css=readFileSync(fileURLToPath(new URL('../ops/runtime-console-ui.css',import.meta.url)),'utf8');
+  assert.match(css,/\.stats-grid \.stat-value\s*\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css,/\.stats-grid \.stat\s*\{[^}]*min-width:0/);
+});
 test('release provenance accepts clean source and refuses dirty candidate in strict mode',()=>{
   const temp=mkdtempSync(path.join(tmpdir(),'devspace-provenance-gate-'));
   const repo=path.join(temp,'repo');
