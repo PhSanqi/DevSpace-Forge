@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>DevSpace · Control Console</title>
+  <link rel="stylesheet" href="/ui.css">
+  <script src="/ui.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span><div><strong>DevSpace</strong><small>CONTROL PLATFORM</small></div></div>
+      <div class="sidebar-section" data-i18n="navOperate">OPERATE</div>
+      <nav class="navigation" aria-label="Operations">
+        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-index" aria-hidden="true">01</span><span data-i18n="overview">Overview</span></button>
+        <button class="nav-item" data-view="services"><span class="nav-index" aria-hidden="true">02</span><span data-i18n="servicesPage">Services</span></button>
+        <button class="nav-item" data-view="connection"><span class="nav-index" aria-hidden="true">03</span><span data-i18n="connectionConfig">Connection &amp; Tunnel</span></button>
+        <button class="nav-item" data-view="deployment"><span class="nav-index" aria-hidden="true">04</span><span data-i18n="deployment">Deployment</span></button>
+      </nav>
+      <div class="sidebar-section secondary-section" data-i18n="navManage">MANAGE</div>
+      <nav class="navigation" aria-label="Configuration and projects">
+        <button class="nav-item" data-view="devspace"><span class="nav-index" aria-hidden="true">05</span><span data-i18n="devspaceConfig">DevSpace settings</span></button>
+        <button class="nav-item" data-view="projects"><span class="nav-index" aria-hidden="true">06</span><span data-i18n="projectsGit">Projects &amp; activity</span></button>
+        <button class="nav-item" data-view="history"><span class="nav-index" aria-hidden="true">07</span><span data-i18n="configHistory">Config history</span></button>
+      </nav>
+      <div class="sidebar-section secondary-section" data-i18n="navObserve">OBSERVE</div>
+      <nav class="navigation" aria-label="Diagnostics">
+        <button class="nav-item" data-view="diagnostics"><span class="nav-index" aria-hidden="true">08</span><span data-i18n="logsDiagnostics">Diagnostics</span></button>
+      </nav>
+      <div class="sidebar-bottom"><span class="small-dot"></span><span data-i18n="loopback">Loopback-only management</span></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <div class="topbar-leading"><button id="menu-toggle" class="icon-button mobile-only" aria-label="Toggle navigation" aria-controls="sidebar" aria-expanded="false">☰</button><div class="breadcrumb">DevSpace <span>/</span> <strong id="breadcrumb-label">Overview</strong></div></div>
+        <div class="topbar-controls"><span id="poll-indicator" class="poll-indicator"><span class="pulse"></span><span data-i18n="live">Live</span></span><select id="language" aria-label="Language"><option value="en">EN</option><option value="zh">中文</option></select><button id="theme-toggle" class="icon-button" aria-label="Toggle theme" title="Toggle theme">◐</button><button id="refresh" class="refresh-button"><span aria-hidden="true">↻</span><span data-i18n="refresh">Refresh</span></button></div>
+      </header>
+      <main id="main" tabindex="-1">
+        <div class="page-heading"><div><p class="eyebrow" data-i18n="commandCenter">OPERATIONS / COMMAND CENTER</p><h1 id="page-title">Overview</h1><p id="page-description" class="page-description">Health and provenance for this DevSpace instance.</p></div><div id="updated-at" class="updated-at" aria-live="polite">—</div></div>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <section id="view-overview" class="view active" aria-label="Overview"><div id="overview-content" class="loading-card" role="status">Loading instance data...</div></section>
+        <section id="view-services" class="view" aria-label="Services"><div id="services-content" class="loading-card" role="status">Loading service state...</div></section>
+        <section id="view-connection" class="view" aria-label="Connection and Tunnel"><div id="connection-content" class="loading-card" role="status">Loading connection configuration...</div></section>
+        <section id="view-deployment" class="view" aria-label="Deployment"><div id="deployment-content" class="loading-card" role="status">Loading deployment state...</div></section>
+        <section id="view-devspace" class="view" aria-label="DevSpace settings"><div id="devspace-content" class="loading-card" role="status">Loading DevSpace configuration...</div></section>
+        <section id="view-projects" class="view" aria-label="Projects and activity"><div id="projects-content" class="loading-card" role="status">Loading project versions...</div></section>
+        <section id="view-history" class="view" aria-label="Configuration history"><div id="history-content" class="loading-card" role="status">Loading configuration history...</div></section>
+        <section id="view-diagnostics" class="view" aria-label="Diagnostics"><div id="diagnostics-content" class="loading-card" role="status">Loading diagnostics...</div></section>
+      </main>
+      <footer class="footer"><span>DevSpace Control Console <span class="footer-divider">·</span> <span id="footer-instance">—</span></span><span data-i18n="noCredentials">Secrets are excluded from routine diagnostics.</span></footer>
+    </div>
+  </div>
+  <div id="mobile-scrim" class="scrim" hidden></div>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><p class="eyebrow" data-i18n="protectedAction">PROTECTED ACTION</p><h2 id="confirm-title">Confirm action</h2><p id="confirm-description"></p><div id="rollback-confirm-area" hidden><label for="rollback-confirm-input" id="rollback-confirm-label">Type the selected version ID to confirm</label><input id="rollback-confirm-input" type="text" autocomplete="off" spellcheck="false"></div><div class="dialog-actions"><button value="cancel" class="secondary-button" data-i18n="cancel">Cancel</button><button id="confirm-submit" value="confirm" class="danger-button" data-i18n="confirm">Confirm</button></div></form></dialog>
+</body>
+</html>

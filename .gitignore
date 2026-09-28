@@ -1,0 +1,22 @@
+# Local managed runtime/state
+state/
+runtime/
+logs/
+
+# Build output
+bin/
+obj/
+dist/
+# GitHub Actions checks out the canonical Runtime inside the Windows Control checkout.
+# This separate nested repository must not mark strict Control provenance dirty.
+runtime-src/
+*.exe
+*.pdb
+
+# Local test output
+.test-output/
+tests/.review-runtime/
+.wrangler/
+
+# Upstream reference is intentionally a separate clone
+upstream/devspace/

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DevSpace-Forge Windows and Linux installation, Cloudflare Tunnel configuration and MCP connection guide.">
+  <meta name="theme-color" content="#f5f6f8">
+  <link rel="canonical" href="__PUBLIC_SITE_URL__/docs/">
+  <link rel="icon" href="/assets/favicon.ico?v=chat-led-1" sizes="any">
+  <link rel="icon" href="/assets/product-icon.png?v=chat-led-1" type="image/png" sizes="64x64">
+  <link rel="stylesheet" href="/assets/styles.css?v=chat-led-1">
+  <link rel="stylesheet" href="/assets/experience.css?v=chat-led-1">
+  <script src="/assets/app.js?v=chat-led-1" defer></script>
+  <title>DevSpace-Forge — Documentation</title>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-zh="跳转到内容" data-en="Skip to content">跳转到内容</a>
+  <header class="site-header"><div class="shell nav">
+    <a class="brand" href="/" aria-label="DevSpace-Forge home"><span class="brand-mark" aria-hidden="true"><img src="/assets/product-icon.png" alt="" width="32" height="32"></span><span>DevSpace<span class="brand-suffix">/Forge</span></span></a>
+    <nav class="main-nav" aria-label="Main navigation"><a href="/" data-zh="主页" data-en="Home">主页</a><a href="/#features" data-zh="功能" data-en="Features">功能</a><a href="/docs/" data-zh="文档" data-en="Docs">文档</a><a href="__PUBLIC_REPO_URL__" target="_blank" rel="noopener noreferrer">GitHub ↗</a></nav>
+    <div class="nav-actions"><button class="text-button" id="language-switch" type="button" aria-label="Switch language">EN</button><button class="icon-button" id="theme-switch" type="button" aria-label="Switch color theme"><svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5a8.5 8.5 0 1 0 12 12Z"/></svg></button><a class="nav-download" href="__PUBLIC_REPO_URL__/releases/latest" data-zh="下载" data-en="Download">下载</a></div>
+  </div></header>
+  <main id="main" class="shell docs-layout">
+    <aside class="docs-nav" aria-label="Documentation sections">
+      <a href="#overview" data-zh="概览" data-en="Overview">概览</a><a href="#download" data-zh="下载与校验" data-en="Download & verify">下载与校验</a><a href="#windows">Windows</a><a href="#linux">Linux</a><a href="#connect" data-zh="连接 MCP" data-en="Connect MCP">连接 MCP</a><a href="#security" data-zh="安全说明" data-en="Security">安全说明</a><a href="#more" data-zh="更多文档" data-en="Further reading">更多文档</a>
+    </aside>
+    <article class="docs-article">
+      <p class="kicker">DOCUMENTATION / START HERE</p><h1 id="overview" data-zh="安装与使用" data-en="Install & use">安装与使用</h1>
+      <p data-zh="DevSpace-Forge 提供 Windows x64 与 Linux x64 的完整离线发行包。下载、解压并配置允许访问的本地目录，再把 MCP 入口连接到你的 AI 客户端。" data-en="DevSpace-Forge ships complete Windows x64 and Linux x64 offline bundles. Download, extract, approve local directories, then connect your MCP endpoint to your AI client.">DevSpace-Forge 提供 Windows x64 与 Linux x64 的完整离线发行包。下载、解压并配置允许访问的本地目录，再把 MCP 入口连接到你的 AI 客户端。</p>
+      <div class="docs-callout"><strong data-zh="请注意" data-en="Important">请注意</strong><p data-zh="这是公开的产品说明，不是个人管理面板。Linux 管理 Console 保持在 localhost，不会经此主页公开。正式发行与实际安装的 Runtime 版本需要分别核对。" data-en="This is public product documentation, not a personal management dashboard. The Linux management console stays on localhost, and published releases do not automatically update a running Runtime.">这是公开的产品说明，不是个人管理面板。Linux 管理 Console 保持在 localhost，不会经此主页公开。正式发行与实际安装的 Runtime 版本需要分别核对。</p></div>
+      <h2 id="download" data-zh="下载与校验" data-en="Download & verify">下载与校验</h2>
+      <p data-zh="打开最新 Release，选择对应平台的安装包及同名 .sha256.txt 校验文件。两端均包含 Node.js、Runtime 和 cloudflared。" data-en="Open the latest Release and get your platform archive and matching .sha256.txt file. Both bundles include Node.js, Runtime and cloudflared.">打开最新 Release，选择对应平台的安装包及同名 .sha256.txt 校验文件。两端均包含 Node.js、Runtime 和 cloudflared。</p>
+      <p><a href="__PUBLIC_REPO_URL__/releases/latest" data-zh="前往 GitHub Releases ↗" data-en="Open GitHub Releases ↗">前往 GitHub Releases ↗</a></p>
+      <h2 id="windows">Windows x64</h2>
+      <p data-zh="解压 win-x64.zip，运行 Setup.exe。选择 Allowed Roots、服务端口以及可选的 Cloudflare Remote Tunnel 信息。已有安装可通过较新 Setup 进入更新流程，重要状态会保留。" data-en="Extract win-x64.zip and run Setup.exe. Set your Allowed Roots, service port and optional Cloudflare Remote Tunnel. A newer Setup can detect and update an existing installation while preserving important state.">解压 win-x64.zip，运行 Setup.exe。选择 Allowed Roots、服务端口以及可选的 Cloudflare Remote Tunnel 信息。已有安装可通过较新 Setup 进入更新流程，重要状态会保留。</p>
+      <h2 id="linux">Linux x64</h2>
+      <p data-zh="解压 linux-x64.tar.gz，在目录内运行安装脚本。安装器打印本地 Origin、MCP 地址与首次授权信息；具体 systemd 服务名取决于普通安装还是命名实例。" data-en="Extract linux-x64.tar.gz and run the installer. It prints your local Origin, MCP URL and first-connection information. systemd unit names differ between standard and named-instance installs.">解压 linux-x64.tar.gz，在目录内运行安装脚本。安装器打印本地 Origin、MCP 地址与首次授权信息；具体 systemd 服务名取决于普通安装还是命名实例。</p>
+      <pre><code>./setup-linux.sh</code></pre>
+      <h2 id="connect" data-zh="连接 MCP" data-en="Connect MCP">连接 MCP</h2>
+      <p data-zh="在 Cloudflare 创建 remotely-managed Tunnel，将公开主机名指向安装器显示的本地 Origin；在支持 MCP 的客户端中使用完整 HTTPS MCP 地址。第一次连接需完成 Owner 授权。" data-en="Create a remotely managed Cloudflare Tunnel and point the public hostname to the local Origin shown by setup. Use the complete HTTPS MCP URL in your MCP-capable client, then complete the initial Owner approval.">在 Cloudflare 创建 remotely-managed Tunnel，将公开主机名指向安装器显示的本地 Origin；在支持 MCP 的客户端中使用完整 HTTPS MCP 地址。第一次连接需完成 Owner 授权。</p>
+      <pre><code>https://YOUR_HOSTNAME/mcp</code></pre>
+      <p data-zh="单域名多实例网关可采用 /server/mcp 和 /group/mcp 等路径，但普通单实例安装不需要额外部署 Gateway Worker。" data-en="A multi-instance gateway can use paths such as /server/mcp and /group/mcp. A normal single-instance setup does not require a separate Gateway Worker.">单域名多实例网关可采用 /server/mcp 和 /group/mcp 等路径，但普通单实例安装不需要额外部署 Gateway Worker。</p>
+      <h2 id="security" data-zh="安全说明" data-en="Security">安全说明</h2>
+      <p data-zh="只授权必要目录。妥善保存 Owner password 和 Tunnel token。不要将本地管理 Console、任务日志、环境变量或个人项目展示在公开主页上。运行时更新会检查活动任务，避免打断持久任务。" data-en="Approve only the directories you need. Protect the Owner password and Tunnel token. Do not publish your local console, task logs, environment variables or personal projects. Runtime updates check active jobs to protect durable tasks.">只授权必要目录。妥善保存 Owner password 和 Tunnel token。不要将本地管理 Console、任务日志、环境变量或个人项目展示在公开主页上。运行时更新会检查活动任务，避免打断持久任务。</p>
+      <h2 id="more" data-zh="更多文档" data-en="Further reading">更多文档</h2>
+      <p><a href="__PUBLIC_REPO_URL__/blob/main/README.zh-CN.md" data-zh="完整中文 README ↗" data-en="Full Chinese README ↗">完整中文 README ↗</a> · <a href="__PUBLIC_REPO_URL__/blob/main/README.md">English README ↗</a> · <a href="__PUBLIC_REPO_URL__/blob/main/docs/releases-and-upgrades.md" data-zh="版本与安全升级 ↗" data-en="Releases & safe upgrades ↗">版本与安全升级 ↗</a></p>
+    </article>
+  </main>
+  <footer class="site-footer"><div class="shell footer-inner"><div><span class="footer-brand">DevSpace<span>/Forge</span></span><p data-zh="自托管开发环境与 AI 之间的可靠连接。" data-en="A bridge between your own workspace and your AI.">自托管开发环境与 AI 之间的可靠连接。</p></div><div class="footer-links"><a href="/" data-zh="主页" data-en="Home">主页</a><a href="__PUBLIC_REPO_URL__/releases/latest" data-zh="下载" data-en="Download">下载</a><a href="__PUBLIC_REPO_URL__" target="_blank" rel="noopener noreferrer">GitHub ↗</a></div><span class="footer-end">© <span id="year">2026</span> DEVSPACE-FORGE · MIT</span></div></footer>
+</body>
+</html>

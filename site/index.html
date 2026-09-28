@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f6f8">
+  <meta name="description" content="DevSpace-Forge connects your AI chat with your local Windows or Linux development workspace. Discuss, edit, test and continue in one conversation, with MCP and self-hosted tools.">
+  <meta property="og:title" content="DevSpace-Forge — 从想法到本地代码，不用离开对话。">
+  <meta property="og:description" content="让 Chat 直接操作授权的本地项目：读取、修改、运行测试，讨论与执行留在同一条对话中。">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="__PUBLIC_SITE_URL__/">
+  <link rel="canonical" href="__PUBLIC_SITE_URL__/">
+  <link rel="icon" href="/assets/favicon.ico?v=chat-led-1" sizes="any">
+  <link rel="icon" href="/assets/product-icon.png?v=chat-led-1" type="image/png" sizes="64x64">
+  <link rel="apple-touch-icon" href="/assets/product-icon.png?v=chat-led-1">
+  <link rel="stylesheet" href="/assets/styles.css?v=chat-led-1">
+  <link rel="stylesheet" href="/assets/experience.css?v=chat-led-1">
+  <script src="/assets/app.js?v=chat-led-1" defer></script>
+  <title>DevSpace-Forge — 在同一条对话里，完成本地开发</title>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-zh="跳转到内容" data-en="Skip to content">跳转到内容</a>
+  <header class="site-header">
+    <div class="shell nav">
+      <a class="brand" href="/" aria-label="DevSpace-Forge home">
+        <span class="brand-mark" aria-hidden="true"><img src="/assets/product-icon.png" alt="" width="32" height="32"></span>
+        <span>DevSpace<span class="brand-suffix">/Forge</span></span>
+      </a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="#why-chat" data-zh="为什么在 Chat 中开发" data-en="Why build in Chat">为什么在 Chat 中开发</a>
+        <a href="#features" data-zh="功能" data-en="Features">功能</a>
+        <a href="#how-it-works" data-zh="工作方式" data-en="How it works">工作方式</a>
+        <a href="/docs/" data-zh="文档" data-en="Docs">文档</a>
+        <a href="__PUBLIC_REPO_URL__" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+      </nav>
+      <div class="nav-actions">
+        <button class="text-button" type="button" id="language-switch" aria-label="Switch language">EN</button>
+        <button class="icon-button" type="button" id="theme-switch" aria-label="Switch color theme"><svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5a8.5 8.5 0 1 0 12 12Z"/></svg></button>
+        <a class="nav-download" href="__PUBLIC_REPO_URL__/releases/latest" data-zh="下载" data-en="Download">下载</a>
+      </div>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="status-dot"></span><span data-zh="CHATGPT × 你的本地开发环境" data-en="CHATGPT × YOUR LOCAL WORKSPACE">CHATGPT × 你的本地开发环境</span></div>
+        <h1 id="hero-title"><span data-zh="不用离开 Chat，" data-en="Stay in Chat.">不用离开 Chat，</span><br><span class="hero-emphasis" data-zh="直接开发本地项目。" data-en="Build your local project.">直接开发本地项目。</span></h1>
+        <p class="hero-description" data-zh="需求已经在这条对话里讲清楚了，就继续在这里看项目、改代码、跑测试、查日志，再沿着刚才的思路往下做。DevSpace-Forge 通过 MCP 把 ChatGPT 接到你授权的 Windows 或 Linux 工作区。" data-en="Once the requirement is clear in this conversation, keep working here: inspect the repo, edit code, run tests, check logs, and continue from the same train of thought. DevSpace-Forge connects ChatGPT to approved Windows or Linux workspaces through MCP.">需求已经在这条对话里讲清楚了，就继续在这里看项目、改代码、跑测试、查日志，再沿着刚才的思路往下做。DevSpace-Forge 通过 MCP 把 ChatGPT 接到你授权的 Windows 或 Linux 工作区。</p>
+        <div class="hero-buttons">
+          <a class="button-primary" href="__PUBLIC_REPO_URL__/releases/latest"><span data-zh="下载最新版本" data-en="Download latest release">下载最新版本</span><span aria-hidden="true">↗</span></a>
+          <a class="button-secondary" href="#why-chat"><span data-zh="看看工作方式" data-en="See how it works">看看工作方式</span><span aria-hidden="true">→</span></a>
+        </div>
+        <p class="hero-footnote" data-zh="MIT 开源 · Windows / Linux 离线包 · 由你授权可访问的目录" data-en="MIT licensed · Windows / Linux offline bundles · You approve access">MIT 开源 · Windows / Linux 离线包 · 由你授权可访问的目录</p>
+      </div>
+      <div class="hero-visual conversation-preview" role="img" aria-label="Illustrative chat showing a developer asking an assistant to change a local project and run tests">
+        <div class="preview-top">
+          <div class="preview-app"><img src="/assets/product-icon.png" alt="" width="24" height="24"><span>Chat <span class="preview-app-slash">/ DevSpace</span></span></div>
+          <span class="preview-local"><span class="status-dot"></span><span data-zh="本地工作区已连接" data-en="Local workspace connected">本地工作区已连接</span></span>
+        </div>
+        <div class="preview-body">
+          <div class="preview-user"><span data-zh="继续刚才的登录页设计，修复测试后告诉我改了什么。" data-en="Continue our login page work, fix the tests, and show me what changed.">继续刚才的登录页设计，修复测试后告诉我改了什么。</span></div>
+          <div class="preview-assistant">
+            <span class="preview-avatar"><img src="/assets/product-icon.png" alt="" width="18" height="18"></span>
+            <div><p data-zh="我会沿用刚才的方案，检查现有文件，修改后在你的机器上运行测试。" data-en="I'll continue from our plan, inspect the existing files, then run tests on your machine.">我会沿用刚才的方案，检查现有文件，修改后在你的机器上运行测试。</p>
+              <div class="preview-tool"><span class="tool-icon">↳</span><span>DevSpace · open_workspace</span><span class="preview-check">✓</span></div>
+              <div class="preview-tool"><span class="tool-icon">↳</span><span>DevSpace · exec_command</span><span class="preview-check">✓</span></div>
+              <div class="preview-result"><span class="result-dot"></span><span data-zh="本地测试通过 · 改动可查看" data-en="Local tests passed · Changes ready to review">本地测试通过 · 改动可查看</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="preview-compose"><span data-zh="在同一条对话里继续下一步…" data-en="Keep going in the same conversation…">在同一条对话里继续下一步…</span><span class="preview-send" aria-hidden="true">↑</span></div>
+        <div class="preview-disclaimer" data-zh="交互示意 · 不展示任何真实项目或账户数据" data-en="Illustrative example · No real project or account data shown">交互示意 · 不展示任何真实项目或账户数据</div>
+      </div>
+    </section>
+    <section class="trust-strip" aria-label="Product principles"><div class="shell trust-items"><span>01 / CHAT → LOCAL CODE</span><span>02 / ONE CONTINUOUS FLOW</span><span>03 / CONTEXT ON DEMAND</span><span>04 / YOUR MACHINE</span></div></section>
+    <section class="section shell why-section" id="why-chat" aria-labelledby="why-title">
+      <div class="section-heading"><div><p class="kicker">01 / THE DIFFERENCE</p><h2 id="why-title" data-zh="把讨论和开发，留在同一条思路上。" data-en="One conversation. From idea to working code.">把讨论和开发，留在同一条思路上。</h2></div><p data-zh="你已经在 Chat 里讲清了需求，就不必再把它复制到另一套工具里重新解释。" data-en="You've already explained the idea in chat. You shouldn't have to re-explain it to another tool.">你已经在 Chat 里讲清了需求，就不必再把它复制到另一套工具里重新解释。</p></div>
+      <div class="why-grid">
+        <article class="why-card why-primary"><div class="why-symbol" aria-hidden="true">↗</div><p class="why-overline">01 / STAY IN FLOW</p><h3 data-zh="少切换一次，思路不断档。" data-en="Fewer handoffs. More flow.">少切换一次，思路不断档。</h3><p data-zh="讨论方案、查看代码、执行命令、检查结果，都从正在进行的对话发起。减少在 Chat、IDE 和终端间反复转述需求的时间。" data-en="Discuss the plan, inspect code, run commands and review results from the conversation you're already in—without repeatedly relaying the brief across chat, IDE and terminal.">讨论方案、查看代码、执行命令、检查结果，都从正在进行的对话发起。减少在 Chat、IDE 和终端间反复转述需求的时间。</p><div class="why-mini"><span data-zh="讨论" data-en="Discuss">讨论</span><b>→</b><span data-zh="执行" data-en="Execute">执行</span><b>→</b><span data-zh="验证" data-en="Verify">验证</span><b>→</b><span data-zh="继续" data-en="Continue">继续</span></div></article>
+        <article class="why-card"><div class="why-symbol" aria-hidden="true">⌁</div><p class="why-overline">02 / CONTEXT THAT CONNECTS</p><h3 data-zh="让对话和项目证据接得上。" data-en="Keep the reasoning connected.">让对话和项目证据接得上。</h3><p data-zh="当前对话中的目标与反馈，结合按需读取的真实项目文件、Git 状态和任务日志，减少重复上传文件和重讲背景。上下文仍受客户端限制，并非无限记忆。" data-en="Bring the goals and feedback in your current chat together with on-demand project files, Git state and job logs. Less re-uploading and re-explaining—not a claim of unlimited memory.">当前对话中的目标与反馈，结合按需读取的真实项目文件、Git 状态和任务日志，减少重复上传文件和重讲背景。上下文仍受客户端限制，并非无限记忆。</p><span class="why-tag">CHAT CONTEXT + LIVE PROJECT EVIDENCE</span></article>
+        <article class="why-card"><div class="why-symbol" aria-hidden="true">⌘</div><p class="why-overline">03 / ANOTHER USAGE PATH</p><h3 data-zh="把 Chat 的那一桶额度，也变成开发能力。" data-en="Turn your Chat allowance into a coding surface, too.">把 Chat 的那一桶额度，也变成开发能力。</h3><p data-zh="当前 OpenAI 规则下，Chat 与 Work / Codex 使用不同的额度池。当 Chat 客户端可以调用 MCP 时，规划、排查和本地开发可以直接在 Chat 中完成，不必把所有任务都挤到 agentic allowance。具体上限随套餐和产品规则变化，DevSpace 不提供或绕过额度。" data-en="Under OpenAI's current usage rules, Chat and Work / Codex have separate allowances. When Chat can call MCP tools, planning, debugging and local development can happen directly in Chat instead of putting every task into the agentic allowance. Limits vary by plan and product rules; DevSpace does not grant or bypass usage.">当前 OpenAI 规则下，Chat 与 Work / Codex 使用不同的额度池。当 Chat 客户端可以调用 MCP 时，规划、排查和本地开发可以直接在 Chat 中完成，不必把所有任务都挤到 agentic allowance。具体上限随套餐和产品规则变化，DevSpace 不提供或绕过额度。</p><span class="why-tag">CHAT ALLOWANCE + WORK / CODEX ALLOWANCE</span></article>
+      </div>
+      <p class="allowance-note"><span data-zh="额度说明：截至 2026-09，OpenAI 官方文档明确 Chat 的限制与 Work / Codex allowance 分开；具体可用量以你的套餐与 Usage 页面为准。" data-en="Usage note: as of 2026-09, OpenAI documents Chat limits separately from the Work / Codex allowance. Exact usage depends on your plan and Usage page.">额度说明：截至 2026-09，OpenAI 官方文档明确 Chat 的限制与 Work / Codex allowance 分开；具体可用量以你的套餐与 Usage 页面为准。</span><a href="https://help.openai.com/en/articles/20001354-gpt-56-and-gpt-6-pro-in-chatgpt" target="_blank" rel="noopener noreferrer">OpenAI usage docs ↗</a></p>
+    </section>
+    <section class="section shell" id="features" aria-labelledby="features-title">
+      <div class="section-heading"><div><p class="kicker">02 / LOCAL TOOLKIT</p><h2 id="features-title" data-zh="Chat 负责思考，你的机器负责执行。" data-en="Your chat plans. Your machine executes.">Chat 负责思考，你的机器负责执行。</h2></div><p data-zh="从真实仓库和运行结果继续工作，而不是只拿一段粘贴的代码猜测。" data-en="Work from real repositories and execution results, not just pasted snippets.">从真实仓库和运行结果继续工作，而不是只拿一段粘贴的代码猜测。</p></div>
+      <div class="feature-grid">
+        <article class="feature-card"><span class="feature-number">01</span><div class="feature-icon">⌁</div><h3 data-zh="让 Chat 看见真实项目" data-en="Ground chat in real projects">让 Chat 看见真实项目</h3><p data-zh="按需读取授权范围内的源码、目录和 Git 状态，直接基于当前工作树继续，不用反复复制粘贴整个仓库。" data-en="Read approved source files, folders and Git state on demand, then continue against the actual working tree instead of repeatedly pasting a repository.">按需读取授权范围内的源码、目录和 Git 状态，直接基于当前工作树继续，不用反复复制粘贴整个仓库。</p><span class="feature-meta">FILES / GIT / ALLOWED ROOTS</span></article>
+        <article class="feature-card"><span class="feature-number">02</span><div class="feature-icon">›_</div><h3 data-zh="真的修改、构建和测试" data-en="Edit, build and test for real">真的修改、构建和测试</h3><p data-zh="在本地执行命令和测试，把输出带回同一条对话中继续修正，而不只是生成一份需要手工搬运的代码。" data-en="Run local commands and tests, bring the results back to the same conversation, and iterate beyond a code snippet you must manually transfer.">在本地执行命令和测试，把输出带回同一条对话中继续修正，而不只是生成一份需要手工搬运的代码。</p><span class="feature-meta">TERMINAL / BUILD / TEST</span></article>
+        <article class="feature-card"><span class="feature-number">03</span><div class="feature-icon">◫</div><h3 data-zh="Windows / Linux，自己掌控" data-en="Windows / Linux, under your control">Windows / Linux，自己掌控</h3><p data-zh="完整离线安装包、允许访问的目录与自托管 Tunnel。你的工程留在本机，管理 Console 不暴露在公开 MCP 地址。" data-en="Offline bundles, approved directories and a self-hosted Tunnel. Your repository stays on your machine, and the privileged Console is not exposed at the public MCP endpoint.">完整离线安装包、允许访问的目录与自托管 Tunnel。你的工程留在本机，管理 Console 不暴露在公开 MCP 地址。</p><span class="feature-meta">WINDOWS / LINUX / MCP / OAUTH</span></article>
+        <article class="feature-card"><span class="feature-number">04</span><div class="feature-icon">◷</div><h3 data-zh="长任务也能找到来龙去脉" data-en="Know what happened in long jobs">长任务也能找到来龙去脉</h3><p data-zh="持久任务标识、日志与状态查询，配合 Git 和 Review 证据，便于断线后继续检查与安全回滚。" data-en="Stable job IDs, logs and status plus Git and Review evidence make it easier to inspect, resume and safely roll back work after a disconnect.">持久任务标识、日志与状态查询，配合 Git 和 Review 证据，便于断线后继续检查与安全回滚。</p><span class="feature-meta">JOBS / LOGS / REVIEW</span></article>
+      </div>
+    </section>
+    <section class="section process-section" id="how-it-works"><div class="shell"><p class="kicker">02 / GET STARTED</p><div class="section-heading compact"><h2 data-zh="四步连接，开始工作" data-en="Four steps to your workspace">四步连接，开始工作</h2><p data-zh="适用于支持 MCP 的客户端。控制端保留在你的电脑上。" data-en="For MCP-capable clients. The control plane stays on your computer.">适用于支持 MCP 的客户端。控制端保留在你的电脑上。</p></div><div class="steps"><article><span>01</span><h3 data-zh="下载并解压" data-en="Download & extract">下载并解压</h3><p data-zh="选择 Windows 或 Linux 离线发行包。" data-en="Choose the Windows or Linux offline bundle.">选择 Windows 或 Linux 离线发行包。</p></article><article><span>02</span><h3 data-zh="授权本地目录" data-en="Approve local roots">授权本地目录</h3><p data-zh="配置 Allowed Roots 与本地端口。" data-en="Configure approved roots and a local port.">配置 Allowed Roots 与本地端口。</p></article><article><span>03</span><h3 data-zh="接入 Tunnel" data-en="Connect a Tunnel">接入 Tunnel</h3><p data-zh="在 Cloudflare 配置自己的公网入口。" data-en="Set up your public endpoint in Cloudflare.">在 Cloudflare 配置自己的公网入口。</p></article><article><span>04</span><h3 data-zh="连接 MCP" data-en="Connect via MCP">连接 MCP</h3><p data-zh="完成授权后，直接在 AI 助手中工作。" data-en="Authorize your client, then start working.">完成授权后，直接在 AI 助手中工作。</p></article></div></div></section>
+    <section class="section shell" id="download"><div class="download-panel"><div><p class="kicker">03 / RELEASES</p><h2 data-zh="把工作区留在自己的机器上。" data-en="Keep your workspace on your machine.">把工作区留在自己的机器上。</h2><p data-zh="从 GitHub 获取完整离线包、安装说明和源码。Control 与 Runtime 分别维护版本，发布不等于远程替你升级。" data-en="Get the full offline bundles, install guides and source on GitHub. Control and Runtime have independent version lines; releases never upgrade your machine automatically.">从 GitHub 获取完整离线包、安装说明和源码。Control 与 Runtime 分别维护版本，发布不等于远程替你升级。</p></div><div class="download-actions"><a class="button-primary" href="__PUBLIC_REPO_URL__/releases/latest"><span data-zh="获取 Windows / Linux 版本" data-en="Get Windows / Linux release">获取 Windows / Linux 版本</span> ↗</a><a class="button-tertiary" href="__PUBLIC_REPO_URL__/blob/main/README.zh-CN.md" data-zh="查看使用说明 ↗" data-en="Read the guide ↗">查看使用说明 ↗</a></div></div></section>
+  </main>
+  <footer class="site-footer"><div class="shell footer-inner"><div><span class="footer-brand">DevSpace<span>/Forge</span></span><p data-zh="自托管开发环境与 AI 之间的可靠连接。" data-en="A bridge between your own workspace and your AI.">自托管开发环境与 AI 之间的可靠连接。</p></div><div class="footer-links"><a href="/docs/" data-zh="文档" data-en="Docs">文档</a><a href="__PUBLIC_REPO_URL__/releases" data-zh="发布版本" data-en="Releases">发布版本</a><a href="__PUBLIC_REPO_URL__" target="_blank" rel="noopener noreferrer">GitHub ↗</a></div><span class="footer-end">© <span id="year">2026</span> DEVSPACE-FORGE · MIT</span></div></footer>
+</body>
+</html>
