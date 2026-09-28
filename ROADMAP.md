@@ -1,7 +1,5 @@
 # Product roadmap / 产品路线图
 
-This is the public product direction, not a record of one contributor's computers, experiments or deployment.
-
 ## Available
 
 - Windows and Linux x64 offline setup with a pinned local Runtime.
@@ -19,5 +17,3 @@ This is the public product direction, not a record of one contributor's computer
 - More portable, user-configurable examples for optional multi-instance gateways and static websites.
 
 Roadmap items are not promises of delivery dates. For current capabilities use the latest Release notes and [documentation](docs/getting-started.md).
-
-中文：以上为面向用户的产品方向，不包含任何开发者私人部署记录、地址、账户或生产环境状态。

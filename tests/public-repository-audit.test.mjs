@@ -35,6 +35,11 @@ const forbidden = [
   ['literal historical commit id', new RegExp('\\b[0-9a-f]{40}\\b', 'i')],
 ];
 
+function isPublicSafeGitEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return email.endsWith('@users.noreply.github.com') || email.endsWith('@example.com');
+}
+
 test('tracked public files contain no private deployment identifiers or known secret formats', () => {
   const problems = [];
   for (const name of tracked) {
@@ -57,4 +62,12 @@ test('published website source uses generic configuration instead of a fixed per
   }
   assert.match(readFileSync(resolve(root, 'ops/cloudflare-gateway-worker.mjs'), 'utf8'), /SERVER_ORIGIN_HOST/);
   assert.match(readFileSync(resolve(root, 'ops/deploy-public-site-linux.sh'), 'utf8'), /DEVSPACE_SITE_PUBLIC_URL/);
+});
+
+test('HEAD commit metadata does not publish a personal email address', () => {
+  const identity = execFileSync('git', ['show', '-s', '--format=%ae%n%ce', 'HEAD'], { cwd: root })
+    .toString('utf8').trim().split(/\r?\n/);
+  assert.equal(identity.length, 2, 'Expected author and committer email metadata');
+  assert.ok(isPublicSafeGitEmail(identity[0]), 'HEAD author email must use a GitHub noreply or example.com address');
+  assert.ok(isPublicSafeGitEmail(identity[1]), 'HEAD committer email must use a GitHub noreply or example.com address');
 });
