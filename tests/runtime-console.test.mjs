@@ -277,18 +277,19 @@ test('native installer job preflight CLI fails closed on live or unreadable stat
     assert.match(result.stderr,/job_state_unavailable/);
   }finally{f.clean();}
 });
-test('nested GitHub Actions runtime checkout does not dirty Control release provenance',()=>{
+test('canonical Runtime source is embedded and tracked in the main repository',()=>{
   const root=fileURLToPath(new URL('..',import.meta.url));
-  const result=spawnSync('git',['-C',root,'check-ignore','--quiet','runtime-src/package.json'],{encoding:'utf8'});
-  assert.equal(result.status,0,`Nested runtime checkout must be ignored by the Control repository: ${result.stderr}`);
+  const result=spawnSync('git',['-C',root,'ls-files','--error-unmatch','runtime-src/package.json'],{encoding:'utf8'});
+  assert.equal(result.status,0,`Embedded Runtime package.json must be tracked by the main repository: ${result.stderr}`);
 });
 test('release scripts and workflow agree on Control, Runtime and Windows slot versions',()=>{
   const root=fileURLToPath(new URL('..',import.meta.url));
   const read=(file)=>readFileSync(path.join(root,file),'utf8');
   const pkg=JSON.parse(read('package.json'));
-  const dependency=pkg.dependencies['@waishnav/devspace'];
-  const runtimeVersion=/^file:waishnav-devspace-(.+)\.tgz$/.exec(dependency)?.[1];
-  assert.ok(runtimeVersion,`Unexpected packaged Runtime dependency: ${dependency}`);
+  const runtimePkg=JSON.parse(read('runtime-src/package.json'));
+  const runtimeVersion=runtimePkg.version;
+  assert.equal(pkg.devspaceForge?.runtimePath,'runtime-src');
+  assert.equal(pkg.devspaceForge?.runtimeVersion,runtimeVersion);
   const suffix=/\.local\.(\d+)$/.exec(runtimeVersion)?.[1];
   assert.ok(suffix,`Unexpected canonical Runtime version: ${runtimeVersion}`);
   const slot=`windows-beta4-local${suffix}`;
@@ -298,8 +299,10 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   assert.equal(/^VERSION="\$\{1:-([^}]+)\}"/m.exec(read('package-release-linux.sh'))?.[1],pkg.version);
   assert.equal(/\$Version = '([^']+)'/.exec(read('package-release.ps1'))?.[1],pkg.version);
   assert.equal(/\$Version = '([^']+)'/.exec(packer)?.[1],pkg.version);
-  assert.equal(/CANONICAL_RUNTIME_REF: (\S+)/.exec(workflow)?.[1],`runtime-${runtimeVersion}`);
+  assert.equal(/CANONICAL_RUNTIME_REF:/.test(workflow),false,'Release must not depend on a second Runtime ref');
   assert.equal(/CANONICAL_RUNTIME_VERSION: (\S+)/.exec(workflow)?.[1],runtimeVersion);
+  assert.ok(workflow.includes('working-directory: runtime-src'));
+  assert.ok(workflow.includes('working-directory: control/runtime-src'));
   assert.ok(prepare.includes(`$devSpaceVersion = '${runtimeVersion}'`));
   assert.ok(prepare.includes(`$devSpacePackageName = 'waishnav-devspace-${runtimeVersion}.tgz'`));
   assert.ok(prepare.includes(`$slotName = '${slot}'`));
@@ -329,7 +332,7 @@ test('runtime identity distinguishes configured pointer from actual running proc
     assert.equal(info.provenance.runtime,null);
     assert.equal(info.provenance.evidence,'not recorded or not verified');
     const checksum=createHash('sha256').update('actual server build').digest('hex');
-    writeFileSync(path.join(f.actual,'runtime-provenance.json'),JSON.stringify({git_commit:'c'.repeat(40),git_branch:'runtime/beta4-unified',server_sha256:checksum}));
+    writeFileSync(path.join(f.actual,'runtime-provenance.json'),JSON.stringify({git_commit:'c'.repeat(40),git_branch:'main',server_sha256:checksum}));
     assert.equal(runtimeInfo(options).provenance.runtime.git_commit,'c'.repeat(40));
     writeFileSync(path.join(f.actual,'runtime-provenance.json'),JSON.stringify({git_commit:'c'.repeat(40)}));
     assert.equal(runtimeInfo(options).provenance.runtime,null,'Git commit without a matching artifact hash is not verified');

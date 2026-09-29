@@ -4,7 +4,7 @@
 
 Open this repository's Releases tab. Download the Windows x64 ZIP or Linux x64 tar.gz, together with the corresponding SHA-256 sidecar. Before extracting, compare the downloaded archive's SHA-256 to the supplied file.
 
-Control and its embedded Runtime follow separate version lines. Each package includes a provenance manifest that identifies its build and pinned Runtime. A GitHub Release does not update an already running installation.
+DevSpace-Forge has one public release line. Its embedded Runtime is built from the `runtime-src/` source directory in the same Git revision and retains an internal package version only for provenance and compatibility checks. Each package includes provenance manifests for both the product and embedded Runtime. A GitHub Release does not update an already running installation.
 
 ## Install or update
 

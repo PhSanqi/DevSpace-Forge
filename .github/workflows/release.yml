@@ -13,7 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CANONICAL_RUNTIME_REF: runtime-1.1.0-beta.4.local.15
   CANONICAL_RUNTIME_VERSION: 1.1.0-beta.4.local.15
 
 jobs:
@@ -21,14 +20,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 35
     steps:
-      - name: Checkout DevSpace-Forge control plane
+      - name: Checkout DevSpace-Forge
         uses: actions/checkout@v4
-
-      - name: Checkout canonical DevSpace runtime
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.CANONICAL_RUNTIME_REF }}
-          path: runtime-src
 
       - name: Setup pnpm and Node
         uses: pnpm/action-setup@v4
@@ -95,16 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout DevSpace-Forge control plane
+      - name: Checkout DevSpace-Forge
         uses: actions/checkout@v4
         with:
           path: control
-
-      - name: Checkout canonical DevSpace runtime
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.CANONICAL_RUNTIME_REF }}
-          path: runtime-src
 
       - name: Setup pnpm and Node
         uses: pnpm/action-setup@v4
@@ -115,17 +102,17 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: runtime-src/pnpm-lock.yaml
+          cache-dependency-path: control/runtime-src/pnpm-lock.yaml
 
       - name: Build and validate canonical runtime
-        working-directory: runtime-src
+        working-directory: control/runtime-src
         run: |
           pnpm install --frozen-lockfile
           pnpm typecheck
           pnpm test
           pnpm build
-          mkdir -p ../control/dist/linux-runtime
-          pnpm pack --pack-destination ../control/dist/linux-runtime
+          mkdir -p ../dist/linux-runtime
+          pnpm pack --pack-destination ../dist/linux-runtime
 
       - name: Build Linux product package
         working-directory: control
@@ -134,7 +121,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           runtime_package="dist/linux-runtime/waishnav-devspace-${CANONICAL_RUNTIME_VERSION}.tgz"
           test -f "$runtime_package"
-          bash ./package-release-linux.sh "$version" "$runtime_package" ../runtime-src
+          bash ./package-release-linux.sh "$version" "$runtime_package" runtime-src
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4

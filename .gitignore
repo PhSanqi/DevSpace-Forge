@@ -7,9 +7,8 @@ logs/
 bin/
 obj/
 dist/
-# GitHub Actions checks out the canonical Runtime inside the Windows Control checkout.
-# This separate nested repository must not mark strict Control provenance dirty.
-runtime-src/
+# Embedded Runtime source is tracked in runtime-src/.
+# runtime/ above remains reserved for local managed installation/state.
 *.exe
 *.pdb
 

@@ -55,4 +55,4 @@ site 目录是可选的公开静态介绍站，**不是**管理 Console 或 MCP 
 
 ## 上游与许可
 
-本项目基于开源 DevSpace 生态，包括 [Waishnav/devspace](https://github.com/Waishnav/devspace) 和 [devspace-verge](https://github.com/yuezhihuafou/devspace-verge)。本仓库的发行与集成内容遵循 [MIT License](LICENSE)，上游项目保留各自的版权与许可证。
+本项目基于开源 DevSpace 生态，包括 [Waishnav/devspace](https://github.com/Waishnav/devspace) 和 [devspace-verge](https://github.com/yuezhihuafou/devspace-verge)。固定并集成后的 Runtime 源码直接保存在 [`runtime-src/`](runtime-src/)；Windows/Linux 产品包与 Runtime 都从同一个 `main` revision 构建，不再维护单独的公开 Runtime 分支或 Runtime Release。本仓库的发行与集成内容遵循 [MIT License](LICENSE)，上游项目保留各自的版权与许可证。

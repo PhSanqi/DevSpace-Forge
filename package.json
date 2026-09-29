@@ -1,8 +1,10 @@
 {
   "private": true,
-  "name": "devspace-control-platform-runtime",
+  "name": "devspace-forge",
   "version": "0.6.9",
-  "dependencies": {
-    "@waishnav/devspace": "file:waishnav-devspace-1.1.0-beta.4.local.15.tgz"
+  "devspaceForge": {
+    "runtimePath": "runtime-src",
+    "runtimeVersion": "1.1.0-beta.4.local.15",
+    "runtimeUpstream": "Waishnav/devspace@v1.1.0-beta.4"
   }
 }

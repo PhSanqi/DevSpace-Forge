@@ -55,4 +55,4 @@ The optional landing page in the site directory is a static website, **not** the
 
 ## Upstream and license
 
-This project builds on the open-source DevSpace ecosystem, including [Waishnav/devspace](https://github.com/Waishnav/devspace) and [devspace-verge](https://github.com/yuezhihuafou/devspace-verge). Distribution and integration work in this repository is provided under the [MIT License](LICENSE); upstream projects retain their own attribution.
+This project builds on the open-source DevSpace ecosystem, including [Waishnav/devspace](https://github.com/Waishnav/devspace) and [devspace-verge](https://github.com/yuezhihuafou/devspace-verge). The pinned, integrated Runtime source lives in [`runtime-src/`](runtime-src/) and is built from the same `main` revision as the Windows/Linux product packages; there is no separate public Runtime branch or Runtime release line. Distribution and integration work in this repository is provided under the [MIT License](LICENSE); upstream projects retain their own attribution.
