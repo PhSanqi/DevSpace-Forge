@@ -1,12 +1,12 @@
-# Local managed runtime/state
-state/
+# Local managed /runtime/state
+/state/
 runtime/
-logs/
+/logs/
 
 # Build output
-bin/
-obj/
-dist/
+/bin/
+/obj/
+/dist/
 # Embedded Runtime source is tracked in runtime-src/.
 # runtime/ above remains reserved for local managed installation/state.
 *.exe
