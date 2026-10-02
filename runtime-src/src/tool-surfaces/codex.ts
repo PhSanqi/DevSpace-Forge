@@ -8,7 +8,6 @@ import {
   type ContextPackInput,
 } from "../context-intelligence.js";
 import {
-  MAX_PROCESS_YIELD_MS,
   type ProcessSnapshot,
 } from "../process-sessions.js";
 import {
@@ -41,7 +40,16 @@ import { registerWorkflowSessionTools } from "./workflows.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered lazily for the path being read or packed, so do not recursively scan the repository for instruction files. Prefer context_pack for task-focused source context, then semantic_code for a specific symbol relation, and use read only for a concrete line range that is still needed. If a host cached an older tool list, exec_command accepts the internal read-only compatibility forms devspace-context and devspace-semantic; these are handled by DevSpace and are not passed to the shell. Command output may be compacted; retrieve saved full output with devspace-log meta/read/tail/grep using the returned run_id. For retry-sensitive side effects, provide a stable operation_id and reuse it only for an exact retry after an unknown or lost response.`;
+const CODEX_EXEC_YIELD_MS = 3_000;
+const CODEX_LONG_EXEC_YIELD_MS = 1_000;
+const CODEX_INTERACTIVE_YIELD_MS = 250;
+
+function execYieldMs(command: string): number {
+  const likelyLong = /(?:^|[;&|]\s*)(?:sleep\s+\d|ping\s+-n\s+\d|(?:pnpm|npm|yarn|bun)\s+(?:test|build|run\s+(?:test|build))|(?:node|tsx)\s+--test\b|pytest\b|colcon\s+(?:build|test)\b|cmake\s+--build\b|(?:make|ninja)\b|cargo\s+(?:test|build|clippy)\b|go\s+test\b|mvn\b|gradle\b)/i.test(command);
+  return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
+}
+
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered lazily for the path being read or packed, so do not recursively scan the repository for instruction files. Prefer context_pack for task-focused source context, then semantic_code for a specific symbol relation, and use read only for a concrete line range that is still needed. If a host cached an older tool list, exec_command accepts the internal read-only compatibility forms devspace-context and devspace-semantic; these are handled by DevSpace and are not passed to the shell. Use exec_command for short commands; its wait budget is server-managed. For builds, tests, packaging, coding-agent runs, or other commands expected to take more than a few seconds, prefer job_start and monitor with job_wait/job_status/job_logs so work survives MCP disconnects. Polling write_stdin returns immediately unless interaction is being sent. Command output may be compacted; retrieve saved full output with devspace-log meta/read/tail/grep using the returned run_id. For retry-sensitive side effects, provide a stable operation_id and reuse it only for an exact retry after an unknown or lost response.`;
 
 const operationIdSchema = z
   .string()
@@ -685,7 +693,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Execute command",
       description:
-        "Run a shell command in a workspace with the user's local permissions. Returns the result when it exits during the yield window, otherwise returns a session_id for write_stdin. DevSpace also handles devspace-log bounded log retrieval internally. When semantic_code is unavailable because a host cached an older tool list, devspace-semantic provides an internal read-only Serena compatibility command and is not passed to the shell.",
+        "Run a short shell command in a workspace with the user's local permissions. The wait budget is server-managed; if the command is still running, DevSpace returns a session_id for write_stdin. Prefer job_start for builds, tests, packaging, coding-agent runs, and other long work. DevSpace also handles devspace-log bounded log retrieval internally. When semantic_code is unavailable because a host cached an older tool list, devspace-semantic provides an internal read-only Serena compatibility command and is not passed to the shell.",
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
         operation_id: operationIdSchema,
@@ -725,22 +733,6 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .describe(
             "Working directory relative to the workspace root. Defaults to the workspace root.",
           ),
-        yield_time_ms: z
-          .number()
-          .int()
-          .min(0)
-          .max(MAX_PROCESS_YIELD_MS)
-          .optional()
-          .describe(
-            "Milliseconds to wait before returning a running session. Defaults to 3000, maximum 12000. Use write_stdin for work that runs longer.",
-          ),
-        max_output_tokens: z
-          .number()
-          .int()
-          .positive()
-          .max(100_000)
-          .optional()
-          .describe("Approximate output token budget. Defaults to 10000."),
       },
       outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
@@ -754,14 +746,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       columns,
       rows,
       working_directory,
-      yield_time_ms,
-      max_output_tokens,
     }) => {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const workingDirectory = working_directory;
-      const yieldTimeMs = yield_time_ms;
-      const maxOutputTokens = max_output_tokens;
       const workspace = await workspaces.getWorkspace(workspaceId);
       const command = await inlineOrPayloadText({
         workspaceId,
@@ -857,7 +845,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         stateDir: config.stateDir,
         operationId: operation_id,
         tool: "exec_command",
-        request: { cmd, payload_ref, tty, columns, rows, working_directory, yield_time_ms, max_output_tokens },
+        request: { cmd, payload_ref, tty, columns, rows, working_directory },
         execute: async () => runLoggedToolOperation(
           config,
           {
@@ -882,8 +870,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
               tty,
               columns,
               rows,
-              yieldTimeMs,
-              maxOutputTokens,
+              yieldTimeMs: tty ? CODEX_INTERACTIVE_YIELD_MS : execYieldMs(command),
             });
           },
           processLogFields,
@@ -899,7 +886,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Write to process",
       description:
-        "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C.",
+        "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll immediately without holding the MCP request open. Pass \\u0003 to send Ctrl-C.",
       inputSchema: {
         workspace_id: z
           .string()
@@ -928,22 +915,6 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .max(1_000)
           .optional()
           .describe("Resize a PTY to this height."),
-        yield_time_ms: z
-          .number()
-          .int()
-          .min(0)
-          .max(MAX_PROCESS_YIELD_MS)
-          .optional()
-          .describe(
-            "Milliseconds to wait for process output or completion. Maximum 12000; polling defaults to 5000 and interactive writes to 250.",
-          ),
-        max_output_tokens: z
-          .number()
-          .int()
-          .positive()
-          .max(100_000)
-          .optional()
-          .describe("Approximate output token budget. Defaults to 10000."),
       },
       outputSchema: processOutputSchema(),
       annotations: SHELL_TOOL_ANNOTATIONS,
@@ -955,20 +926,19 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       chars,
       columns,
       rows,
-      yield_time_ms,
-      max_output_tokens,
     }) => {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const sessionId = session_id;
-      const yieldTimeMs = yield_time_ms;
-      const maxOutputTokens = max_output_tokens;
+      const interactionRequested = Boolean(chars?.length)
+        || columns !== undefined
+        || rows !== undefined;
       const recovered = await runOptionalRecoverableOperation({
         workspaceId,
         stateDir: config.stateDir,
         operationId: operation_id,
         tool: "write_stdin",
-        request: { session_id, chars, columns, rows, yield_time_ms, max_output_tokens },
+        request: { session_id, chars, columns, rows },
         execute: async () => runLoggedToolOperation(
           config,
           { tool: "write_stdin", workspaceId },
@@ -981,8 +951,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
               chars,
               columns,
               rows,
-              yieldTimeMs,
-              maxOutputTokens,
+              yieldTimeMs: interactionRequested ? CODEX_INTERACTIVE_YIELD_MS : 0,
             });
           },
           processLogFields,

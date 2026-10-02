@@ -186,7 +186,6 @@ test("origin distinguishes a disconnected request with an in-flight MCP tool", a
       arguments: {
         workspace_id: workspaceId,
         cmd: "node -e \"require('node:fs').writeFileSync('abort-started','');setTimeout(()=>{},1800)\"",
-        yield_time_ms: 12_000,
       },
     }, { signal: controller.signal }).then(
       () => false,
@@ -741,23 +740,60 @@ test("model-facing tool schemas use snake_case recursively", async (t) => {
   }
 });
 
-test("Codex process tools bound model-facing yield windows to 12 seconds", async (t) => {
+test("Codex process tools keep wait and output budgets server-managed", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const tools = await context.client.listTools();
 
   for (const toolName of ["exec_command", "write_stdin"] as const) {
     const tool = tools.tools.find(({ name }) => name === toolName);
-    const yieldSchema = tool?.inputSchema?.properties?.yield_time_ms as {
-      maximum?: number;
-      description?: string;
-    } | undefined;
-
-    assert.equal(yieldSchema?.maximum, 12_000);
-    assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
-    if (toolName === "exec_command") {
-      assert.match(yieldSchema?.description ?? "", /defaults to 3000/i);
-    }
+    assert.ok(tool, `${toolName} should be registered`);
+    const properties = tool.inputSchema?.properties ?? {};
+    assert.equal("yield_time_ms" in properties, false);
+    assert.equal("max_output_tokens" in properties, false);
   }
+});
+
+test("Codex server-managed process waits return long commands quickly and polls immediately", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "server-managed-process-waits"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedAt = performance.now();
+  const longCommand = process.platform === "win32"
+    ? "ping -n 5 127.0.0.1 >NUL"
+    : "sleep 4";
+  const started = structuredContent(await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: longCommand,
+    },
+  }));
+  assert.equal(started.running, true);
+  assert.equal(typeof started.session_id, "number");
+  assert.ok(performance.now() - startedAt < 2_500, "likely-long command should return before completion");
+
+  const pollStartedAt = performance.now();
+  const polled = structuredContent(await context.client.callTool({
+    name: "write_stdin",
+    arguments: {
+      workspace_id: workspaceId,
+      session_id: started.session_id,
+    },
+  }));
+  assert.equal(polled.running, true);
+  assert.ok(performance.now() - pollStartedAt < 750, "status-only poll should return immediately");
+
+  await context.client.callTool({
+    name: "write_stdin",
+    arguments: {
+      workspace_id: workspaceId,
+      session_id: started.session_id,
+      chars: "\\u0003",
+    },
+  });
 });
 
 test("Codex exposes Serena semantics directly and through the cached-tool compatibility command", async (t) => {
