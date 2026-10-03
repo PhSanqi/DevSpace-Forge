@@ -1,5 +1,7 @@
 /** Origin-side observations only: edge arrival and client receipt require edge/client evidence. */
 export interface RequestLifecycle {
+  rpcMethod?: string;
+  rpcToolName?: string;
   handlerStartedAt?: number;
   handlerCompletedAt?: number;
   responseStartedAt?: number;
@@ -50,6 +52,8 @@ export function originRequestTimingFields(
     responseStarted: lifecycle.responseStartedAt !== undefined,
     handlerStarted: lifecycle.handlerStartedAt !== undefined,
     handlerCompleted: lifecycle.handlerCompletedAt !== undefined,
+    rpcMethod: lifecycle.rpcMethod,
+    rpcToolName: lifecycle.rpcToolName,
     handlerStartMs: lifecycle.handlerStartedAt === undefined
       ? undefined : Math.max(0, Math.round(lifecycle.handlerStartedAt - requestStartedAt)),
     handlerCompleteMs: lifecycle.handlerCompletedAt === undefined

@@ -147,6 +147,8 @@ test("origin logs correlate response start, MCP tool completion and response fin
   assert.equal(complete?.activeToolCount, 0);
   assert.equal(finished?.outcome, "response_finished");
   assert.equal(finished?.toolResolvedCount, 1);
+  assert.equal(finished?.rpcMethod, "tools/call");
+  assert.equal(finished?.rpcToolName, "open_workspace");
 });
 
 test("origin distinguishes a disconnected request with an in-flight MCP tool", async (t) => {
@@ -209,6 +211,8 @@ test("origin distinguishes a disconnected request with an in-flight MCP tool", a
   assert.equal(closed?.responseStarted, false);
   assert.equal(closed?.transport_established, true);
   assert.equal(closed?.activeToolCount, 1);
+  assert.equal(closed?.rpcMethod, "tools/call");
+  assert.equal(closed?.rpcToolName, "exec_command");
 });
 
 test("tool modes expose the expected host-facing tool surface", async (t) => {
@@ -738,6 +742,47 @@ test("model-facing tool schemas use snake_case recursively", async (t) => {
       assert.deepEqual(invalidPaths, []);
     });
   }
+});
+
+test("Codex keeps non-UI output schemas out of model context and enforces a schema budget", async (t) => {
+  const semantic = new SerenaSemanticManager({
+    available: true,
+    createClient: async () => ({
+      callTool: async () => ({ structuredContent: { result: "ok" } }),
+      close: async () => undefined,
+    }),
+  });
+  t.after(async () => semantic.close());
+  const context = await fixture(t, {
+    toolMode: "codex",
+    uiEnabled: false,
+    semantic,
+  });
+  const tools = await context.client.listTools();
+  const totalBytes = tools.tools.reduce(
+    (sum, tool) => sum + Buffer.byteLength(JSON.stringify(tool), "utf8"),
+    0,
+  );
+
+  assert.ok(totalBytes <= 30_000, `Codex+Serena tool schema grew to ${totalBytes} bytes`);
+  for (const tool of tools.tools) {
+    if (tool.name === "open_workspace" || tool.name === "show_changes") {
+      assert.ok(tool.outputSchema, `${tool.name} should preserve its stable host output contract`);
+    } else {
+      assert.equal(tool.outputSchema, undefined, `${tool.name} should not expose a redundant output schema`);
+    }
+  }
+});
+
+test("Codex preserves output schemas for UI-backed tools only", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: true });
+  const tools = await context.client.listTools();
+  const byName = new Map(tools.tools.map((tool) => [tool.name, tool]));
+
+  assert.ok(byName.get("open_workspace")?.outputSchema);
+  assert.ok(byName.get("show_changes")?.outputSchema);
+  assert.equal(byName.get("exec_command")?.outputSchema, undefined);
+  assert.equal(byName.get("payload_begin")?.outputSchema, undefined);
 });
 
 test("Codex process tools keep wait and output budgets server-managed", async (t) => {

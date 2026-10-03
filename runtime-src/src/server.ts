@@ -558,9 +558,12 @@ function registerMcpSurface(
   trackToolActivity?: TrackToolActivity,
   semantic?: SerenaSemanticManager,
 ): void {
-  const registrationTarget = trackToolActivity
+  const trackedRegistrationTarget = trackToolActivity
     ? withTrackedToolHandlers(server, trackToolActivity)
     : server;
+  const registrationTarget = config.toolMode === "codex"
+    ? withoutNonUiToolOutputSchemas(trackedRegistrationTarget)
+    : trackedRegistrationTarget;
   const toolSurface = getToolSurface(config.toolMode);
 
   registerAppResource(
@@ -1149,6 +1152,39 @@ function withTrackedToolHandlers(
   };
 }
 
+function withoutNonUiToolOutputSchemas(server: McpRegistrationTarget): McpRegistrationTarget {
+  return {
+    registerTool: ((
+      name: string,
+      definition: Record<string, unknown>,
+      handler: (...handlerArgs: unknown[]) => unknown,
+    ) => {
+      const meta = definition._meta;
+      const hasStableHostContract = name === "open_workspace" || name === "show_changes";
+      const hasUiContract = Boolean(
+        meta
+        && typeof meta === "object"
+        && !Array.isArray(meta)
+        && ("ui" in meta || "ui/resourceUri" in meta),
+      );
+      if (hasStableHostContract || hasUiContract || !("outputSchema" in definition)) {
+        return (server.registerTool as (...callArgs: unknown[]) => unknown)(
+          name,
+          definition,
+          handler,
+        );
+      }
+      const { outputSchema: _outputSchema, ...compactDefinition } = definition;
+      return (server.registerTool as (...callArgs: unknown[]) => unknown)(
+        name,
+        compactDefinition,
+        handler,
+      );
+    }) as McpRegistrationTarget["registerTool"],
+    registerResource: server.registerResource.bind(server),
+  };
+}
+
 export interface CreateServerOptions {
   incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
 }
@@ -1422,18 +1458,26 @@ export function createServer(
       return;
     }
 
+    const lifecycle = res.locals.requestLifecycle as RequestLifecycle;
+    const requestStartedAt = res.locals.originRequestStartedAt as number;
+    const rpcFields = rpcRequestLogFields(req.body);
+    lifecycle.rpcMethod = typeof rpcFields.rpcMethod === "string"
+      ? rpcFields.rpcMethod
+      : undefined;
+    lifecycle.rpcToolName = typeof rpcFields.rpcToolName === "string"
+      ? rpcFields.rpcToolName
+      : undefined;
+
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
       method: req.method,
       protocolVersion: req.header("mcp-protocol-version"),
       mcpMethod: req.header("mcp-method"),
       mcpName: req.header("mcp-name"),
-      ...rpcRequestLogFields(req.body),
+      ...rpcFields,
     });
 
     const handlerStartedAt = performance.now();
-    const lifecycle = res.locals.requestLifecycle as RequestLifecycle;
-    const requestStartedAt = res.locals.originRequestStartedAt as number;
     lifecycle.handlerStartedAt = handlerStartedAt;
     try {
       await requestActivity.run(lifecycle, () => mcpNodeHandler(req, res, req.body));

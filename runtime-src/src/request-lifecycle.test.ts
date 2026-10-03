@@ -26,6 +26,8 @@ test("origin lifecycle classifies disconnects without inventing upstream evidenc
 test("origin timing distinguishes response emission from client receipt", () => {
   const fields = originRequestTimingFields({
     ...initial(),
+    rpcMethod: "tools/call",
+    rpcToolName: "exec_command",
     handlerStartedAt: 110,
     handlerCompletedAt: 140,
     responseStartedAt: 145,
@@ -39,6 +41,8 @@ test("origin timing distinguishes response emission from client receipt", () => 
   assert.equal(fields.transport_established, true);
   assert.equal(fields.handlerCompleteMs, 40);
   assert.equal(fields.toolResolvedCount, 1);
+  assert.equal(fields.rpcMethod, "tools/call");
+  assert.equal(fields.rpcToolName, "exec_command");
 
   const beforeStart = originRequestTimingFields(initial(), 100, 130);
   assert.equal(beforeStart.first_byte_ms, undefined);
