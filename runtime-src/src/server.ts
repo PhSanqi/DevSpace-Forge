@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
-import type { Server as HttpServer } from "node:http";
+import type {
+  OutgoingHttpHeader,
+  OutgoingHttpHeaders,
+  Server as HttpServer,
+} from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -426,6 +430,53 @@ function rpcRequestLogFields(body: unknown): Record<string, unknown> {
       ? candidate.params.name
       : undefined,
   };
+}
+
+const NODE_MANAGED_MCP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+]);
+
+function withoutNodeManagedMcpHeaders(
+  headers: OutgoingHttpHeaders | OutgoingHttpHeader[] | undefined,
+): OutgoingHttpHeaders | OutgoingHttpHeader[] | undefined {
+  if (!headers || Array.isArray(headers)) return headers;
+  const sanitized = { ...headers };
+  for (const name of Object.keys(sanitized)) {
+    if (NODE_MANAGED_MCP_HEADERS.has(name.toLowerCase())) delete sanitized[name];
+  }
+  return sanitized;
+}
+
+async function withNodeManagedMcpHeaders(
+  res: Response,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const originalWriteHead = res.writeHead;
+  const writeHead = originalWriteHead.bind(res) as Response["writeHead"];
+  res.writeHead = ((
+    statusCode: number,
+    statusMessageOrHeaders?: string | OutgoingHttpHeaders | OutgoingHttpHeader[],
+    headers?: OutgoingHttpHeaders | OutgoingHttpHeader[],
+  ) => {
+    if (typeof statusMessageOrHeaders === "string") {
+      return writeHead(
+        statusCode,
+        statusMessageOrHeaders,
+        withoutNodeManagedMcpHeaders(headers),
+      );
+    }
+    return writeHead(
+      statusCode,
+      withoutNodeManagedMcpHeaders(statusMessageOrHeaders),
+    );
+  }) as Response["writeHead"];
+  try {
+    await operation();
+  } finally {
+    res.writeHead = originalWriteHead;
+  }
 }
 
 function assetBaseUrl(config: ServerConfig): string {
@@ -1480,7 +1531,10 @@ export function createServer(
     const handlerStartedAt = performance.now();
     lifecycle.handlerStartedAt = handlerStartedAt;
     try {
-      await requestActivity.run(lifecycle, () => mcpNodeHandler(req, res, req.body));
+      await requestActivity.run(
+        lifecycle,
+        () => withNodeManagedMcpHeaders(res, () => mcpNodeHandler(req, res, req.body)),
+      );
       lifecycle.handlerCompletedAt = performance.now();
       const responseTiming = res.locals.httpResponseTiming as HttpResponseTiming | undefined;
       logEvent(config.logging, "debug", "mcp_request_complete", {

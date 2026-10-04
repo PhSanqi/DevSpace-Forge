@@ -1523,6 +1523,8 @@ test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) =
   const { root, localBaseUrl, accessToken } = await httpServerFixture(
     t,
     "devspace-modern-http-test-",
+    false,
+    true,
   );
 
   const unauthenticated = await postModernMcp(
@@ -1552,6 +1554,8 @@ test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) =
     {},
   );
   assert.equal(listed.status, 200, await listed.clone().text());
+  assert.equal(listed.headers.get("connection"), "keep-alive");
+  assert.match(listed.headers.get("keep-alive") ?? "", /(?:^|[,; ]+)timeout=300(?:[,; ]|$)/);
   const listBody = await listed.json() as {
     result?: { tools?: Array<{ name?: string }> };
   };
@@ -1809,6 +1813,7 @@ async function httpServerFixture(
   t: TestContext,
   prefix: string,
   lifecycleLogging = false,
+  configureTransportTimeouts = false,
 ): Promise<HttpServerFixture> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const ownerToken = "test-owner-token-that-is-long-enough";
@@ -1830,6 +1835,7 @@ async function httpServerFixture(
   }
   const running = createServer(config, { incomingArtifactAdapters: [] });
   const httpServer = running.app.listen(0, "127.0.0.1");
+  if (configureTransportTimeouts) configureHttpServer(httpServer);
   await new Promise<void>((resolve) => httpServer.once("listening", resolve));
 
   t.after(async () => {
