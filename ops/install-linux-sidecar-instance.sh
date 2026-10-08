@@ -62,6 +62,15 @@ done
 [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || { echo 'Invalid port.' >&2; exit 1; }
 CONSOLE_PORT="${CONSOLE_PORT:-$((PORT + 1))}"
 [[ "$CONSOLE_PORT" =~ ^[0-9]+$ ]] && (( CONSOLE_PORT >= 1 && CONSOLE_PORT <= 65535 && CONSOLE_PORT != PORT )) || { echo 'Invalid console port.' >&2; exit 1; }
+TUNNEL_METRICS_PORT=""
+TUNNEL_METRICS_URL=""
+CONSOLE_TUNNEL_METRICS_ARGS=""
+if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
+  TUNNEL_METRICS_PORT="${DEVSPACE_TUNNEL_METRICS_PORT:-$((PORT + 2567))}"
+  [[ "$TUNNEL_METRICS_PORT" =~ ^[0-9]+$ ]] && (( TUNNEL_METRICS_PORT >= 1 && TUNNEL_METRICS_PORT <= 65535 && TUNNEL_METRICS_PORT != PORT && TUNNEL_METRICS_PORT != CONSOLE_PORT )) || { echo 'Invalid dedicated Tunnel metrics port.' >&2; exit 1; }
+  TUNNEL_METRICS_URL="http://127.0.0.1:${TUNNEL_METRICS_PORT}/metrics"
+  CONSOLE_TUNNEL_METRICS_ARGS="--tunnel-metrics ${TUNNEL_METRICS_URL}"
+fi
 [[ -n "$PUBLIC_URL" ]] || { echo '--public-url is required.' >&2; exit 1; }
 [[ -n "$ORIGIN_HOST" ]] || { echo '--origin-host is required.' >&2; exit 1; }
 [[ -d "$ALLOWED_ROOT" ]] || { echo "Allowed root does not exist: $ALLOWED_ROOT" >&2; exit 1; }
@@ -187,7 +196,7 @@ chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
 cat > "$INSTALL_ROOT/bin/run-runtime-console" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "$INSTANCE" --platform-root "$INSTALL_ROOT" --config "$CONFIG_DIR/config.jsonc" --credential-file "$CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$SERVICE" --tunnel-unit "$TUNNEL_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT"
+exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "$INSTANCE" --platform-root "$INSTALL_ROOT" --config "$CONFIG_DIR/config.jsonc" --credential-file "$CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$SERVICE" --tunnel-unit "$TUNNEL_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT" $CONSOLE_TUNNEL_METRICS_ARGS
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 
@@ -246,7 +255,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$NODE $INSTALL_ROOT/bin/managed-cloudflared.mjs --cloudflared $INSTANCE_CLOUDFLARED --control-settings $CONTROL_SETTINGS --quick-url-file $QUICK_URL_FILE --local-port $PORT --protocol $TUNNEL_PROTOCOL --token-file $INSTANCE_TOKEN_FILE
+ExecStart=$NODE $INSTALL_ROOT/bin/managed-cloudflared.mjs --cloudflared $INSTANCE_CLOUDFLARED --control-settings $CONTROL_SETTINGS --quick-url-file $QUICK_URL_FILE --local-port $PORT --protocol $TUNNEL_PROTOCOL --token-file $INSTANCE_TOKEN_FILE --metrics 127.0.0.1:$TUNNEL_METRICS_PORT
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -265,49 +274,158 @@ EOF
 set -euo pipefail
 LOCAL_URL="http://127.0.0.1:${PORT}${HEALTH_PATH}"
 ORIGIN_URL="https://${ORIGIN_HOST}${HEALTH_PATH}"
-STATE_FILE="$WATCHDOG_STATE"
+METRICS_URL="$TUNNEL_METRICS_URL"
+STATE_DIR="$STATE_DIR"
 TUNNEL_SERVICE="$TUNNEL_SERVICE"
 CONTROL_SETTINGS="$CONTROL_SETTINGS"
 QUICK_URL_FILE="$QUICK_URL_FILE"
+FLAP_WINDOW_SECONDS="\${DEVSPACE_WATCHDOG_FLAP_WINDOW_SECONDS:-120}"
+FLAP_THRESHOLD="\${DEVSPACE_WATCHDOG_FLAP_THRESHOLD:-2}"
+FLAP_ORIGIN_WINDOW_SECONDS="\${DEVSPACE_WATCHDOG_FLAP_ORIGIN_WINDOW_SECONDS:-30}"
+RESTART_COOLDOWN_SECONDS="\${DEVSPACE_WATCHDOG_RESTART_COOLDOWN_SECONDS:-600}"
+HA_RESTART_MAX="\${DEVSPACE_WATCHDOG_HA_RESTART_MAX:-2}"
+HA_FAILURE_THRESHOLD="\${DEVSPACE_WATCHDOG_HA_FAILURE_THRESHOLD:-3}"
+mkdir -p "\$STATE_DIR"
+exec 9>"\$STATE_DIR/cloudflared-watchdog.lock"
+flock -n 9 || exit 0
 
-probe_200() {
-  local url="\$1"
-  local code
-  code="\$(curl -sS -o /dev/null --max-time 8 --connect-timeout 3 --max-redirs 0 -w '%{http_code}' "\$url" 2>/dev/null || true)"
-  [[ "\$code" == "200" ]]
+read_count() {
+  local value=0
+  [[ ! -f "\$1" ]] || read -r value < "\$1" || value=0
+  [[ "\$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "\$value"
+}
+write_count() {
+  printf '%s\n' "\$2" > "\$1.tmp.\$\$"
+  mv -f "\$1.tmp.\$\$" "\$1"
 }
 
+probe_200() {
+  local code
+  code="\$(curl --noproxy '*' -sS -o /dev/null --max-time 8 --connect-timeout 3 --max-redirs 0 -w '%{http_code}' "\$1" 2>/dev/null || true)"
+  [[ "\$code" == 200 ]]
+}
+probe_origin() {
+  local code
+  code="\$(curl -sS -o /dev/null --max-time 8 --connect-timeout 3 --max-redirs 0 -w '%{http_code}' "\$ORIGIN_URL" 2>/dev/null || true)"
+  [[ "\$code" == 200 ]]
+}
+read_ha() {
+  local payload value
+  payload="\$(curl --noproxy '*' -fsS --max-time 5 "\$METRICS_URL" 2>/dev/null)" || return 1
+  value="\$(printf '%s\n' "\$payload" | awk '\$1 ~ /^cloudflared_tunnel_ha_connections(\{.*\})?\$/ && NF == 2 {print \$2}')"
+  [[ "\$value" =~ ^[0-4]$ ]] || return 1
+  printf '%s' "\$value"
+}
+recent_flap_count() {
+  local seconds="\$1" payload now_epoch since_epoch
+  [[ "\$seconds" =~ ^[0-9]+$ ]] || { printf '0'; return; }
+  now_epoch="\$(date +%s)"
+  since_epoch=\$(( now_epoch - seconds ))
+  if (( last_restart > 0 && last_restart + 5 > since_epoch )); then
+    since_epoch=\$(( last_restart + 5 ))
+  fi
+  payload="\$(journalctl --user -u "\$TUNNEL_SERVICE" --since "@\$since_epoch" -o cat --no-pager 2>/dev/null || true)"
+  printf '%s\n' "\$payload" | grep -Eic 'Connection terminated|Failed to dial a quic connection' || true
+}
+
+ORIGIN_COUNT_FILE="\$STATE_DIR/cloudflared-watchdog-failures"
+HA_COUNT_FILE="\$STATE_DIR/cloudflared-watchdog-ha-failures"
+LAST_RESTART_FILE="\$STATE_DIR/cloudflared-watchdog-last-restart"
+last_restart="\$(read_count "\$LAST_RESTART_FILE")"
+
 if ! probe_200 "\$LOCAL_URL"; then
-  printf '0\n' > "\$STATE_FILE"
-  echo "watchdog: local DevSpace is not healthy; tunnel restart suppressed"
+  write_count "\$ORIGIN_COUNT_FILE" 0
+  write_count "\$HA_COUNT_FILE" 0
+  echo 'watchdog: local DevSpace is unhealthy; tunnel restart suppressed'
   exit 0
 fi
 
 if grep -Eq '"tunnel_mode"[[:space:]]*:[[:space:]]*"Quick"' "\$CONTROL_SETTINGS" 2>/dev/null; then
   if [[ ! -s "\$QUICK_URL_FILE" ]]; then
-    printf '0\n' > "\$STATE_FILE"
-    echo "watchdog: Quick Tunnel URL not available yet"
+    write_count "\$ORIGIN_COUNT_FILE" 0
+    write_count "\$HA_COUNT_FILE" 0
+    echo 'watchdog: Quick Tunnel URL not available yet'
     exit 0
   fi
   ORIGIN_URL="\$(tr -d '\r\n' < "\$QUICK_URL_FILE")${HEALTH_PATH}"
 fi
 
-if probe_200 "\$ORIGIN_URL"; then
-  printf '0\n' > "\$STATE_FILE"
-  exit 0
+reason=""
+origin_healthy=0
+origin_count=0
+ha_count=0
+ha=""
+if probe_origin; then
+  origin_healthy=1
+  write_count "\$ORIGIN_COUNT_FILE" 0
+else
+  origin_count=\$(( \$(read_count "\$ORIGIN_COUNT_FILE") + 1 ))
+  write_count "\$ORIGIN_COUNT_FILE" "\$origin_count"
+  echo "watchdog: origin health failed (\$origin_count/3): \$ORIGIN_URL"
 fi
 
-failures=0
-if [[ -f "\$STATE_FILE" ]]; then read -r failures < "\$STATE_FILE" || failures=0; fi
-[[ "\$failures" =~ ^[0-9]+$ ]] || failures=0
-failures=\$((failures + 1))
-printf '%s\n' "\$failures" > "\$STATE_FILE"
-echo "watchdog: origin health failed (\$failures/3): \$ORIGIN_URL"
-if (( failures >= 3 )); then
-  printf '0\n' > "\$STATE_FILE"
-  echo "watchdog: restarting \$TUNNEL_SERVICE after 3 consecutive origin failures"
-  systemctl --user restart "\$TUNNEL_SERVICE"
+if ha="\$(read_ha)"; then
+  if [[ "\$ha" == 4 ]]; then
+    write_count "\$HA_COUNT_FILE" 0
+  elif (( ha <= HA_RESTART_MAX )); then
+    ha_count=\$(( \$(read_count "\$HA_COUNT_FILE") + 1 ))
+    write_count "\$HA_COUNT_FILE" "\$ha_count"
+    echo "watchdog: dedicated tunnel HA severely degraded (\$ha/4; observation \$ha_count/\$HA_FAILURE_THRESHOLD)"
+  else
+    write_count "\$HA_COUNT_FILE" 0
+    echo "watchdog: dedicated tunnel HA degraded (\$ha/4); restart suppressed while redundant connections remain"
+  fi
+else
+  write_count "\$HA_COUNT_FILE" 0
+  echo 'watchdog: dedicated tunnel HA metrics unavailable or invalid; HA restart path suppressed'
 fi
+
+flaps="\$(recent_flap_count "\$FLAP_WINDOW_SECONDS")"
+fast_flaps="\$(recent_flap_count "\$FLAP_ORIGIN_WINDOW_SECONDS")"
+[[ "\$flaps" =~ ^[0-9]+$ ]] || flaps=0
+[[ "\$fast_flaps" =~ ^[0-9]+$ ]] || fast_flaps=0
+if (( flaps > 0 )); then
+  echo "watchdog: recent dedicated tunnel termination events=\$flaps within \${FLAP_WINDOW_SECONDS}s"
+fi
+
+if (( origin_healthy == 0 && fast_flaps >= 1 )); then
+  reason=origin-failed-after-tunnel-flap
+elif (( origin_count >= 3 )); then
+  reason=origin-unreachable
+elif (( ha_count >= HA_FAILURE_THRESHOLD )); then
+  reason=ha-severely-degraded
+elif (( flaps >= FLAP_THRESHOLD )); then
+  if (( origin_healthy == 1 )); then
+    echo 'watchdog: quic-flapping observed; restart suppressed while public origin remains healthy'
+  else
+    echo 'watchdog: quic-flapping observed; waiting for an availability restart threshold'
+  fi
+fi
+[[ -n "\$reason" ]] || exit 0
+
+now="\$(date +%s)"
+if (( now < last_restart + RESTART_COOLDOWN_SECONDS )); then
+  echo "watchdog: \$reason; restart cooldown active"
+  exit 0
+fi
+write_count "\$LAST_RESTART_FILE" "\$now"
+write_count "\$ORIGIN_COUNT_FILE" 0
+write_count "\$HA_COUNT_FILE" 0
+echo "watchdog: restarting \$TUNNEL_SERVICE after \$reason"
+systemctl --user restart "\$TUNNEL_SERVICE"
+
+attempts="\${DEVSPACE_WATCHDOG_RECOVERY_ATTEMPTS:-15}"
+delay="\${DEVSPACE_WATCHDOG_RECOVERY_DELAY:-2}"
+for ((i=1; i<=attempts; i++)); do
+  if probe_200 "\$LOCAL_URL" && probe_origin && ha="\$(read_ha)" && [[ "\$ha" == 4 ]]; then
+    echo 'watchdog: recovered; dedicated tunnel HA=4/4 and local/origin healthy'
+    exit 0
+  fi
+  sleep "\$delay"
+done
+echo 'watchdog: restart completed but full HA/origin recovery is unverified' >&2
+exit 1
 EOF
   chmod 0755 "$INSTALL_ROOT/bin/check-cloudflared"
 

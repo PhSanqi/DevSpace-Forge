@@ -738,6 +738,23 @@ test('managed cloudflared builds Remote/Quick commands and extracts only tryclou
     assert.throws(()=>buildCloudflaredArgs({mode:'Remote',port:17677,tokenFile:path.join(root,'missing')}),/token file is missing/);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+test('Linux installers wire dedicated Tunnel metrics and conservative watchdog restart gates',()=>{
+  const setup=readFileSync(new URL('../setup-linux.sh',import.meta.url),'utf8');
+  const sidecar=readFileSync(new URL('../ops/install-linux-sidecar-instance.sh',import.meta.url),'utf8');
+  for(const source of [setup,sidecar]){
+    assert.match(source,/DEVSPACE_TUNNEL_METRICS_PORT/);
+    assert.match(source,/--metrics 127\.0\.0\.1:/);
+    assert.match(source,/--tunnel-metrics/);
+    assert.match(source,/HA_RESTART_MAX/);
+    assert.match(source,/HA_FAILURE_THRESHOLD/);
+    assert.match(source,/origin-failed-after-tunnel-flap/);
+    assert.match(source,/ha-severely-degraded/);
+    assert.match(source,/quic-flapping observed; restart suppressed while public origin remains healthy/);
+    assert.doesNotMatch(source,/reason=quic-flapping/);
+  }
+  assert.match(setup,/REUSE_EXISTING_TUNNEL/);
+  assert.match(setup,/CONSOLE_TUNNEL_METRICS_ARGS=""/);
+});
 test('Linux installers wire Quick/Remote helpers without exposing the Tunnel token in process arguments',()=>{
   const setup=readFileSync(new URL('../setup-linux.sh',import.meta.url),'utf8');
   const sidecar=readFileSync(new URL('../ops/install-linux-sidecar-instance.sh',import.meta.url),'utf8');
