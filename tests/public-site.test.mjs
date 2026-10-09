@@ -18,6 +18,8 @@ test('public site serves only static marketing pages and assets on loopback', as
     assert.match(homeHtml, /<html lang="zh-CN" data-theme="light">/);
     assert.match(homeHtml, /不用离开 Chat/);
     assert.match(homeHtml, /CHAT ALLOWANCE \+ WORK \/ CODEX ALLOWANCE/);
+    assert.match(homeHtml, /同一个 main revision 构建，并作为同一条公开 Release 发布/);
+    assert.doesNotMatch(homeHtml, /Control 与 Runtime 分别维护版本/);
     assert.match(homeHtml, /\/assets\/product-icon\.png/);
     assert.match(home.headers.get('content-security-policy'), /connect-src 'none'/);
     assert.equal(home.headers.get('strict-transport-security'), 'max-age=3600');

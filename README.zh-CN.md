@@ -21,6 +21,8 @@ DevSpace-Forge 通过 MCP 将支持该协议的 AI 聊天客户端连接到你�
 
 从仓库的 **Releases** 页面下载最新版安装包及对应 SHA-256 校验文件。
 
+Control 与内嵌 Runtime 从同一个 `main` revision 构建，并随同一条公开产品 Release 一起发布；无需再单独匹配 Runtime 与 Control 版本。
+
 | 平台 | 文件名形式 | 安装入口 |
 | --- | --- | --- |
 | Windows x64 | DevSpace-Forge-vX.Y.Z-win-x64.zip | 解压后运行 Setup.exe |

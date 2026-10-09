@@ -21,6 +21,8 @@ This is a community-built, self-hosted project, not an official OpenAI or Cloudf
 
 Open this repository's **Releases** tab and download the latest archive and its matching SHA-256 file.
 
+Control and the embedded Runtime are built from the same `main` revision and ship together on one public product release line. You do not need to match a separate Runtime release to a Control package.
+
 | Platform | Archive pattern | Start |
 | --- | --- | --- |
 | Windows x64 | DevSpace-Forge-vX.Y.Z-win-x64.zip | Extract and run Setup.exe |
