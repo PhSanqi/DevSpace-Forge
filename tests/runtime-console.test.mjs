@@ -306,6 +306,15 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   assert.ok(prepare.includes(`$devSpaceVersion = '${runtimeVersion}'`));
   assert.ok(prepare.includes(`$devSpacePackageName = 'waishnav-devspace-${runtimeVersion}.tgz'`));
   assert.ok(prepare.includes(`$slotName = '${slot}'`));
+  assert.ok(prepare.includes('$env:PATH = "$nodeDir;$previousPath"'),'Windows package install must put the bundled Node first in lifecycle PATH');
+  assert.ok(prepare.includes('$env:PATH = $previousPath'),'Windows package install must restore the caller PATH');
+  assert.ok(prepare.includes("import Database from 'better-sqlite3'"),'Windows packaging must execute better-sqlite3 with the bundled Node');
+  assert.ok(prepare.includes("new Database(':memory:')"),'Windows packaging must actually load and exercise the better-sqlite3 native binding');
+  const slotSmoke=read('test-runtime-slot.ps1');
+  assert.ok(slotSmoke.includes("import Database from 'better-sqlite3'"),'Windows slot validation must fail closed on native SQLite ABI mismatches');
+  assert.ok(slotSmoke.includes("new Database(':memory:')"),'Windows slot validation must exercise the SQLite native binding');
+  const ci=read('.github/workflows/ci.yml');
+  assert.ok(ci.includes('Validate Windows offline Runtime assembly'),'CI must exercise the real Windows offline assembly path');
   assert.ok(packer.includes(`runtime/slots/${slot}/READY`));
   assert.ok(workflow.includes(`DevSpaceControlRuntime-${slot}.tar`));
 });

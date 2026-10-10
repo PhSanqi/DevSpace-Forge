@@ -59,8 +59,19 @@ const pid = getCurrentProcessId();
 if (!Number.isInteger(pid) || pid <= 0) throw new Error('Koffi Win32 call failed');
 console.log(`koffi-win32=ok pid=${pid}`);
 '@
+$sqliteSmoke = @'
+import Database from 'better-sqlite3';
+const db = new Database(':memory:');
+const row = db.prepare('select 1 as ok').get();
+db.close();
+if (row?.ok !== 1) throw new Error('better-sqlite3 query failed');
+console.log('better-sqlite3=ok');
+'@
 Push-Location (Join-Path $slot 'devspace')
 try {
+    & $node --input-type=module -e $sqliteSmoke
+    if ($LASTEXITCODE -ne 0) { throw 'better-sqlite3 native smoke failed.' }
+
     & $node --input-type=module -e $koffiSmoke
     if ($LASTEXITCODE -ne 0) { throw 'Koffi Win32 smoke failed.' }
 }

@@ -41,6 +41,25 @@ jobs:
       - name: Build embedded Runtime
         working-directory: runtime-src
         run: pnpm build
+      - name: Validate Windows offline Runtime assembly
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist\ci-runtime-package | Out-Null
+          Push-Location runtime-src
+          try {
+            pnpm pack --pack-destination ..\dist\ci-runtime-package
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to pack canonical Runtime for Windows offline validation.' }
+          }
+          finally {
+            Pop-Location
+          }
+          $runtimePackage = (Get-ChildItem dist\ci-runtime-package\*.tgz | Select-Object -First 1).FullName
+          if ([string]::IsNullOrWhiteSpace($runtimePackage)) { throw 'Canonical Runtime package was not produced.' }
+          .\prepare-offline-windows-runtime.ps1 `
+            -OutputRoot dist\ci-offline-windows-runtime `
+            -RuntimePackagePath $runtimePackage `
+            -Force
 
   control:
     runs-on: ubuntu-latest

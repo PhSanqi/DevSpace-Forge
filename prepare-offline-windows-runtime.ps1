@@ -91,12 +91,18 @@ Copy-Item -LiteralPath $runtimePackage -Destination (Join-Path $devspaceDir 'dev
 
 $node = Join-Path $nodeDir 'node.exe'
 $npmCli = Join-Path $nodeDir 'node_modules\npm\bin\npm-cli.js'
+$previousPath = $env:PATH
 Push-Location $devspaceDir
 try {
+    $env:PATH = "$nodeDir;$previousPath"
     & $node $npmCli install --omit=dev --no-fund --no-audit
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $npmExitCode = $LASTEXITCODE
+    if ($npmExitCode -ne 0) { throw "npm install failed with code $npmExitCode" }
 }
-finally { Pop-Location }
+finally {
+    $env:PATH = $previousPath
+    Pop-Location
+}
 
 $controlRuntimeLink = Join-Path $devspaceDir 'node_modules\devspace-control-platform-runtime'
 if (Test-Path -LiteralPath $controlRuntimeLink) {
@@ -128,6 +134,9 @@ if ($actualVersion -ne $devSpaceVersion) { throw "Unexpected DevSpace version: $
 
 Push-Location $devspaceDir
 try {
+    & $node --input-type=module -e "import Database from 'better-sqlite3'; const db=new Database(':memory:'); db.prepare('select 1 as ok').get(); db.close(); console.log('Windows bundle better-sqlite3: ok');"
+    if ($LASTEXITCODE -ne 0) { throw 'better-sqlite3 Windows native smoke failed.' }
+
     & $node --input-type=module -e "import koffi from 'koffi'; const k=koffi.load('kernel32.dll'); const f=k.func('uint32_t GetCurrentProcessId()'); if(f()<=0) process.exit(2);"
     if ($LASTEXITCODE -ne 0) { throw 'Koffi Windows native smoke failed.' }
 
