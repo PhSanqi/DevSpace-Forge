@@ -35,6 +35,7 @@ function testPackedPackageLaunchers(): void {
       cwd: installRoot,
       encoding: "utf8",
       stdio: "pipe",
+      shell: process.platform === "win32",
     });
 
     const configRoot = join(root, "config");
@@ -72,7 +73,6 @@ function testPackedPackageLaunchers(): void {
       cwd: installRoot,
       encoding: "utf8",
       stdio: "pipe",
-      shell: process.platform === "win32",
     });
 
     execInstalledBin(installRoot, "devspace-agentd", [], {
