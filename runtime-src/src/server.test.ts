@@ -835,14 +835,25 @@ test("Codex server-managed process waits return long commands quickly and polls 
   assert.equal(polled.running, true);
   assert.ok(performance.now() - pollStartedAt < 750, "status-only poll should return immediately");
 
-  await context.client.callTool({
+  let interrupted = structuredContent(await context.client.callTool({
     name: "write_stdin",
     arguments: {
       workspace_id: workspaceId,
       session_id: started.session_id,
-      chars: "\\u0003",
+      chars: "\u0003",
     },
-  });
+  }));
+  for (let attempt = 0; interrupted.running && attempt < 50; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    interrupted = structuredContent(await context.client.callTool({
+      name: "write_stdin",
+      arguments: {
+        workspace_id: workspaceId,
+        session_id: started.session_id,
+      },
+    }));
+  }
+  assert.equal(interrupted.running, false, "interrupted process should exit before fixture cleanup");
 });
 
 test("Codex exposes Serena semantics directly and through the cached-tool compatibility command", async (t) => {

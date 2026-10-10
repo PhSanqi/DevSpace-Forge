@@ -130,6 +130,9 @@ Push-Location $devspaceDir
 try {
     & $node --input-type=module -e "import koffi from 'koffi'; const k=koffi.load('kernel32.dll'); const f=k.func('uint32_t GetCurrentProcessId()'); if(f()<=0) process.exit(2);"
     if ($LASTEXITCODE -ne 0) { throw 'Koffi Windows native smoke failed.' }
+
+    & $node --input-type=module -e "import sharp from 'sharp'; const b=await sharp({create:{width:4,height:4,channels:3,background:'#fff'}}).jpeg().toBuffer(); if(!b.length) process.exit(2); console.log('Windows bundle sharp: '+sharp.versions.sharp);"
+    if ($LASTEXITCODE -ne 0) { throw 'Sharp Windows native smoke failed.' }
 }
 finally { Pop-Location }
 

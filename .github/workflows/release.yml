@@ -34,15 +34,33 @@ jobs:
           cache: pnpm
           cache-dependency-path: runtime-src/pnpm-lock.yaml
 
-      - name: Build and validate canonical runtime
+      - name: Install canonical runtime dependencies
+        working-directory: runtime-src
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck canonical runtime
+        working-directory: runtime-src
+        run: pnpm typecheck
+
+      - name: Test canonical runtime
+        working-directory: runtime-src
+        run: pnpm test
+
+      - name: Test installed canonical runtime package
+        working-directory: runtime-src
+        run: pnpm test:package-install
+
+      - name: Build canonical runtime
+        working-directory: runtime-src
+        run: pnpm build
+
+      - name: Pack canonical runtime
         shell: powershell
         working-directory: runtime-src
         run: |
-          pnpm install --frozen-lockfile
-          pnpm typecheck
-          pnpm build
           New-Item -ItemType Directory -Force ..\dist\runtime-package | Out-Null
           pnpm pack --pack-destination ..\dist\runtime-package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Prepare validated Windows offline runtime
         shell: powershell
@@ -60,6 +78,7 @@ jobs:
           & node .\ops\write-provenance.mjs --source-root runtime-src --server-file "$package\dist\server.js" --package-file runtime-src\package.json --output "$package\runtime-provenance.json" --artifact-id "runtime-$env:CANONICAL_RUNTIME_VERSION" --strict
           if ($LASTEXITCODE -ne 0) { throw 'Runtime provenance generation failed.' }
           .\test.ps1 -NodePath $node -DevSpacePackageRoot $package
+          if ($LASTEXITCODE -ne 0) { throw 'Windows runtime/control validation failed.' }
 
           New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
           $payload = 'dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local15.tar'

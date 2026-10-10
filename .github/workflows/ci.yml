@@ -26,13 +26,21 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: runtime-src/pnpm-lock.yaml
-      - name: Validate embedded Runtime
+      - name: Install embedded Runtime dependencies
         working-directory: runtime-src
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm typecheck
-          pnpm test
-          pnpm build
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck embedded Runtime
+        working-directory: runtime-src
+        run: pnpm typecheck
+      - name: Test embedded Runtime
+        working-directory: runtime-src
+        run: pnpm test
+      - name: Test installed Runtime package
+        working-directory: runtime-src
+        run: pnpm test:package-install
+      - name: Build embedded Runtime
+        working-directory: runtime-src
+        run: pnpm build
 
   control:
     runs-on: ubuntu-latest
