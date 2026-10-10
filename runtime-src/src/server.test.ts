@@ -234,6 +234,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "read",
         "read_image",
         "read_images",
+        "read_video",
         "write",
         "edit",
         "bash",
@@ -265,6 +266,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "read",
         "read_image",
         "read_images",
+        "read_video",
         "apply_patch",
         "context_pack",
         "exec_command",
@@ -1214,6 +1216,39 @@ test("read_images fails closed for an invalid member, symlink escape, count, or 
     String((overflow.content as Array<{ text?: string }>)[0]?.text),
     /total image payload exceeds/i,
   );
+});
+
+test("read_video exposes the adaptive interval contract and fails closed before an unavailable backend", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "read-video-safety"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  await writeFile(join(context.project, "not-video.txt"), "not a video");
+
+  const rejected = await context.client.callTool({
+    name: "read_video",
+    arguments: {
+      workspace_id: workspaceId,
+      path: "not-video.txt",
+      start_seconds: 1,
+      end_seconds: 2,
+    },
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(
+    String((rejected.content as Array<{ text?: string }>)[0]?.text),
+    /only supports \.mp4/i,
+  );
+
+  const tools = await context.client.listTools();
+  const tool = tools.tools.find((item) => item.name === "read_video");
+  assert.equal(tool?.annotations?.readOnlyHint, true);
+  assert.match(String(tool?.description), /start_seconds\/end_seconds/);
+  const properties = tool?.inputSchema?.properties ?? {};
+  assert.ok("start_seconds" in properties);
+  assert.ok("end_seconds" in properties);
+  assert.equal((tool?._meta as { ui?: unknown } | undefined)?.ui, undefined);
 });
 
 test("read discovers nested instructions lazily once per conversation and bounds default output", async (t) => {

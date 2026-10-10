@@ -78,6 +78,13 @@ const sharp = load('sharp');
 });
 NODE
 
+VIDEO_CACHE="$DIST/.offline-cache/video"
+mkdir -p "$VIDEO_CACHE"
+"$STAGE/runtime/node/bin/node" "$ROOT/ops/prepare-video-sidecar.mjs" \
+  --platform linux-x64 \
+  --target "$STAGE/runtime/devspace/node_modules/@waishnav/devspace" \
+  --cache "$VIDEO_CACHE"
+
 # Keep the Linux bundle aligned with the Windows Control runtime. Subagents are
 # disabled in the current product scope, so the Claude Agent SDK payload is not
 # needed. Type declarations, source maps, and PDBs are build/debug metadata and

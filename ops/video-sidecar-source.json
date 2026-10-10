@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "provider": "BtbN/FFmpeg-Builds",
+  "release_tag": "autobuild-2026-10-09-14-16",
+  "ffmpeg_version": "n8.1.3-16-ge0a878dd70-20261009",
+  "license": "LGPL-3.0-or-later",
+  "release_url": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-09-14-16",
+  "build_source_url": "https://github.com/BtbN/FFmpeg-Builds/tree/bd26828f0e965c2c657553584b09caf5d57eee52",
+  "ffmpeg_source_url": "https://github.com/FFmpeg/FFmpeg/tree/e0a878dd704698302f453a8f646e20b21fd1c904",
+  "platforms": {
+    "linux-x64": {
+      "archive": {
+        "name": "ffmpeg-n8.1.3-16-ge0a878dd70-linux64-lgpl-8.1.tar.xz",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/ffmpeg-n8.1.3-16-ge0a878dd70-linux64-lgpl-8.1.tar.xz",
+        "sha256": "9ee0b5163f4bb5448e43ec00162973095556a3956bb2403e64afae4af2f1e5e1",
+        "root": "ffmpeg-n8.1.3-16-ge0a878dd70-linux64-lgpl-8.1"
+      },
+      "ffmpeg": {
+        "archive_path": "bin/ffmpeg",
+        "runtime_path": "bin/ffmpeg",
+        "sha256": "bcb7aa88c3180229f09e92438afd331665a34725ccabbc9903672ed845ee30d6"
+      },
+      "ffprobe": {
+        "archive_path": "bin/ffprobe",
+        "runtime_path": "bin/ffprobe",
+        "sha256": "6e048ec20b27b8a3852736789a3bbcaa266efdc65bd9a7513c2883b2fee186c1"
+      },
+      "license_file": {
+        "archive_path": "LICENSE.txt",
+        "runtime_path": "LICENSE.txt",
+        "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+      }
+    },
+    "win32-x64": {
+      "archive": {
+        "name": "ffmpeg-n8.1.3-16-ge0a878dd70-win64-lgpl-8.1.zip",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/ffmpeg-n8.1.3-16-ge0a878dd70-win64-lgpl-8.1.zip",
+        "sha256": "346fd19f3afe98a8606da4fc2984c8b411297734dba101cd91ec961fa8b2f875",
+        "root": "ffmpeg-n8.1.3-16-ge0a878dd70-win64-lgpl-8.1"
+      },
+      "ffmpeg": {
+        "archive_path": "bin/ffmpeg.exe",
+        "runtime_path": "bin/ffmpeg.exe",
+        "sha256": "3971aa43b234858377d7793e4c4d64315af93bb8bcaa9042026e631fe3c6edc8"
+      },
+      "ffprobe": {
+        "archive_path": "bin/ffprobe.exe",
+        "runtime_path": "bin/ffprobe.exe",
+        "sha256": "a114a92114118b21cfdb305087775f24e20c695e041515fd3d615c6548348504"
+      },
+      "license_file": {
+        "archive_path": "LICENSE.txt",
+        "runtime_path": "LICENSE.txt",
+        "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+      }
+    }
+  },
+  "upstream_checksums_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/checksums.sha256",
+  "upstream_checksums_sha256": "feef1c333fb4968cdcbbe2bbf2d4e9ab9b4e3a668c0aef6543701be58049068c"
+}

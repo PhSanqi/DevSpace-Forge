@@ -29,6 +29,11 @@ $required = @(
     'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/package.json',
     'runtime/slots/windows-beta4-local15/devspace/node_modules/sharp/package.json',
     'runtime/slots/windows-beta4-local15/devspace/node_modules/@img/sharp-win32-x64/package.json',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/vendor/ffmpeg/manifest.json',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/vendor/ffmpeg/bin/ffmpeg.exe',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/vendor/ffmpeg/bin/ffprobe.exe',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/vendor/ffmpeg/LICENSE.txt',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/vendor/ffmpeg/PROVENANCE.json',
     'cloudflared.exe'
 )
 foreach ($item in $required) {

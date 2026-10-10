@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $consoleNode = Get-Command node.exe -ErrorAction SilentlyContinue
 if ($consoleNode) {
-    & $consoleNode.Source --test (Join-Path $PSScriptRoot 'tests\runtime-console.test.mjs') (Join-Path $PSScriptRoot 'tests\public-site.test.mjs') (Join-Path $PSScriptRoot 'tests\public-repository-audit.test.mjs')
+    & $consoleNode.Source --test (Join-Path $PSScriptRoot 'tests\runtime-console.test.mjs') (Join-Path $PSScriptRoot 'tests\public-site.test.mjs') (Join-Path $PSScriptRoot 'tests\public-repository-audit.test.mjs') (Join-Path $PSScriptRoot 'tests\video-sidecar-source.test.mjs')
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
     throw 'Node.js is required for Runtime Console security and rendering tests.'

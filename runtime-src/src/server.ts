@@ -41,10 +41,10 @@ import { registerPayloadTools } from "./payload-tools.js";
 import {
   MAX_IMAGE_BATCH_BYTES,
   MAX_IMAGE_BATCH_COUNT,
-  MAX_IMAGE_SOURCE_BYTES,
   readImageForModel,
   readImageFiles,
 } from "./image-read.js";
+import { readVideoForModel } from "./video-read.js";
 import {
   logEvent,
   requestIp,
@@ -1032,16 +1032,11 @@ function registerMcpSurface(
   registrationTarget.registerTool(
     toolNames.readImage,
     {
-      title: "Read image",
       description:
-        "Return a workspace JPG/PNG as MCP ImageContent; oversized or very long images are converted to a bounded overview+tiles set.",
+        "Read one workspace JPG/PNG as bounded MCP ImageContent; large images become overview+tiles.",
       inputSchema: {
-        workspace_id: z
-          .string()
-          .describe(workspaceIdDescription),
-        path: z
-          .string()
-          .describe("Workspace-relative .jpg/.jpeg/.png path."),
+        workspace_id: z.string(),
+        path: z.string(),
       },
       outputSchema: resultOutputSchema({
         path: z.string(),
@@ -1133,18 +1128,14 @@ function registerMcpSurface(
   registrationTarget.registerTool(
     toolNames.readImages,
     {
-      title: "Read images",
       description:
-        `Return up to ${MAX_IMAGE_BATCH_COUNT} workspace JPG/PNG files as ordered MCP ImageContent. The batch is capped at ${MAX_IMAGE_BATCH_BYTES} raw bytes.`,
+        `Read up to ${MAX_IMAGE_BATCH_COUNT} workspace JPG/PNG files as ordered MCP ImageContent within ${MAX_IMAGE_BATCH_BYTES} bytes.`,
       inputSchema: {
-        workspace_id: z
-          .string()
-          .describe(workspaceIdDescription),
+        workspace_id: z.string(),
         paths: z
           .array(z.string())
           .min(1)
-          .max(MAX_IMAGE_BATCH_COUNT)
-          .describe("Workspace-relative image paths in comparison order."),
+          .max(MAX_IMAGE_BATCH_COUNT),
       },
       outputSchema: resultOutputSchema({
         images: z.array(z.object({
@@ -1207,6 +1198,135 @@ function registerMcpSurface(
         logToolCall(config, {
           tool: toolNames.readImages,
           workspaceId,
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        return {
+          content: [textBlock(message)],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  registrationTarget.registerTool(
+    toolNames.readVideo,
+    {
+      description:
+        "Sample workspace video as timestamped MCP ImageContent; repeat with start_seconds/end_seconds to zoom an interval.",
+      inputSchema: {
+        workspace_id: z.string(),
+        path: z.string(),
+        start_seconds: z
+          .number()
+          .nonnegative()
+          .optional(),
+        end_seconds: z
+          .number()
+          .positive()
+          .optional(),
+      },
+      outputSchema: resultOutputSchema({
+        path: z.string(),
+        source_size_bytes: z.number().int().nonnegative(),
+        duration_seconds: z.number().positive(),
+        interval_start_seconds: z.number().nonnegative(),
+        interval_end_seconds: z.number().positive(),
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        fps: z.number().positive().optional(),
+        has_audio: z.boolean(),
+        container_format: z.string().optional(),
+        frame_count: z.number().int().positive(),
+        total_output_bytes: z.number().int().nonnegative(),
+        frames: z.array(z.object({
+          index: z.number().int().nonnegative(),
+          timestamp_seconds: z.number().nonnegative(),
+          mime_type: z.enum(["image/jpeg", "image/png"]),
+          size_bytes: z.number().int().nonnegative(),
+        })),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspace_id, path: inputPath, start_seconds, end_seconds }) => {
+      const startedAt = performance.now();
+      const workspaceId = workspace_id;
+      try {
+        const workspace = await workspaces.getWorkspace(workspaceId);
+        const absolutePath = await workspaces.resolvePath(workspace, inputPath);
+        const video = await readVideoForModel(absolutePath, {
+          startSeconds: start_seconds,
+          endSeconds: end_seconds,
+        });
+        const frames = video.frames.map((frame, index) => ({
+          index,
+          timestamp_seconds: frame.timestampSeconds,
+          mime_type: frame.image.mimeType,
+          size_bytes: frame.image.sizeBytes,
+        }));
+        const metadata = JSON.stringify({
+          path: inputPath,
+          source_size_bytes: video.sourceSizeBytes,
+          duration_seconds: video.durationSeconds,
+          interval_start_seconds: video.intervalStartSeconds,
+          interval_end_seconds: video.intervalEndSeconds,
+          width: video.width,
+          height: video.height,
+          fps: video.fps,
+          has_audio: video.hasAudio,
+          container_format: video.containerFormat,
+          frame_count: frames.length,
+          total_output_bytes: video.totalOutputBytes,
+          frames,
+          backend: {
+            provider: video.backend.provider,
+            ffmpeg_version: video.backend.ffmpegVersion,
+          },
+        });
+
+        logToolCall(config, {
+          tool: toolNames.readVideo,
+          workspaceId,
+          path: inputPath,
+          sizeBytes: video.sourceSizeBytes,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        const content: ToolContent[] = [
+          textBlock(metadata),
+          ...video.frames.map((frame) => ({
+            type: "image" as const,
+            data: frame.image.data,
+            mimeType: frame.image.mimeType,
+          })),
+        ];
+        return {
+          content,
+          structuredContent: {
+            result: metadata,
+            path: inputPath,
+            source_size_bytes: video.sourceSizeBytes,
+            duration_seconds: video.durationSeconds,
+            interval_start_seconds: video.intervalStartSeconds,
+            interval_end_seconds: video.intervalEndSeconds,
+            width: video.width,
+            height: video.height,
+            fps: video.fps,
+            has_audio: video.hasAudio,
+            container_format: video.containerFormat,
+            frame_count: frames.length,
+            total_output_bytes: video.totalOutputBytes,
+            frames,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: toolNames.readVideo,
+          workspaceId,
+          path: inputPath,
           success: false,
           durationMs: Math.round(performance.now() - startedAt),
           error: message,

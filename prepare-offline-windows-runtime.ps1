@@ -132,6 +132,15 @@ if (-not (Test-Path -LiteralPath $installed)) { throw 'DevSpace offline runtime 
 $actualVersion = (Get-Content -Raw $installed | ConvertFrom-Json).version
 if ($actualVersion -ne $devSpaceVersion) { throw "Unexpected DevSpace version: $actualVersion" }
 
+$devSpacePackageRoot = Split-Path -Parent $installed
+$videoCache = Join-Path $root 'dist\.offline-cache\video'
+New-Item -ItemType Directory -Force $videoCache | Out-Null
+& $node (Join-Path $root 'ops\prepare-video-sidecar.mjs') `
+    --platform win32-x64 `
+    --target $devSpacePackageRoot `
+    --cache $videoCache
+if ($LASTEXITCODE -ne 0) { throw 'Windows video sidecar preparation failed.' }
+
 Push-Location $devspaceDir
 try {
     & $node --input-type=module -e "import Database from 'better-sqlite3'; const db=new Database(':memory:'); db.prepare('select 1 as ok').get(); db.close(); console.log('Windows bundle better-sqlite3: ok');"

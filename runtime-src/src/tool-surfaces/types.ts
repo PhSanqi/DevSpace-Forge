@@ -11,6 +11,7 @@ export const toolNames = {
   read: "read",
   readImage: "read_image",
   readImages: "read_images",
+  readVideo: "read_video",
   write: "write",
   edit: "edit",
   shell: "bash",

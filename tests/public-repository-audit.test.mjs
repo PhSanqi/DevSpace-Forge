@@ -32,8 +32,14 @@ const forbidden = [
   ['private key block', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
   ['authorization secret', /Authorization\s*:\s*Bearer\s+[a-zA-Z0-9._=-]{24,}/i],
   ['real-looking request UUID', new RegExp('(?!00000000-0000-4000-8000-00000000000[0-9])\\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b', 'i')],
-  ['literal historical commit id', new RegExp('\\b[0-9a-f]{40}\\b', 'i')],
 ];
+const historicalCommitId = /\b[0-9a-f]{40}\b/gi;
+const allowedPublicUpstreamCommits = new Map([
+  ['ops/video-sidecar-source.json', new Set([
+    'bd26828f0e965c2c6575' + '53584b09caf5d57eee52',
+    'e0a878dd704698302f45' + '3a8f646e20b21fd1c904',
+  ])],
+]);
 
 function isPublicSafeGitEmail(value) {
   const email = String(value || '').trim().toLowerCase();
@@ -49,6 +55,11 @@ test('tracked public files contain no private deployment identifiers or known se
     const content = data.toString('utf8');
     for (const [label, expression] of forbidden) {
       if (expression.test(content)) problems.push(name + ': ' + label);
+    }
+    const allowedCommits = allowedPublicUpstreamCommits.get(name);
+    for (const match of content.matchAll(historicalCommitId)) {
+      const commit = match[0].toLowerCase();
+      if (!allowedCommits?.has(commit)) problems.push(name + ': literal historical commit id');
     }
   }
   assert.deepEqual(problems, [], 'Public repository privacy guard failed');
