@@ -10,13 +10,14 @@ export const toolNames = {
   openWorkspace: "open_workspace",
   read: "read",
   readImage: "read_image",
+  readImages: "read_images",
   write: "write",
   edit: "edit",
   shell: "bash",
 } as const;
 
 export const workspaceIdDescription =
-  "Workspace to use. Reuse the current project's workspace_id.";
+  "ID from open_workspace.";
 
 export const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,

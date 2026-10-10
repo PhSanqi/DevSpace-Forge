@@ -69,8 +69,9 @@ test("modern registration adapter preserves tools and request metadata", async (
   assert.equal(callBody.result?.content?.[0]?.text, "ok:modern-chat");
 });
 
-test("modern registration adapter preserves MCP image content", async (t) => {
+test("modern registration adapter preserves multiple MCP image content blocks", async (t) => {
   const imageData = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+  const secondImageData = Buffer.from([0xff, 0xd8, 0xff, 0xe0]).toString("base64");
   const handler = createMcpHandler(() => {
     const adapter = createModernMcpServerAdapter({
       name: "devspace-modern-test",
@@ -83,6 +84,7 @@ test("modern registration adapter preserves MCP image content", async (t) => {
         content: [
           { type: "text", text: "image metadata" },
           { type: "image", data: imageData, mimeType: "image/png" },
+          { type: "image", data: secondImageData, mimeType: "image/jpeg" },
         ],
         structuredContent: { result: "image metadata" },
       }),
@@ -105,6 +107,9 @@ test("modern registration adapter preserves MCP image content", async (t) => {
   assert.equal(body.result?.content?.[1]?.type, "image");
   assert.equal(body.result?.content?.[1]?.data, imageData);
   assert.equal(body.result?.content?.[1]?.mimeType, "image/png");
+  assert.equal(body.result?.content?.[2]?.type, "image");
+  assert.equal(body.result?.content?.[2]?.data, secondImageData);
+  assert.equal(body.result?.content?.[2]?.mimeType, "image/jpeg");
   assert.doesNotMatch(JSON.stringify(body.result?.structuredContent), /iVBOR/);
 });
 

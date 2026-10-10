@@ -27,6 +27,8 @@ $required = @(
     'runtime/slots/windows-beta4-local15/READY',
     'runtime/slots/windows-beta4-local15/node/node.exe',
     'runtime/slots/windows-beta4-local15/devspace/node_modules/@waishnav/devspace/package.json',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/sharp/package.json',
+    'runtime/slots/windows-beta4-local15/devspace/node_modules/@img/sharp-win32-x64/package.json',
     'cloudflared.exe'
 )
 foreach ($item in $required) {

@@ -11,7 +11,9 @@ This is a community-built, self-hosted project, not an official OpenAI or Cloudf
 ## What you get
 
 - **Chat-to-local development:** read and modify approved files, run local commands, builds, tests and Git operations through MCP.
+- **Local visual inspection:** on hosts that support MCP image results and a multimodal model, `read_image` can inspect one workspace JPG/PNG and `read_images` can compare several images without installing ChatGPT on the target machine.
 - **Less context handoff:** bring project files, Git state and command results into the same conversation. The AI client's context window still applies.
+- **Local visual inspection:** MCP image tools can send approved JPG/PNG files to a multimodal host; very large or long single images are reduced locally to a bounded overview plus detail tiles instead of pushing the original payload unchanged.
 - **Scoped access:** you explicitly choose Allowed Roots.
 - **Review and recovery:** inspect changes, command evidence, review checkpoints, durable job status and logs.
 - **Two platforms:** offline Windows x64 and Linux x64 packages include the pinned Runtime, Node.js and cloudflared.

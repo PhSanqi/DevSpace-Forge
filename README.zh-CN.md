@@ -11,7 +11,9 @@ DevSpace-Forge 通过 MCP 将支持该协议的 AI 聊天客户端连接到你�
 ## 主要功能
 
 - **在 Chat 中调用本地开发工具：** 按授权范围读写文件、执行命令、构建、测试和 Git 操作。
+- **本地图片视觉输入：** 当 MCP Host 支持图片结果且模型具备多模态能力时，可用 `read_image` 查看一张工作区 JPG/PNG，用 `read_images` 同时比较多张图片；目标电脑不需要安装 ChatGPT。
 - **减少上下文交接：** 将项目文件、Git 状态和执行结果带回同一条对话；实际上下文窗口仍由客户端决定。
+- **本地图片视觉：** MCP 图片工具可将授权目录中的 JPG/PNG 送入多模态 Host；单张超大或超长图片会先在本机生成有界 overview + detail tiles，而不是把原始大文件直接塞进一次模型输入。
 - **目录权限边界：** 使用 Allowed Roots 明确可访问的目录。
 - **检查与恢复：** 查看改动、命令证据、Review 检查点、持久任务状态和日志。
 - **Windows / Linux：** 提供包含固定版本 Runtime、Node.js 和 cloudflared 的 x64 离线包。

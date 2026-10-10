@@ -60,6 +60,24 @@ if [[ -e "$STAGE/runtime/devspace/node_modules/devspace-control-platform-runtime
   exit 1
 fi
 
+DEVSPACE_PACKAGE_JSON="$STAGE/runtime/devspace/node_modules/@waishnav/devspace/package.json"
+"$STAGE/runtime/node/bin/node" - "$DEVSPACE_PACKAGE_JSON" <<'NODE'
+const { createRequire } = require('node:module');
+const packageJson = process.argv[2];
+const load = createRequire(packageJson);
+const sharp = load('sharp');
+(async () => {
+  const image = await sharp({
+    create: { width: 4, height: 4, channels: 3, background: '#ffffff' },
+  }).jpeg().toBuffer();
+  if (image.length === 0) throw new Error('sharp produced an empty image');
+  console.log(`Linux bundle sharp: ${sharp.versions.sharp}`);
+})().catch((error) => {
+  console.error('Linux offline runtime sharp smoke failed:', error);
+  process.exit(1);
+});
+NODE
+
 # Keep the Linux bundle aligned with the Windows Control runtime. Subagents are
 # disabled in the current product scope, so the Claude Agent SDK payload is not
 # needed. Type declarations, source maps, and PDBs are build/debug metadata and
@@ -78,7 +96,7 @@ fi
 cp "$CLOUDFLARED_CACHE" "$STAGE/cloudflared"
 chmod 0755 "$STAGE/cloudflared" "$STAGE/runtime/node/bin/node"
 
-DEVSPACE_VERSION="$($STAGE/runtime/node/bin/node -p "require(process.argv[1]).version" "$STAGE/runtime/devspace/node_modules/@waishnav/devspace/package.json")"
+DEVSPACE_VERSION="$($STAGE/runtime/node/bin/node -p "require(process.argv[1]).version" "$DEVSPACE_PACKAGE_JSON")"
 NODE="$STAGE/runtime/node/bin/node"
 "$NODE" "$ROOT/ops/write-provenance.mjs" --source-root "$ROOT" --server-file "$STAGE/ops/runtime-console.mjs" --ui-dir "$STAGE/ops" --package-file "$ROOT/package.json" --output "$STAGE/control-provenance.json" --version "$VERSION" --artifact-id "$NAME" --strict
 if [[ -n "$RUNTIME_SOURCE" ]]; then

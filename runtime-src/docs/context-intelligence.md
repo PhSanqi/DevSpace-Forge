@@ -6,14 +6,38 @@ rebaseable local overlay for long-running remote coding sessions.
 ## Visual context
 
 `read_image(workspace_id, path)` reads one `.jpg`, `.jpeg`, or `.png` from the
-active workspace and returns the image bytes as MCP `ImageContent`. It reuses
-DevSpace's canonical workspace path containment, rejects symlink escapes,
-validates the file signature, and caps a single image at 20 MiB. Base64 image
-payloads are never copied into `structuredContent` or tool-call logs.
+active workspace and returns MCP `ImageContent`. It reuses DevSpace's canonical
+workspace path containment, rejects symlink escapes, validates the file
+signature, and never copies base64 image payloads into `structuredContent` or
+tool-call logs. Normal images are returned directly. Oversized or very long
+images are decoded locally with the packaged `sharp` backend and converted to
+one overview plus bounded overlapping detail tiles. The source file is capped
+at 256 MiB / 200 million pixels and the derived MCP image payload remains capped
+at the existing 20 MiB response budget.
 
-Use `read_image` when visual inspection is required. Keep source and text reads
-on `read`, `context_pack`, and `semantic_code` so binary data does not pollute
-the text context.
+`read_images(workspace_id, paths)` returns up to eight images together, in the
+requested order, for comparisons such as before/after UI states. Every path is
+validated through the same workspace boundary and image-signature checks. The
+whole batch keeps the same 20 MiB raw-byte ceiling as one `read_image` call, so
+multi-image inspection does not silently expand the transport payload budget.
+
+Use `read_image` for one visual and `read_images` when several visuals must be
+considered together. Keep source and text reads on `read`, `context_pack`, and
+`semantic_code` so binary data does not pollute the text context. MCP image
+content is a model-input capability; it must not be described as a host UI
+attachment unless the host exposes a separate, verified attachment contract.
+
+Byte chunking and visual chunking are separate concerns. Existing payload
+spooling can transfer or stage a large file, but byte chunks are never exposed
+as visual input. The file must first be reassembled and verified, then images
+are decoded into model-readable overview/detail frames.
+
+Video follows the same boundary but is not yet exposed as a model-facing tool.
+The intended contract is local metadata plus a bounded set of timestamped
+keyframes/scene samples, with optional audio transcription. DevSpace must ship
+the selected video backend inside the Windows/Linux offline Runtime rather than
+assuming the target machine has ffmpeg installed; until that packaging contract
+is verified, no `read_video` tool should advertise support.
 
 ## Long-term goal
 

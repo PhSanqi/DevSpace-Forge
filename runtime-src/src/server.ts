@@ -38,7 +38,13 @@ import {
   type IncomingArtifactAdapter,
 } from "./incoming-artifacts.js";
 import { registerPayloadTools } from "./payload-tools.js";
-import { readImageFile } from "./image-read.js";
+import {
+  MAX_IMAGE_BATCH_BYTES,
+  MAX_IMAGE_BATCH_COUNT,
+  MAX_IMAGE_SOURCE_BYTES,
+  readImageForModel,
+  readImageFiles,
+} from "./image-read.js";
 import {
   logEvent,
   requestIp,
@@ -270,7 +276,7 @@ function serverInstructions(
     : "";
   const agents = `Follow root/global instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered automatically when a concrete path is read or packed, so do not recursively scan the repository for instruction files. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
-  const imageInstruction = ` Use ${toolNames.readImage} when the model needs to inspect a local JPG/PNG image; it returns image pixels directly and must not be replaced by reading binary files as text.`;
+  const imageInstruction = ` Use ${toolNames.readImage} for one local JPG/PNG image; it automatically emits a bounded overview+tiles set for oversized or very long images. Use ${toolNames.readImages} when several normal-sized images need to be inspected together. Do not read binary images as text.`;
   const payloadInstruction =
     " For tool arguments too large for one MCP request, use payload_begin, payload_chunk, and payload_commit, then pass the committed payload_ref to a tool that explicitly accepts it; never execute or consume uncommitted chunks.";
 
@@ -1028,19 +1034,24 @@ function registerMcpSurface(
     {
       title: "Read image",
       description:
-        "Read one local JPG/PNG image from the current workspace and return its pixels directly to the model as MCP ImageContent. The path must remain inside the workspace; symlink escapes are rejected. Maximum file size is 20 MiB.",
+        "Return a workspace JPG/PNG as MCP ImageContent; oversized or very long images are converted to a bounded overview+tiles set.",
       inputSchema: {
         workspace_id: z
           .string()
           .describe(workspaceIdDescription),
         path: z
           .string()
-          .describe("Image path relative to the workspace root. Supports .jpg, .jpeg, and .png."),
+          .describe("Workspace-relative .jpg/.jpeg/.png path."),
       },
       outputSchema: resultOutputSchema({
         path: z.string(),
         mime_type: z.enum(["image/jpeg", "image/png"]),
         size_bytes: z.number().int().nonnegative(),
+        mode: z.enum(["direct", "tiled"]),
+        image_count: z.number().int().positive(),
+        total_output_bytes: z.number().int().nonnegative(),
+        width: z.number().int().positive().optional(),
+        height: z.number().int().positive().optional(),
       }),
       annotations: { readOnlyHint: true },
     },
@@ -1050,34 +1061,55 @@ function registerMcpSurface(
       try {
         const workspace = await workspaces.getWorkspace(workspaceId);
         const absolutePath = await workspaces.resolvePath(workspace, inputPath);
-        const image = await readImageFile(absolutePath);
+        const imageSet = await readImageForModel(absolutePath);
         const metadata = JSON.stringify({
           path: inputPath,
-          mimeType: image.mimeType,
-          sizeBytes: image.sizeBytes,
+          mode: imageSet.mode,
+          source_mime_type: imageSet.sourceMimeType,
+          source_size_bytes: imageSet.sourceSizeBytes,
+          width: imageSet.width,
+          height: imageSet.height,
+          image_count: imageSet.images.length,
+          total_output_bytes: imageSet.totalOutputBytes,
+          images: imageSet.images.map((image, index) => ({
+            index,
+            role: image.role,
+            mime_type: image.mimeType,
+            size_bytes: image.sizeBytes,
+            region: image.region,
+          })),
         });
 
         logToolCall(config, {
           tool: toolNames.readImage,
           workspaceId,
           path: inputPath,
-          sizeBytes: image.sizeBytes,
-          mimeType: image.mimeType,
+          sizeBytes: imageSet.sourceSizeBytes,
+          mimeType: imageSet.sourceMimeType,
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
 
         const content: ToolContent[] = [
           textBlock(metadata),
-          { type: "image", data: image.data, mimeType: image.mimeType },
+          ...imageSet.images.map((image) => ({
+            type: "image" as const,
+            data: image.data,
+            mimeType: image.mimeType,
+          })),
         ];
         return {
           content,
           structuredContent: {
             result: metadata,
             path: inputPath,
-            mime_type: image.mimeType,
-            size_bytes: image.sizeBytes,
+            mime_type: imageSet.sourceMimeType,
+            size_bytes: imageSet.sourceSizeBytes,
+            mode: imageSet.mode,
+            image_count: imageSet.images.length,
+            total_output_bytes: imageSet.totalOutputBytes,
+            width: imageSet.width,
+            height: imageSet.height,
           },
         };
       } catch (error) {
@@ -1086,6 +1118,95 @@ function registerMcpSurface(
           tool: toolNames.readImage,
           workspaceId,
           path: inputPath,
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        return {
+          content: [textBlock(message)],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  registrationTarget.registerTool(
+    toolNames.readImages,
+    {
+      title: "Read images",
+      description:
+        `Return up to ${MAX_IMAGE_BATCH_COUNT} workspace JPG/PNG files as ordered MCP ImageContent. The batch is capped at ${MAX_IMAGE_BATCH_BYTES} raw bytes.`,
+      inputSchema: {
+        workspace_id: z
+          .string()
+          .describe(workspaceIdDescription),
+        paths: z
+          .array(z.string())
+          .min(1)
+          .max(MAX_IMAGE_BATCH_COUNT)
+          .describe("Workspace-relative image paths in comparison order."),
+      },
+      outputSchema: resultOutputSchema({
+        images: z.array(z.object({
+          path: z.string(),
+          mime_type: z.enum(["image/jpeg", "image/png"]),
+          size_bytes: z.number().int().nonnegative(),
+        })),
+        count: z.number().int().nonnegative(),
+        total_size_bytes: z.number().int().nonnegative(),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspace_id, paths: inputPaths }) => {
+      const startedAt = performance.now();
+      const workspaceId = workspace_id;
+      try {
+        const workspace = await workspaces.getWorkspace(workspaceId);
+        const absolutePaths = await Promise.all(
+          inputPaths.map((inputPath) => workspaces.resolvePath(workspace, inputPath)),
+        );
+        const batch = await readImageFiles(absolutePaths);
+        const images = batch.images.map((image, index) => ({
+          path: inputPaths[index]!,
+          mime_type: image.mimeType,
+          size_bytes: image.sizeBytes,
+        }));
+        const metadata = JSON.stringify({
+          images,
+          count: images.length,
+          totalSizeBytes: batch.totalSizeBytes,
+        });
+
+        logToolCall(config, {
+          tool: toolNames.readImages,
+          workspaceId,
+          sizeBytes: batch.totalSizeBytes,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        const content: ToolContent[] = [
+          textBlock(metadata),
+          ...batch.images.map((image) => ({
+            type: "image" as const,
+            data: image.data,
+            mimeType: image.mimeType,
+          })),
+        ];
+        return {
+          content,
+          structuredContent: {
+            result: metadata,
+            images,
+            count: images.length,
+            total_size_bytes: batch.totalSizeBytes,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: toolNames.readImages,
+          workspaceId,
           success: false,
           durationMs: Math.round(performance.now() - startedAt),
           error: message,

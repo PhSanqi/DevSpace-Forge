@@ -51,6 +51,31 @@ function testPackedPackageLaunchers(): void {
     const config = JSON.parse(cliOutput) as { tools?: { mode?: string } };
     assert.equal(config.tools?.mode, "codex");
 
+    const installedPackageJson = join(
+      installRoot,
+      "node_modules",
+      "@waishnav",
+      "devspace",
+      "package.json",
+    );
+    execFileSync(process.execPath, [
+      "-e",
+      [
+        "const { createRequire } = require('node:module');",
+        "const load = createRequire(process.argv[1]);",
+        "const sharp = load('sharp');",
+        "sharp({ create: { width: 2, height: 2, channels: 3, background: '#ffffff' } })",
+        "  .jpeg().toBuffer().then((buffer) => { if (!buffer.length) process.exit(2); })",
+        "  .catch((error) => { console.error(error); process.exit(1); });",
+      ].join("\n"),
+      installedPackageJson,
+    ], {
+      cwd: installRoot,
+      encoding: "utf8",
+      stdio: "pipe",
+      shell: process.platform === "win32",
+    });
+
     execInstalledBin(installRoot, "devspace-agentd", [], {
       ...process.env,
       ...env,

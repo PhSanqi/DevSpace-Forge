@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { access, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
+import { createRequire } from "node:module";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -35,6 +36,7 @@ import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
 const execFileAsync = promisify(execFile);
+const testRequire = createRequire(import.meta.url);
 
 test("HTTP server transport timeouts keep long MCP connections alive", () => {
   const fakeServer = {
@@ -231,6 +233,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "payload_read",
         "read",
         "read_image",
+        "read_images",
         "write",
         "edit",
         "bash",
@@ -261,6 +264,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
         "payload_read",
         "read",
         "read_image",
+        "read_images",
         "apply_patch",
         "context_pack",
         "exec_command",
@@ -975,10 +979,10 @@ test("read rejects a symlink that leaves the workspace", async (t) => {
 
 test("read_image returns bounded MCP ImageContent without duplicating base64 in structured content", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
-  const image = Buffer.from([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  ]);
+  const image = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
   await writeFile(join(context.project, "photo.png"), image);
   const workspaceId = structuredContent(
     await callOpen(context.client, context.project, "read-image"),
@@ -1001,12 +1005,55 @@ test("read_image returns bounded MCP ImageContent without duplicating base64 in 
   assert.equal(structured.path, "photo.png");
   assert.equal(structured.mime_type, "image/png");
   assert.equal(structured.size_bytes, image.byteLength);
+  assert.equal(structured.mode, "direct");
+  assert.equal(structured.image_count, 1);
   assert.doesNotMatch(JSON.stringify(structured), new RegExp(image.toString("base64")));
 
   const tools = await context.client.listTools();
   const tool = tools.tools.find((item) => item.name === "read_image");
   assert.equal(tool?.annotations?.readOnlyHint, true);
   assert.equal((tool?._meta as { ui?: unknown } | undefined)?.ui, undefined);
+});
+
+test("read_image converts a very long image into a bounded overview and tiles", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const sharp = testRequire("sharp") as (options: unknown) => {
+    png(): { toBuffer(): Promise<Buffer> };
+  };
+  const longImage = await sharp({
+    create: {
+      width: 160,
+      height: 9000,
+      channels: 3,
+      background: { r: 240, g: 240, b: 240 },
+    },
+  }).png().toBuffer();
+  await writeFile(join(context.project, "long.png"), longImage);
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "read-long-image"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const result = await context.client.callTool({
+    name: "read_image",
+    arguments: { workspace_id: workspaceId, path: "long.png" },
+  });
+  assert.equal(result.isError, undefined);
+  const content = result.content as Array<Record<string, unknown>>;
+  assert.ok(content.length >= 4);
+  assert.ok(content.length <= 9);
+  for (const image of content.slice(1)) {
+    assert.equal(image.type, "image");
+    assert.equal(image.mimeType, "image/jpeg");
+  }
+
+  const structured = structuredContent(result);
+  assert.equal(structured.mode, "tiled");
+  assert.equal(structured.width, 160);
+  assert.equal(structured.height, 9000);
+  assert.equal(structured.image_count, content.length - 1);
+  assert.ok(Number(structured.total_output_bytes) <= 20 * 1024 * 1024);
+  assert.doesNotMatch(JSON.stringify(structured), /\/9j\//);
 });
 
 test("read_image rejects unsupported, oversized, and symlink-escaped files", async (t) => {
@@ -1044,6 +1091,118 @@ test("read_image rejects unsupported, oversized, and symlink-escaped files", asy
     arguments: { workspace_id: workspaceId, path: "outside-images/outside.png" },
   });
   assert.equal(escaped.isError, true);
+});
+
+test("read_images returns ordered MCP ImageContent within the single-call payload budget", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const png = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  ]);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  await writeFile(join(context.project, "before.png"), png);
+  await writeFile(join(context.project, "after.jpg"), jpeg);
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "read-images"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const result = await context.client.callTool({
+    name: "read_images",
+    arguments: {
+      workspace_id: workspaceId,
+      paths: ["before.png", "after.jpg"],
+    },
+  });
+  assert.equal(result.isError, undefined);
+  const content = result.content as Array<Record<string, unknown>>;
+  assert.equal(content.length, 3);
+  assert.equal(content[0]?.type, "text");
+  assert.equal(content[1]?.type, "image");
+  assert.equal(content[1]?.mimeType, "image/png");
+  assert.equal(content[1]?.data, png.toString("base64"));
+  assert.equal(content[2]?.type, "image");
+  assert.equal(content[2]?.mimeType, "image/jpeg");
+  assert.equal(content[2]?.data, jpeg.toString("base64"));
+
+  const structured = structuredContent(result);
+  assert.equal(structured.count, 2);
+  assert.equal(structured.total_size_bytes, png.byteLength + jpeg.byteLength);
+  assert.deepEqual(structured.images, [
+    { path: "before.png", mime_type: "image/png", size_bytes: png.byteLength },
+    { path: "after.jpg", mime_type: "image/jpeg", size_bytes: jpeg.byteLength },
+  ]);
+  assert.doesNotMatch(JSON.stringify(structured), new RegExp(png.toString("base64")));
+  assert.doesNotMatch(JSON.stringify(structured), new RegExp(jpeg.toString("base64")));
+
+  const tools = await context.client.listTools();
+  const tool = tools.tools.find((item) => item.name === "read_images");
+  assert.equal(tool?.annotations?.readOnlyHint, true);
+  assert.equal((tool?._meta as { ui?: unknown } | undefined)?.ui, undefined);
+});
+
+test("read_images fails closed for an invalid member, symlink escape, count, or total payload overflow", async (t) => {
+  const context = await fixture(t, { toolMode: "claude", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "read-images-safety"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  await writeFile(join(context.project, "valid.png"), pngHeader);
+  await writeFile(join(context.project, "invalid.png"), "not a png");
+  const invalidMember = await context.client.callTool({
+    name: "read_images",
+    arguments: {
+      workspace_id: workspaceId,
+      paths: ["valid.png", "invalid.png"],
+    },
+  });
+  assert.equal(invalidMember.isError, true);
+  assert.equal(
+    (invalidMember.content as Array<Record<string, unknown>>).some((item) => item.type === "image"),
+    false,
+  );
+
+  const outside = await mkdtemp(join(tmpdir(), "devspace-images-outside-test-"));
+  t.after(async () => rm(outside, { recursive: true, force: true }));
+  await writeFile(join(outside, "outside.png"), pngHeader);
+  await symlink(outside, join(context.project, "outside-images-batch"), platform() === "win32" ? "junction" : "dir");
+  const escaped = await context.client.callTool({
+    name: "read_images",
+    arguments: {
+      workspace_id: workspaceId,
+      paths: ["valid.png", "outside-images-batch/outside.png"],
+    },
+  });
+  assert.equal(escaped.isError, true);
+
+  const tooMany = await context.client.callTool({
+    name: "read_images",
+    arguments: {
+      workspace_id: workspaceId,
+      paths: Array.from({ length: 9 }, () => "valid.png"),
+    },
+  });
+  assert.equal(tooMany.isError, true);
+
+  for (const name of ["large-a.png", "large-b.png"]) {
+    const file = join(context.project, name);
+    await writeFile(file, pngHeader);
+    await truncate(file, 11 * 1024 * 1024);
+  }
+  const overflow = await context.client.callTool({
+    name: "read_images",
+    arguments: {
+      workspace_id: workspaceId,
+      paths: ["large-a.png", "large-b.png"],
+    },
+  });
+  assert.equal(overflow.isError, true);
+  assert.match(
+    String((overflow.content as Array<{ text?: string }>)[0]?.text),
+    /total image payload exceeds/i,
+  );
 });
 
 test("read discovers nested instructions lazily once per conversation and bounds default output", async (t) => {
