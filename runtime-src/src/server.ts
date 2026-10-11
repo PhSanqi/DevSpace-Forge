@@ -1029,11 +1029,12 @@ function registerMcpSurface(
     },
   );
 
-  registrationTarget.registerTool(
+  registerAppTool(
+    registrationTarget,
     toolNames.readImage,
     {
       description:
-        "Read one workspace JPG/PNG as bounded MCP ImageContent; large images become overview+tiles.",
+        "Read JPG/PNG as MCP image pixels; on see/show/send, return real image, not text/HTML.",
       inputSchema: {
         workspace_id: z.string(),
         path: z.string(),
@@ -1048,6 +1049,7 @@ function registerMcpSurface(
         width: z.number().int().positive().optional(),
         height: z.number().int().positive().optional(),
       }),
+      ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
     async ({ workspace_id, path: inputPath }) => {
@@ -1125,7 +1127,8 @@ function registerMcpSurface(
     },
   );
 
-  registrationTarget.registerTool(
+  registerAppTool(
+    registrationTarget,
     toolNames.readImages,
     {
       description:
@@ -1146,6 +1149,7 @@ function registerMcpSurface(
         count: z.number().int().nonnegative(),
         total_size_bytes: z.number().int().nonnegative(),
       }),
+      ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
     async ({ workspace_id, paths: inputPaths }) => {
@@ -1210,7 +1214,8 @@ function registerMcpSurface(
     },
   );
 
-  registrationTarget.registerTool(
+  registerAppTool(
+    registrationTarget,
     toolNames.readVideo,
     {
       description:
@@ -1247,6 +1252,7 @@ function registerMcpSurface(
           size_bytes: z.number().int().nonnegative(),
         })),
       }),
+      ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
     async ({ workspace_id, path: inputPath, start_seconds, end_seconds }) => {
@@ -1453,13 +1459,7 @@ function withoutNonUiToolOutputSchemas(server: McpRegistrationTarget): McpRegist
     ) => {
       const meta = definition._meta;
       const hasStableHostContract = name === "open_workspace" || name === "show_changes";
-      const hasUiContract = Boolean(
-        meta
-        && typeof meta === "object"
-        && !Array.isArray(meta)
-        && ("ui" in meta || "ui/resourceUri" in meta),
-      );
-      if (hasStableHostContract || hasUiContract || !("outputSchema" in definition)) {
+      if (hasStableHostContract || !("outputSchema" in definition)) {
         return (server.registerTool as (...callArgs: unknown[]) => unknown)(
           name,
           definition,

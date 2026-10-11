@@ -25,10 +25,13 @@ Use `read_image` for one visual and `read_images` when several visuals must be
 considered together. Keep source and text reads on `read`, `context_pack`, and
 `semantic_code` so binary data does not pollute the text context. Both image
 tools return standard MCP `ImageContent`, so a compatible host can provide the
-same pixels to the multimodal model and may render the returned image inline for
-the user. User-visible rendering remains a host capability, not a DevSpace UI
-guarantee; clients that do not render MCP image results can still consume the
-image content as model input.
+same pixels to the multimodal model. When MCP Apps UI is enabled, DevSpace also
+uses those exact `CallToolResult.content` image blocks in its existing workspace
+app and renders them as a media card. Image base64 is not copied into
+`structuredContent` or `_meta`, so model input and user-visible preview share one
+payload instead of creating a second transfer path. Clients without MCP Apps can
+still use native MCP image rendering when available, or consume the image only
+as model input.
 
 Byte chunking and visual chunking are separate concerns. Existing payload
 spooling can transfer or stage a large file, but byte chunks are never exposed
@@ -40,9 +43,10 @@ start_seconds?, end_seconds?)`. A call without an interval performs a bounded
 coarse sample of the whole video; the host can then request narrower intervals
 when continuity, motion, text changes, or event boundaries need denser evidence.
 Each call returns at most eight timestamped MCP image frames and reuses the image
-payload ceiling. The packaged Windows/Linux Runtime supplies and verifies its
-own FFmpeg/ffprobe sidecar instead of depending on a system installation. Audio
-transcription and a user-visible video player remain separate capabilities. See
+payload ceiling. With MCP Apps UI enabled, the same returned frames are shown in
+the media card. The packaged Windows/Linux Runtime supplies and verifies its own
+FFmpeg/ffprobe sidecar instead of depending on a system installation. Audio
+transcription and a full user-visible video player remain separate capabilities. See
 [`video-understanding.md`](video-understanding.md) for the full contract.
 
 ## Long-term goal

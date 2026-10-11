@@ -11,6 +11,9 @@ import {
   FolderOpen,
   GitBranch,
   GitCommitHorizontal,
+  Image,
+  Images,
+  Video,
   createElement,
   type IconNode,
 } from "lucide";
@@ -22,12 +25,15 @@ export const toolIcons = {
   diff: FileDiff,
   folderOpen: FolderOpen,
   gitBranch: GitBranch,
+  image: Image,
+  images: Images,
   instructions: FileText,
   instructionAvailable: FileText,
   instructionLoaded: FileCheck2,
   providers: Cpu,
   skills: Blocks,
   sourceCheckout: FolderGit2,
+  video: Video,
   warning: CircleAlert,
 } as const satisfies Record<string, IconNode>;
 

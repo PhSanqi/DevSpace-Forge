@@ -11,15 +11,15 @@ This is a community-built, self-hosted project, not an official OpenAI or Cloudf
 ## What you get
 
 - **Chat-to-local development:** read and modify approved files, run local commands, builds, tests and Git operations through MCP.
-- **Local image understanding and visual round-trip:** `read_image` reads one workspace JPG/PNG and `read_images` compares up to eight images. They return real MCP `ImageContent`, not base64 pasted into text, so a capable multimodal host can feed the pixels to the model and may also render the returned image inline for the user. Very large or long images are reduced locally to a bounded overview plus detail tiles.
-- **Adaptive video understanding:** `read_video` samples a workspace video into timestamped MCP image frames. The host model can inspect a coarse whole-video pass, identify uncertain intervals, then call `read_video` again on narrower time ranges for denser evidence. Each call stays bounded to at most eight frames; the original video is not uploaded through MCP.
+- **Local image understanding and visual round-trip:** `read_image` reads one workspace JPG/PNG and `read_images` compares up to eight images. They return real MCP `ImageContent`, not base64 pasted into text. When MCP Apps UI is enabled, DevSpace also renders those exact returned pixels in its media card so a see/show/send request does not depend on the model reconstructing the image in prose or HTML. Very large or long images are reduced locally to a bounded overview plus detail tiles.
+- **Adaptive video understanding:** `read_video` samples a workspace video into timestamped MCP image frames. The host model can inspect a coarse whole-video pass, identify uncertain intervals, then call `read_video` again on narrower time ranges for denser evidence. When MCP Apps UI is enabled, the sampled frames are shown in the same media card. Each call stays bounded to at most eight frames; the original video is not uploaded through MCP.
 - **Less context handoff:** bring project files, Git state and command results into the same conversation. The AI client's context window still applies.
 - **Scoped access:** you explicitly choose Allowed Roots.
 - **Review and recovery:** inspect changes, command evidence, review checkpoints, durable job status and logs.
 - **Two platforms:** offline Windows x64 and Linux x64 packages include the pinned Runtime, Node.js and cloudflared.
 - **Optional remote access:** connect through your own Cloudflare Tunnel. The privileged management Console stays on loopback, not at the public MCP URL.
 
-Image rendering is host-dependent: DevSpace returns standard MCP image content, but a client that does not render MCP image results may still pass those pixels to the model without showing an inline image. `read_video` currently provides visual frames only; audio transcription and a user-visible video player are separate capabilities.
+DevSpace keeps standard MCP image content as the model-input and compatibility path. With MCP Apps UI enabled, `read_image`, `read_images`, and `read_video` additionally show the same returned pixels in a DevSpace media card without duplicating the image payload into structured output. A client with neither MCP Apps nor native MCP image rendering can still pass those pixels to the model without showing them inline. `read_video` provides visible sampled frames, not a full video player; audio transcription and video playback remain separate capabilities.
 
 ## Quick start
 

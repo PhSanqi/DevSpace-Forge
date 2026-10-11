@@ -1,5 +1,9 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ReviewFileType, ToolResultCard } from "./card-types.js";
+import type {
+  ReviewFileType,
+  ToolResultCard,
+  ToolResultMediaItem,
+} from "./card-types.js";
 
 export type DecodedToolResult =
   | { kind: "card"; card: ToolResultCard }
@@ -16,6 +20,9 @@ export function decodeToolResult(result: CallToolResult): DecodedToolResult {
   const metaCard = cardFields(asRecord(asRecord(result._meta)?.card));
 
   if (structured) {
+    const mediaCard = structuredMediaCard(result, structured);
+    if (mediaCard) return { kind: "card", card: mediaCard };
+
     const workspaceId = stringField(structured.workspace_id);
     const reviewRef = stringField(structured.review_ref);
     if (workspaceId && reviewRef) {
@@ -71,6 +78,112 @@ export function decodeToolResult(result: CallToolResult): DecodedToolResult {
   }
 
   return { kind: "invalid" };
+}
+
+function structuredMediaCard(
+  result: CallToolResult,
+  structured: Record<string, unknown>,
+): ToolResultCard | undefined {
+  const contentImages: ToolResultMediaItem[] = result.content.flatMap((item) => {
+    if (item.type !== "image") return [];
+    const mimeType = item.mimeType;
+    if (mimeType !== "image/jpeg" && mimeType !== "image/png") return [];
+    if (typeof item.data !== "string" || item.data.length === 0) return [];
+    return [{ data: item.data, mimeType }];
+  });
+  if (contentImages.length === 0) return undefined;
+
+  const path = stringField(structured.path);
+  const mode = structured.mode === "direct" || structured.mode === "tiled"
+    ? structured.mode
+    : undefined;
+
+  if (mode) {
+    const metadata = arrayRecordsFromResultText(result)?.map((item) => ({
+      role: stringField(item.role),
+    }));
+    return {
+      tool: "read_image",
+      path,
+      media: {
+        kind: "image",
+        mode,
+        items: contentImages.map((image, index) => ({
+          ...image,
+          label: mode === "direct"
+            ? "Original"
+            : metadata?.[index]?.role === "overview"
+              ? "Overview"
+              : metadata?.[index]?.role === "tile"
+                ? `Detail ${index}`
+                : `Preview ${index + 1}`,
+        })),
+      },
+      summary: {
+        count: contentImages.length,
+        mode,
+        width: numberField(structured.width),
+        height: numberField(structured.height),
+        sizeBytes: numberField(structured.size_bytes),
+      },
+    };
+  }
+
+  const batchImages = arrayRecords(structured.images);
+  if (batchImages && numberField(structured.count) !== undefined) {
+    return {
+      tool: "read_images",
+      path: batchImages.length === 1 ? stringField(batchImages[0]?.path) : undefined,
+      media: {
+        kind: "image-batch",
+        items: contentImages.map((image, index) => ({
+          ...image,
+          label: stringField(batchImages[index]?.path) ?? `Image ${index + 1}`,
+        })),
+      },
+      summary: {
+        count: contentImages.length,
+        sizeBytes: numberField(structured.total_size_bytes),
+      },
+    };
+  }
+
+  const frames = arrayRecords(structured.frames);
+  if (frames && numberField(structured.duration_seconds) !== undefined) {
+    return {
+      tool: "read_video",
+      path,
+      media: {
+        kind: "video-frames",
+        items: contentImages.map((image, index) => {
+          const timestamp = numberField(frames[index]?.timestamp_seconds);
+          return {
+            ...image,
+            label: timestamp === undefined ? `Frame ${index + 1}` : `${timestamp.toFixed(2)}s`,
+          };
+        }),
+      },
+      summary: {
+        count: contentImages.length,
+        durationSeconds: numberField(structured.duration_seconds),
+        sizeBytes: numberField(structured.total_output_bytes),
+      },
+    };
+  }
+
+  return undefined;
+}
+
+function arrayRecordsFromResultText(
+  result: CallToolResult,
+): Array<Record<string, unknown>> | undefined {
+  const text = result.content.find((item) => item.type === "text")?.text;
+  if (!text) return undefined;
+  try {
+    return arrayRecords(asRecord(JSON.parse(text))?.images);
+  } catch {
+    return undefined;
+  }
 }
 
 function structuredWorkspaceCardFields(

@@ -4,7 +4,7 @@ DevSpace treats video understanding as a model-orchestrated composition of bound
 
 `read_video` accepts a workspace-relative video path and an optional `start_seconds` / `end_seconds` interval. A call without an interval samples the whole video coarsely. The host model reads the returned timestamped MCP `ImageContent` frames, identifies continuity gaps or uncertain spans, and calls `read_video` again with a narrower interval. Repeating that process gives progressively denser evidence without transferring the original video through MCP.
 
-Each call returns at most eight frames and reuses the image batch payload limit. Extracted frames are written only to an internal temporary directory, converted to bounded JPEGs by the media sidecar, loaded into memory as MCP `ImageContent`, and removed before the tool returns. DevSpace does not currently expose a user-visible video preview or attachment surface.
+Each call returns at most eight frames and reuses the image batch payload limit. Extracted frames are written only to an internal temporary directory, converted to bounded JPEGs by the media sidecar, loaded into memory as MCP `ImageContent`, and removed before the tool returns. With MCP Apps UI enabled, DevSpace shows those same sampled frames in its media card; it does not currently expose the original video as a playable attachment.
 
 ## Decoder sidecar contract
 
@@ -27,7 +27,7 @@ The binary provider is deliberately not hard-coded in the runtime implementation
 4. Re-call `read_video(path, start_seconds, end_seconds)` for those intervals.
 5. Repeat only where evidence remains insufficient; stop when the requested understanding is supported by the sampled frames.
 
-Audio extraction/transcription and user-visible video preview are separate capabilities and are intentionally outside this first video primitive.
+Audio extraction/transcription and a playable user-visible video attachment are separate capabilities and are intentionally outside this first video primitive.
 
 ## Bundled provider candidate
 

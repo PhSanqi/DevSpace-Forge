@@ -34,7 +34,7 @@ interface CardDisplay {
   icon: ToolIcon;
   title: string;
   label?: string;
-  tone: "workspace" | "review";
+  tone: "workspace" | "review" | "media";
 }
 
 interface MountedPayload {
@@ -338,6 +338,11 @@ async function renderPayloadIfNeeded(): Promise<void> {
     return;
   }
 
+  if (card.media) {
+    renderMediaPayload(target, card);
+    return;
+  }
+
   const visibleFileCount = !reviewFilesExpanded
     ? Math.max(3, (card.files ?? []).slice(0, 3).length)
     : undefined;
@@ -394,6 +399,15 @@ function renderHeaderSummary(card: ToolResultCard): HTMLElement {
       }),
     );
     return stats;
+  }
+
+  if (card.media) {
+    const count = summaryNumber(card.summary, "count") ?? card.media.items.length;
+    const noun = card.tool === "read_video" ? "frame" : "image";
+    return element("span", {
+      className: "header-meta",
+      text: `${count} ${noun}${count === 1 ? "" : "s"}`,
+    });
   }
 
   const parts = [
@@ -510,6 +524,34 @@ function cardDisplay(card: ToolResultCard): CardDisplay {
     };
   }
 
+
+  if (card.tool === "read_image") {
+    return {
+      icon: toolIcons.image,
+      title: card.media?.mode === "tiled" ? "Image preview" : "Original image",
+      label: card.path,
+      tone: "media",
+    };
+  }
+
+  if (card.tool === "read_images") {
+    return {
+      icon: toolIcons.images,
+      title: "Images",
+      label: card.path,
+      tone: "media",
+    };
+  }
+
+  if (card.tool === "read_video") {
+    return {
+      icon: toolIcons.video,
+      title: "Video frames",
+      label: card.path,
+      tone: "media",
+    };
+  }
+
   const display = getPatchDisplayParts(card, { emptyTitle: "Changes ready" });
   return {
     icon: toolIcons.diff,
@@ -517,6 +559,37 @@ function cardDisplay(card: ToolResultCard): CardDisplay {
     label: singleFilePath(card),
     tone: "review",
   };
+}
+
+function renderMediaPayload(container: HTMLElement, card: ToolResultCard): void {
+  unmountCurrentPayload();
+  const media = card.media;
+  if (!media || media.items.length === 0) {
+    renderStatus(container, "No visual content was returned.", "error");
+    return;
+  }
+
+  const gallery = element("div", {
+    className: `media-gallery ${media.items.length === 1 ? "single" : "multiple"}`,
+  });
+  media.items.forEach((item, index) => {
+    const figure = element("figure", { className: "media-figure" });
+    const image = element("img", {
+      className: "media-image",
+    }) as HTMLImageElement;
+    image.alt = item.label ?? `${card.tool === "read_video" ? "Video frame" : "Image"} ${index + 1}`;
+    image.src = `data:${item.mimeType};base64,${item.data}`;
+    figure.append(image);
+    if (item.label) {
+      figure.append(element("figcaption", {
+        className: "media-caption",
+        text: item.label,
+        title: item.label,
+      }));
+    }
+    gallery.append(figure);
+  });
+  container.replaceChildren(gallery);
 }
 
 function singleFilePath(card: ToolResultCard): string | undefined {

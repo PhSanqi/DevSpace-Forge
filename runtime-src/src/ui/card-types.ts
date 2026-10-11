@@ -1,7 +1,24 @@
 import type { App } from "@modelcontextprotocol/ext-apps";
 
-export type ToolName = "open_workspace" | "show_changes";
+export type ToolName =
+  | "open_workspace"
+  | "show_changes"
+  | "read_image"
+  | "read_images"
+  | "read_video";
 export type HostContext = NonNullable<ReturnType<App["getHostContext"]>>;
+
+export interface ToolResultMediaItem {
+  data: string;
+  mimeType: "image/jpeg" | "image/png";
+  label?: string;
+}
+
+export interface ToolResultMedia {
+  kind: "image" | "image-batch" | "video-frames";
+  mode?: "direct" | "tiled";
+  items: ToolResultMediaItem[];
+}
 
 export type ReviewFileType =
   | "change"
@@ -39,6 +56,7 @@ export interface ToolResultCard {
     removals?: number;
   }>;
   payload?: { patch?: string };
+  media?: ToolResultMedia;
   agentsFiles?: Array<{
     path?: string;
     content?: string;
@@ -76,6 +94,7 @@ export function summaryNumber(
 }
 
 export function isExpandableCard(card: ToolResultCard): boolean {
+  if (card.media?.items.length) return true;
   if (card.tool === "show_changes") {
     return Boolean(card.files?.length || card.payload?.patch);
   }

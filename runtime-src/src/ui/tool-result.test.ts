@@ -28,6 +28,82 @@ test("workspace cards can be rebuilt from structured content without result meta
   assert.equal(decoded.card.summary?.agentsFiles, 1);
 });
 
+test("read_image results become user-visible media cards without duplicating image bytes in structured content", () => {
+  const decoded = decodeToolResult({
+    content: [
+      { type: "text", text: JSON.stringify({ images: [{ index: 0, role: "source" }] }) },
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+    ],
+    structuredContent: {
+      result: "metadata",
+      path: "frame.png",
+      mime_type: "image/png",
+      size_bytes: 5,
+      mode: "direct",
+      image_count: 1,
+      total_output_bytes: 5,
+      width: 1170,
+      height: 2532,
+    },
+  });
+
+  assert.equal(decoded.kind, "card");
+  if (decoded.kind !== "card") return;
+  assert.equal(decoded.card.tool, "read_image");
+  assert.equal(decoded.card.path, "frame.png");
+  assert.equal(decoded.card.media?.kind, "image");
+  assert.equal(decoded.card.media?.mode, "direct");
+  assert.equal(decoded.card.media?.items[0]?.label, "Original");
+  assert.equal(decoded.card.media?.items[0]?.data, "aGVsbG8=");
+  assert.doesNotMatch(JSON.stringify(decoded.card.summary), /aGVsbG8=/);
+});
+
+test("read_images and read_video results preserve labels for visual cards", () => {
+  const batch = decodeToolResult({
+    content: [
+      { type: "text", text: "metadata" },
+      { type: "image", data: "YQ==", mimeType: "image/png" },
+      { type: "image", data: "Yg==", mimeType: "image/jpeg" },
+    ],
+    structuredContent: {
+      result: "metadata",
+      images: [
+        { path: "before.png", mime_type: "image/png", size_bytes: 1 },
+        { path: "after.jpg", mime_type: "image/jpeg", size_bytes: 1 },
+      ],
+      count: 2,
+      total_size_bytes: 2,
+    },
+  });
+  assert.equal(batch.kind, "card");
+  if (batch.kind === "card") {
+    assert.equal(batch.card.tool, "read_images");
+    assert.deepEqual(batch.card.media?.items.map((item) => item.label), ["before.png", "after.jpg"]);
+  }
+
+  const video = decodeToolResult({
+    content: [
+      { type: "text", text: "metadata" },
+      { type: "image", data: "YQ==", mimeType: "image/jpeg" },
+      { type: "image", data: "Yg==", mimeType: "image/jpeg" },
+    ],
+    structuredContent: {
+      result: "metadata",
+      path: "clip.mp4",
+      duration_seconds: 3.4,
+      frames: [
+        { index: 0, timestamp_seconds: 0.5, mime_type: "image/jpeg", size_bytes: 1 },
+        { index: 1, timestamp_seconds: 2.75, mime_type: "image/jpeg", size_bytes: 1 },
+      ],
+    },
+  });
+  assert.equal(video.kind, "card");
+  if (video.kind === "card") {
+    assert.equal(video.card.tool, "read_video");
+    assert.deepEqual(video.card.media?.items.map((item) => item.label), ["0.50s", "2.75s"]);
+  }
+});
+
 test("review results use rich metadata when the host provides it", () => {
   const decoded = decodeToolResult({
     content: [],
@@ -129,6 +205,40 @@ test("ChatGPT globals restore structured output and hidden MCP result metadata t
     result: "Changed 1 file.",
   });
   assert.deepEqual(restored?._meta, fullResult._meta);
+});
+
+test("ChatGPT globals preserve raw MCP image content for the media card", () => {
+  const fullResult: CallToolResult = {
+    content: [
+      { type: "text", text: JSON.stringify({ images: [{ index: 0, role: "source" }] }) },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+    ],
+    structuredContent: { stale: true },
+  };
+  const restored = toolResultFromChatGptGlobals({
+    toolOutput: {
+      result: "metadata",
+      path: "frame.png",
+      mime_type: "image/png",
+      size_bytes: 5,
+      mode: "direct",
+      image_count: 1,
+      total_output_bytes: 5,
+      width: 100,
+      height: 200,
+    },
+    toolResponseMetadata: {
+      mcp_tool_result: fullResult,
+    },
+  });
+
+  assert.ok(restored);
+  if (!restored) return;
+  const decoded = decodeToolResult(restored);
+  assert.equal(decoded.kind, "card");
+  if (decoded.kind !== "card") return;
+  assert.equal(decoded.card.tool, "read_image");
+  assert.equal(decoded.card.media?.items[0]?.data, "aW1hZ2U=");
 });
 
 test("ChatGPT globals also accept result metadata exposed directly", () => {

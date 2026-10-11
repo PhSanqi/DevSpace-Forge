@@ -780,13 +780,17 @@ test("Codex keeps non-UI output schemas out of model context and enforces a sche
   }
 });
 
-test("Codex preserves output schemas for UI-backed tools only", async (t) => {
+test("Codex preserves stable host output schemas while retaining media UI metadata", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: true });
   const tools = await context.client.listTools();
   const byName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 
   assert.ok(byName.get("open_workspace")?.outputSchema);
   assert.ok(byName.get("show_changes")?.outputSchema);
+  for (const mediaTool of ["read_image", "read_images", "read_video"] as const) {
+    assert.equal(byName.get(mediaTool)?.outputSchema, undefined);
+    assert.ok((byName.get(mediaTool)?._meta as { ui?: unknown } | undefined)?.ui);
+  }
   assert.equal(byName.get("exec_command")?.outputSchema, undefined);
   assert.equal(byName.get("payload_begin")?.outputSchema, undefined);
 });
@@ -1322,7 +1326,7 @@ test("write rejects a new file through a symlink that leaves the workspace", asy
   await assert.rejects(access(join(outside, "new.txt")));
 });
 
-test("UI metadata is limited to workspace and aggregate review", async (t) => {
+test("UI metadata is limited to workspace, media reads, and aggregate review", async (t) => {
   for (const uiEnabled of [true, false]) {
     await t.test(uiEnabled ? "enabled" : "disabled", async (nested) => {
       const context = await fixture(nested, { toolMode: "claude", uiEnabled });
@@ -1332,7 +1336,12 @@ test("UI metadata is limited to workspace and aggregate review", async (t) => {
         .map((tool) => tool.name)
         .sort();
 
-      assert.deepEqual(toolsWithUi, uiEnabled ? ["open_workspace", "show_changes"] : []);
+      assert.deepEqual(
+        toolsWithUi,
+        uiEnabled
+          ? ["open_workspace", "read_image", "read_images", "read_video", "show_changes"]
+          : [],
+      );
     });
   }
 });

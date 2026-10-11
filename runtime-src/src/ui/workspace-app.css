@@ -50,6 +50,10 @@ body {
   --tool-accent: color-mix(in srgb, var(--color-text-primary, #f5f5f6) 28%, #d99742 72%);
 }
 
+.tool-card.media {
+  --tool-accent: color-mix(in srgb, var(--color-text-primary, #f5f5f6) 30%, #4f9f77 70%);
+}
+
 @supports selector(::-webkit-scrollbar) {
   .pretty-scrollbar::-webkit-scrollbar {
     width: 12px;
@@ -220,6 +224,54 @@ body {
 .tool-body {
   border-top: 1px solid var(--tool-card-divider);
   background: var(--tool-card-body-bg);
+}
+
+.media-gallery {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.media-gallery.multiple {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.media-figure {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  gap: 6px;
+}
+
+.media-gallery.single .media-figure {
+  width: 100%;
+}
+
+.media-image {
+  display: block;
+  width: 100%;
+  max-height: 560px;
+  object-fit: contain;
+  border: 1px solid var(--tool-card-divider);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--tool-card-body-bg) 88%, #000 12%);
+}
+
+.media-caption {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-tertiary, #a3a3aa);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--font-text-xs-size, 11px);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .media-gallery.multiple {
+    grid-template-columns: 1fr;
+  }
 }
 
 .workspace-details {
