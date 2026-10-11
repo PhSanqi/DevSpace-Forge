@@ -11,13 +11,15 @@ DevSpace-Forge 通过 MCP 将支持该协议的 AI 聊天客户端连接到你�
 ## 主要功能
 
 - **在 Chat 中调用本地开发工具：** 按授权范围读写文件、执行命令、构建、测试和 Git 操作。
-- **本地图片视觉输入：** 当 MCP Host 支持图片结果且模型具备多模态能力时，可用 `read_image` 查看一张工作区 JPG/PNG，用 `read_images` 同时比较多张图片；目标电脑不需要安装 ChatGPT。
+- **本地图片理解与可视化回传：** `read_image` 可读取一张工作区 JPG/PNG，`read_images` 可同时比较最多八张图片。工具返回真正的 MCP `ImageContent`，而不是把 base64 塞进文本；支持多模态与 MCP 图片结果的 Host 可以把像素直接交给模型，并可在支持该渲染能力的客户端中把返回图片以内联可视化形式展示给用户。超大或超长图片会先在本机转换为有界 overview + detail tiles。
+- **自适应视频理解：** `read_video` 会把工作区视频采样为带时间戳的 MCP 图片帧。模型可先做全视频粗采样，再根据连续性缺口、文字变化或不确定片段对指定时间区间再次调用 `read_video` 加密采样；每次最多返回八帧，不通过 MCP 传输原始视频文件。
 - **减少上下文交接：** 将项目文件、Git 状态和执行结果带回同一条对话；实际上下文窗口仍由客户端决定。
-- **本地图片视觉：** MCP 图片工具可将授权目录中的 JPG/PNG 送入多模态 Host；单张超大或超长图片会先在本机生成有界 overview + detail tiles，而不是把原始大文件直接塞进一次模型输入。
 - **目录权限边界：** 使用 Allowed Roots 明确可访问的目录。
 - **检查与恢复：** 查看改动、命令证据、Review 检查点、持久任务状态和日志。
 - **Windows / Linux：** 提供包含固定版本 Runtime、Node.js 和 cloudflared 的 x64 离线包。
 - **可选远程连接：** 使用你自己的 Cloudflare Tunnel。高权限管理 Console 仅在本机访问，不是公网控制台。
+
+图片是否直接显示在聊天界面取决于 Host：DevSpace 返回的是标准 MCP 图片内容；某些客户端即使能把图片交给多模态模型，也不一定提供用户可见的内联图片渲染。当前 `read_video` 只负责视觉帧理解，音频转写和用户可见的视频播放器属于独立能力。
 
 ## 快速开始
 
@@ -53,6 +55,8 @@ site 目录是可选的公开静态介绍站，**不是**管理 Console 或 MCP 
 - [安装与 MCP 连接](docs/getting-started.md)
 - [平台和发行包](PLATFORMS.md)
 - [版本、校验与安全升级](docs/releases-and-upgrades.md)
+- [图片与上下文智能](runtime-src/docs/context-intelligence.md)
+- [自适应视频理解](runtime-src/docs/video-understanding.md)
 - [本地管理 Console](docs/runtime-console.md)
 - [可选产品主页](docs/public-website.md)
 - [产品路线图](ROADMAP.md)

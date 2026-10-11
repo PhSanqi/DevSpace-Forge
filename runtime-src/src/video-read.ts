@@ -323,6 +323,7 @@ async function loadPackagedBackend(): Promise<VideoBackend> {
           "-sn",
           "-dn",
           "-vf", "scale=1600:1600:force_original_aspect_ratio=decrease",
+          "-pix_fmt", "yuvj420p",
           "-q:v", "3",
           "-y",
           outputPath,
@@ -413,7 +414,12 @@ export async function readVideoForModel(
     throw new Error("read_video backend returned invalid video dimensions");
   }
   const interval = normalizeInterval(probe.durationSeconds, options);
-  const timestamps = videoSampleTimestamps(interval.startSeconds, interval.endSeconds);
+  const lastNominalFrameTimestamp = probe.fps && Number.isFinite(probe.fps) && probe.fps > 0
+    ? Math.max(0, probe.durationSeconds - (1 / probe.fps))
+    : undefined;
+  const timestamps = videoSampleTimestamps(interval.startSeconds, interval.endSeconds).map((timestamp) => (
+    lastNominalFrameTimestamp === undefined ? timestamp : Math.min(timestamp, lastNominalFrameTimestamp)
+  ));
   const processTemp = await prepareVideoProcessTemp();
   const tempDir = await mkdtemp(path.join(processTemp, "call-"));
   const framePaths = timestamps.map((_, index) => path.join(tempDir, `frame-${String(index).padStart(2, "0")}.jpg`));

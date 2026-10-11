@@ -11,13 +11,15 @@ This is a community-built, self-hosted project, not an official OpenAI or Cloudf
 ## What you get
 
 - **Chat-to-local development:** read and modify approved files, run local commands, builds, tests and Git operations through MCP.
-- **Local visual inspection:** on hosts that support MCP image results and a multimodal model, `read_image` can inspect one workspace JPG/PNG and `read_images` can compare several images without installing ChatGPT on the target machine.
+- **Local image understanding and visual round-trip:** `read_image` reads one workspace JPG/PNG and `read_images` compares up to eight images. They return real MCP `ImageContent`, not base64 pasted into text, so a capable multimodal host can feed the pixels to the model and may also render the returned image inline for the user. Very large or long images are reduced locally to a bounded overview plus detail tiles.
+- **Adaptive video understanding:** `read_video` samples a workspace video into timestamped MCP image frames. The host model can inspect a coarse whole-video pass, identify uncertain intervals, then call `read_video` again on narrower time ranges for denser evidence. Each call stays bounded to at most eight frames; the original video is not uploaded through MCP.
 - **Less context handoff:** bring project files, Git state and command results into the same conversation. The AI client's context window still applies.
-- **Local visual inspection:** MCP image tools can send approved JPG/PNG files to a multimodal host; very large or long single images are reduced locally to a bounded overview plus detail tiles instead of pushing the original payload unchanged.
 - **Scoped access:** you explicitly choose Allowed Roots.
 - **Review and recovery:** inspect changes, command evidence, review checkpoints, durable job status and logs.
 - **Two platforms:** offline Windows x64 and Linux x64 packages include the pinned Runtime, Node.js and cloudflared.
 - **Optional remote access:** connect through your own Cloudflare Tunnel. The privileged management Console stays on loopback, not at the public MCP URL.
+
+Image rendering is host-dependent: DevSpace returns standard MCP image content, but a client that does not render MCP image results may still pass those pixels to the model without showing an inline image. `read_video` currently provides visual frames only; audio transcription and a user-visible video player are separate capabilities.
 
 ## Quick start
 
@@ -53,6 +55,8 @@ The optional landing page in the site directory is a static website, **not** the
 - [Installation and connection](docs/getting-started.md)
 - [Windows and Linux packages](PLATFORMS.md)
 - [Releases, verification and safe upgrades](docs/releases-and-upgrades.md)
+- [Image and context intelligence](runtime-src/docs/context-intelligence.md)
+- [Adaptive video understanding](runtime-src/docs/video-understanding.md)
 - [Using the local Console](docs/runtime-console.md)
 - [Optional public website](docs/public-website.md)
 - [Product roadmap](ROADMAP.md)

@@ -127,6 +127,43 @@ test("readVideoForModel fails closed for unsupported paths and invalid intervals
   );
 });
 
+test("readVideoForModel avoids sampling beyond the last nominal frame", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devspace-video-tail-test-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const videoPath = path.join(root, "sample.mp4");
+  await writeFile(videoPath, Buffer.from("fake-video-container"));
+  const extractedTimestamps: number[] = [];
+  const backend: VideoBackend = {
+    identity: {
+      provider: "test-backend",
+      ffmpegVersion: "test-1",
+      license: "test-only",
+      sourceUrl: "https://example.invalid/test-backend",
+    },
+    async probe() {
+      return {
+        durationSeconds: 4,
+        width: 320,
+        height: 180,
+        fps: 2,
+        hasAudio: false,
+      };
+    },
+    async extractFrame(_inputPath, timestampSeconds, outputPath) {
+      extractedTimestamps.push(timestampSeconds);
+      if (timestampSeconds > 3.5) throw new Error("timestamp is after the final frame");
+      await sharp({
+        create: { width: 32, height: 18, channels: 3, background: "#ffffff" },
+      }).jpeg().toFile(outputPath);
+    },
+  };
+
+  const result = await readVideoForModel(videoPath, {}, backend);
+  assert.equal(result.frames.length, MAX_VIDEO_FRAMES);
+  assert.equal(Math.max(...extractedTimestamps), 3.5);
+  assert.equal(result.frames.at(-1)!.timestampSeconds, 3.5);
+});
+
 
 test("readVideoForModel removes stale frame directories left by dead processes", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devspace-video-recovery-test-"));

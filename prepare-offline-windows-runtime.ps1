@@ -3,6 +3,7 @@ param(
     [string]$OutputRoot,
     [Parameter(Mandatory = $true)]
     [string]$RuntimePackagePath,
+    [string]$GitHubProxyPrefix = '',
     [switch]$Force
 )
 
@@ -39,6 +40,17 @@ function Get-Verified([string]$Url, [string]$Path, [string]$Sha256) {
     Move-Item -LiteralPath $partial -Destination $Path -Force
 }
 
+function Resolve-GitHubDownloadUrl([string]$Url) {
+    if ([string]::IsNullOrWhiteSpace($GitHubProxyPrefix)) { return $Url }
+    $uri = [Uri]$Url
+    if ($uri.Host -ne 'github.com') { return $Url }
+    $prefix = $GitHubProxyPrefix.TrimEnd('/')
+    if (-not $prefix.StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'GitHubProxyPrefix must be an https URL.'
+    }
+    return "$prefix/$Url"
+}
+
 if ($Force) { Remove-Item -LiteralPath $output -Recurse -Force -ErrorAction SilentlyContinue }
 if ((Test-Path -LiteralPath (Join-Path $slot 'READY')) -and
     (Test-Path -LiteralPath (Join-Path $nodeDir 'node.exe')) -and
@@ -63,7 +75,7 @@ Remove-Item -LiteralPath $nodeExtract -Recurse -Force
 
 $cloudflaredCache = Join-Path $cache "cloudflared-$cloudflaredVersion-windows-amd64.exe"
 Get-Verified `
-    "https://github.com/cloudflare/cloudflared/releases/download/$cloudflaredVersion/cloudflared-windows-amd64.exe" `
+    (Resolve-GitHubDownloadUrl "https://github.com/cloudflare/cloudflared/releases/download/$cloudflaredVersion/cloudflared-windows-amd64.exe") `
     $cloudflaredCache `
     $cloudflaredSha256
 Copy-Item -LiteralPath $cloudflaredCache -Destination $cloudflared -Force
@@ -135,11 +147,20 @@ if ($actualVersion -ne $devSpaceVersion) { throw "Unexpected DevSpace version: $
 $devSpacePackageRoot = Split-Path -Parent $installed
 $videoCache = Join-Path $root 'dist\.offline-cache\video'
 New-Item -ItemType Directory -Force $videoCache | Out-Null
-& $node (Join-Path $root 'ops\prepare-video-sidecar.mjs') `
-    --platform win32-x64 `
-    --target $devSpacePackageRoot `
-    --cache $videoCache
+$videoSidecarArgs = @(
+    (Join-Path $root 'ops\prepare-video-sidecar.mjs'),
+    '--platform', 'win32-x64',
+    '--target', $devSpacePackageRoot,
+    '--cache', $videoCache
+)
+if (-not [string]::IsNullOrWhiteSpace($GitHubProxyPrefix)) {
+    $videoSidecarArgs += @('--github-proxy-prefix', $GitHubProxyPrefix)
+}
+& $node @videoSidecarArgs
 if ($LASTEXITCODE -ne 0) { throw 'Windows video sidecar preparation failed.' }
+& $node (Join-Path $root 'ops\video-sidecar-runtime-smoke.mjs') `
+    --package-root $devSpacePackageRoot
+if ($LASTEXITCODE -ne 0) { throw 'Windows video sidecar runtime smoke failed.' }
 
 Push-Location $devspaceDir
 try {

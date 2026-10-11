@@ -46,8 +46,11 @@ test('product packaging injects and validates the video sidecar', async () => {
 
   assert.match(linux, /prepare-video-sidecar\.mjs/);
   assert.match(linux, /--platform linux-x64/);
+  assert.match(linux, /video-sidecar-runtime-smoke\.mjs/);
   assert.match(windowsPrepare, /prepare-video-sidecar\.mjs/);
-  assert.match(windowsPrepare, /--platform win32-x64/);
+  assert.match(windowsPrepare, /['"]--platform['"]\s*,\s*['"]win32-x64['"]/);
+  assert.match(windowsPrepare, /video-sidecar-runtime-smoke\.mjs/);
+  assert.match(windowsPrepare, /GitHubProxyPrefix/);
   for (const item of ['manifest.json', 'bin/ffmpeg.exe', 'bin/ffprobe.exe', 'LICENSE.txt', 'PROVENANCE.json']) {
     assert.ok(windowsPackage.includes(item), `Windows payload gate missing ${item}`);
   }

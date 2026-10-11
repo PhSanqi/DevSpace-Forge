@@ -23,21 +23,27 @@ multi-image inspection does not silently expand the transport payload budget.
 
 Use `read_image` for one visual and `read_images` when several visuals must be
 considered together. Keep source and text reads on `read`, `context_pack`, and
-`semantic_code` so binary data does not pollute the text context. MCP image
-content is a model-input capability; it must not be described as a host UI
-attachment unless the host exposes a separate, verified attachment contract.
+`semantic_code` so binary data does not pollute the text context. Both image
+tools return standard MCP `ImageContent`, so a compatible host can provide the
+same pixels to the multimodal model and may render the returned image inline for
+the user. User-visible rendering remains a host capability, not a DevSpace UI
+guarantee; clients that do not render MCP image results can still consume the
+image content as model input.
 
 Byte chunking and visual chunking are separate concerns. Existing payload
 spooling can transfer or stage a large file, but byte chunks are never exposed
 as visual input. The file must first be reassembled and verified, then images
 are decoded into model-readable overview/detail frames.
 
-Video follows the same boundary but is not yet exposed as a model-facing tool.
-The intended contract is local metadata plus a bounded set of timestamped
-keyframes/scene samples, with optional audio transcription. DevSpace must ship
-the selected video backend inside the Windows/Linux offline Runtime rather than
-assuming the target machine has ffmpeg installed; until that packaging contract
-is verified, no `read_video` tool should advertise support.
+Video follows the same boundary through `read_video(workspace_id, path,
+start_seconds?, end_seconds?)`. A call without an interval performs a bounded
+coarse sample of the whole video; the host can then request narrower intervals
+when continuity, motion, text changes, or event boundaries need denser evidence.
+Each call returns at most eight timestamped MCP image frames and reuses the image
+payload ceiling. The packaged Windows/Linux Runtime supplies and verifies its
+own FFmpeg/ffprobe sidecar instead of depending on a system installation. Audio
+transcription and a user-visible video player remain separate capabilities. See
+[`video-understanding.md`](video-understanding.md) for the full contract.
 
 ## Long-term goal
 

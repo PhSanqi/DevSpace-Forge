@@ -96,6 +96,15 @@ async function download(url, target, expectedSha) {
   throw lastError ?? new Error('video sidecar download failed');
 }
 
+function resolveDownloadUrl(url, githubProxyPrefix) {
+  if (!githubProxyPrefix) return url;
+  const parsed = new URL(url);
+  if (parsed.hostname !== 'github.com') return url;
+  const prefix = githubProxyPrefix.replace(/\/+$/, '');
+  if (!/^https:\/\//i.test(prefix)) throw new Error('--github-proxy-prefix must be an https URL');
+  return `${prefix}/${url}`;
+}
+
 function validateDescriptor(value) {
   if (value?.schema_version !== 1 || !value.provider || !value.ffmpeg_version || !value.license || !value.release_url) {
     throw new Error('video sidecar descriptor is incomplete');
@@ -157,7 +166,11 @@ async function main(argv = process.argv.slice(2)) {
   const cache = path.resolve(args.cache);
   await mkdir(cache, { recursive: true });
   const archive = path.join(cache, platform.archive.name);
-  await download(platform.archive.url, archive, platform.archive.sha256);
+  await download(
+    resolveDownloadUrl(platform.archive.url, args.githubProxyPrefix),
+    archive,
+    platform.archive.sha256,
+  );
   await verifyFile(archive, platform.archive.sha256, `${args.platform} archive`);
 
   const extract = await mkdtemp(path.join(cache, `.extract-${args.platform}-`));

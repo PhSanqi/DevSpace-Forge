@@ -84,6 +84,8 @@ mkdir -p "$VIDEO_CACHE"
   --platform linux-x64 \
   --target "$STAGE/runtime/devspace/node_modules/@waishnav/devspace" \
   --cache "$VIDEO_CACHE"
+"$STAGE/runtime/node/bin/node" "$ROOT/ops/video-sidecar-runtime-smoke.mjs" \
+  --package-root "$STAGE/runtime/devspace/node_modules/@waishnav/devspace"
 
 # Keep the Linux bundle aligned with the Windows Control runtime. Subagents are
 # disabled in the current product scope, so the Claude Agent SDK payload is not
