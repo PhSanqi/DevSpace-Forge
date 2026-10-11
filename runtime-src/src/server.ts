@@ -276,7 +276,7 @@ function serverInstructions(
     : "";
   const agents = `Follow root/global instructions returned by ${toolNames.openWorkspace}. Nested AGENTS.md/CLAUDE.md instructions are discovered automatically when a concrete path is read or packed, so do not recursively scan the repository for instruction files. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
-  const imageInstruction = ` Use ${toolNames.readImage} for one local JPG/PNG image; it automatically emits a bounded overview+tiles set for oversized or very long images. Use ${toolNames.readImages} when several normal-sized images need to be inspected together. Do not read binary images as text.`;
+  const imageInstruction = ` Use ${toolNames.readImage} for one local JPG/PNG image; it automatically emits a bounded overview+tiles set for oversized or very long images. Use ${toolNames.readImages} when several normal-sized images need to be inspected together. Do not read binary images as text. If a shell command, script, renderer, screenshot tool, or video extractor creates an image because the user asked to see/show/send it, do not stop after creating the file or returning its path: immediately call ${toolNames.readImage} or ${toolNames.readImages} on the produced file(s), and only claim the image was shown after that media tool succeeds.`;
   const payloadInstruction =
     " For tool arguments too large for one MCP request, use payload_begin, payload_chunk, and payload_commit, then pass the committed payload_ref to a tool that explicitly accepts it; never execute or consume uncommitted chunks.";
 

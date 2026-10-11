@@ -806,6 +806,10 @@ test("Codex process tools keep wait and output budgets server-managed", async (t
     assert.equal("yield_time_ms" in properties, false);
     assert.equal("max_output_tokens" in properties, false);
   }
+
+  const execCommand = tools.tools.find(({ name }) => name === "exec_command");
+  assert.match(execCommand?.description ?? "", /follow with read_image\/read_images/);
+  assert.match(execCommand?.description ?? "", /file path is not user-visible media/);
 });
 
 test("Codex server-managed process waits return long commands quickly and polls immediately", async (t) => {

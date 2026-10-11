@@ -73,6 +73,10 @@ namespace DevSpaceControlPlatform
             builder.AppendLine("If the intended project has no Git repository, initialize local Git at the canonical project root before making project changes. Do not initialize a collection folder, workspace parent, or unrelated nested folder just because it is convenient.");
             builder.AppendLine("Inspect `git status`, branch, and HEAD before and after project changes. The Control Platform management UI reads the real local Git history and uses it to identify project ownership.");
             builder.AppendLine("Do not push automatically. Create local commits only when the active authorization policy permits a commit, and commit only files belonging to that project.");
+            builder.AppendLine();
+            builder.AppendLine("## User-visible media delivery");
+            builder.AppendLine("Creating an image file is not the same as showing it to the user. If the user asks to see, show, send, preview, or receive an image and a shell command, script, renderer, screenshot tool, or video extractor creates that image, immediately follow the producing step with the workspace `read_image` tool (or `read_images` for several images).");
+            builder.AppendLine("Do not stop at a local path and do not say an image was displayed unless the media read tool actually returned it to the host. The producing command proves only that the file exists; the media read tool is the user-visible delivery step.");
 
             if (notice != null)
             {

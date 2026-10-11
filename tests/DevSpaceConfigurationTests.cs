@@ -946,6 +946,9 @@ internal static class DevSpaceConfigurationTests
         AssertTrue(text.IndexOf("Project ownership and local Git", StringComparison.Ordinal) >= 0, "project ownership instruction present");
         AssertTrue(text.IndexOf("git rev-parse --show-toplevel", StringComparison.Ordinal) >= 0, "canonical Git root instruction present");
         AssertTrue(text.IndexOf("Do not push automatically", StringComparison.Ordinal) >= 0, "managed instructions prohibit automatic push");
+        AssertTrue(text.IndexOf("User-visible media delivery", StringComparison.Ordinal) >= 0, "managed instructions define media delivery contract");
+        AssertTrue(text.IndexOf("read_image", StringComparison.Ordinal) >= 0, "managed instructions require image read after image generation");
+        AssertTrue(text.IndexOf("Do not stop at a local path", StringComparison.Ordinal) >= 0, "managed instructions forbid path-only image delivery");
         AssertTrue(!ManagedAgentInstructions.ConsumeRollbackNoticeIfMatches(root, Path.Combine(root, "other")), "unrelated workspace does not consume notice");
         AssertTrue(ManagedAgentInstructions.ConsumeRollbackNoticeIfMatches(root, workspace), "matching workspace consumes notice");
         text = File.ReadAllText(instructions);

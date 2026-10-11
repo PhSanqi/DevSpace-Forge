@@ -693,7 +693,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Execute command",
       description:
-        "Run a short shell command in a workspace with the user's local permissions. The wait budget is server-managed; if the command is still running, DevSpace returns a session_id for write_stdin. Prefer job_start for builds, tests, packaging, coding-agent runs, and other long work. DevSpace also handles devspace-log bounded log retrieval internally. When semantic_code is unavailable because a host cached an older tool list, devspace-semantic provides an internal read-only Serena compatibility command and is not passed to the shell.",
+        "Run a short shell command with the user's local permissions; long work belongs in job_start. If the command creates an image the user asked to see/show/send, follow with read_image/read_images because a file path is not user-visible media. Full logs are available through devspace-log; devspace-semantic is the internal read-only compatibility path when semantic_code is unavailable.",
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
         operation_id: operationIdSchema,
