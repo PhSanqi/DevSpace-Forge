@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.12',
+    [string]$Version = '0.6.13',
     [Parameter(Mandatory = $true)]
     [string]$RuntimePayloadPath
 )

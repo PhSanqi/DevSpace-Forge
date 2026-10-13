@@ -9,8 +9,10 @@ const source=(name)=>readFileSync(path.join(root,name),'utf8');
 
 test('Linux release builds and stages the Control UI beside the console',()=>{
   const script=source('package-release-linux.sh');
+  assert.match(script,/--prefix "\$ROOT\/control-ui" ci/);
   assert.match(script,/--prefix "\$ROOT\/control-ui" run build/);
   assert.match(script,/cp -a "\$ROOT\/control-ui\/dist" "\$STAGE\/ops\/control-ui"/);
+  assert.ok(script.indexOf('control-ui" ci')<script.indexOf('run build'));
   assert.ok(script.indexOf('run build')<script.indexOf('cp -a "$ROOT/control-ui/dist"'));
 });
 

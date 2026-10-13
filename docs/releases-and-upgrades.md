@@ -1,12 +1,12 @@
 # Releases and safe upgrades / 发行与安全升级
 
-## Current release: v0.6.12 / 当前版本：v0.6.12
+## Current release: v0.6.13 / 当前版本：v0.6.13
 
-v0.6.12 moves Windows installations to the modern Desktop/Control ownership model, keeps instance identity deployment-neutral, hardens offline Windows packaging, and strengthens media-delivery verification. Existing installations should use the normal Setup update path rather than manually replacing Runtime files.
+v0.6.13 publishes the modern Desktop/Control ownership changes with a corrected Linux release path. Linux packaging now installs the Control UI dependencies before building, so the package can be produced on a clean runner. Existing installations should use the normal Setup update path rather than manually replacing Runtime files.
 
-v0.6.12 将 Windows 安装收敛到 Modern Desktop / Control ownership 模型，同时让 instance identity 与具体部署名称解耦，增强 Windows 离线打包稳定性，并加强媒体真实交付验证。已有安装应使用正常的 Setup 更新流程，不要手工替换 Runtime 文件。
+v0.6.13 正式发布 Modern Desktop / Control ownership 改动，并修复 Linux Release 在干净 runner 上缺少 Control UI 依赖的问题。已有安装应使用正常的 Setup 更新流程，不要手工替换 Runtime 文件。
 
-For the complete change list and post-upgrade checks, see [v0.6.12 release notes](release-notes-v0.6.12.md).
+For the complete change list and post-upgrade checks, see [v0.6.13 release notes](release-notes-v0.6.13.md).
 
 ## Choose and verify a package
 
@@ -16,7 +16,7 @@ DevSpace-Forge has one public release line. Its embedded Runtime is built from t
 
 ## Install or update
 
-**Windows:** extract the archive and run Setup.exe. If it detects an existing installation, use its update flow. Confirm the target installation before proceeding. v0.6.12 upgrades legacy Windows launcher ownership to the modern Desktop launcher and preserves the configured instance route.
+**Windows:** extract the archive and run Setup.exe. If it detects an existing installation, use its update flow. Confirm the target installation before proceeding. v0.6.13 upgrades legacy Windows launcher ownership to the modern Desktop launcher and preserves the configured instance route.
 
 **Linux:** extract the archive and run ./setup-linux.sh. An existing configuration can be updated in place; use the explicit reconfiguration option only when you intend to change connection settings. Actual systemd unit names depend on your instance name.
 

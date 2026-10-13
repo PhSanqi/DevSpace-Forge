@@ -8,15 +8,16 @@ DevSpace-Forge connects an MCP-capable AI chat client to development folders you
 
 This is a community-built, self-hosted project, not an official OpenAI or Cloudflare product. Client features, context retention and usage limits depend on the client and its subscription. DevSpace-Forge does not grant AI credits, bypass quotas or promise unlimited memory.
 
-## What's new in v0.6.12
+## What's new in v0.6.13
 
 - **Modern Windows control plane:** the Windows package now uses one modern Desktop launcher to coordinate the local Control console, Runtime and Tunnel. Upgrades remove the legacy launcher ownership instead of running two managers side by side.
 - **Safer multi-instance startup:** the Windows Control instance is derived from the configured public route rather than being fixed to one deployment name, so reusable installations such as `/team-a` and `/team-b` keep their own identity.
 - **More reliable offline Windows packaging:** Runtime and video dependencies are staged through bounded short paths before packaging and smoke tests, reducing failures caused by Windows path-length and native dependency handling.
+- **Clean Linux release packaging:** the Linux package script now installs the Control UI dependencies itself before building, so a fresh GitHub runner no longer depends on a pre-existing `control-ui/node_modules` directory.
 - **Stronger media delivery checks:** image-generation workflows now verify that generated media is actually delivered through the supported media path instead of treating generation alone as success.
 - **Public-repository hygiene:** public documentation, examples, tests and release metadata use generic placeholders and non-personal Git identities. Deployment hostnames, credentials and local machine paths remain local configuration.
 
-See [v0.6.12 release notes](docs/release-notes-v0.6.12.md) for upgrade details and verification guidance.
+See [v0.6.13 release notes](docs/release-notes-v0.6.13.md) for upgrade details and verification guidance.
 
 ## What you get
 
@@ -66,7 +67,7 @@ The optional landing page in the site directory is a static website, **not** the
 - [Installation and connection](docs/getting-started.md)
 - [Windows and Linux packages](PLATFORMS.md)
 - [Releases, verification and safe upgrades](docs/releases-and-upgrades.md)
-- [v0.6.12 release notes](docs/release-notes-v0.6.12.md)
+- [v0.6.13 release notes](docs/release-notes-v0.6.13.md)
 - [Image and context intelligence](runtime-src/docs/context-intelligence.md)
 - [Adaptive video understanding](runtime-src/docs/video-understanding.md)
 - [Using the local Console](docs/runtime-console.md)
