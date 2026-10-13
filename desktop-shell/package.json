@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "name": "devspace-forge-desktop-shell",
+  "version": "0.0.0",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "typecheck": "tsc --noEmit && node --check main.cjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "electron": "^44.7.0",
+    "typescript": "^5.9.0"
+  }
+}

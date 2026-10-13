@@ -6,6 +6,8 @@ const descriptorUrl = new URL('../ops/video-sidecar-source.json', import.meta.ur
 const linuxPackageUrl = new URL('../package-release-linux.sh', import.meta.url);
 const windowsPrepareUrl = new URL('../prepare-offline-windows-runtime.ps1', import.meta.url);
 const windowsPackageUrl = new URL('../package-release-windows-payload.ps1', import.meta.url);
+const videoPrepareUrl = new URL('../ops/prepare-video-sidecar.mjs', import.meta.url);
+const videoRuntimeSmokeUrl = new URL('../ops/video-sidecar-runtime-smoke.mjs', import.meta.url);
 const sha256 = /^[a-f0-9]{64}$/;
 
 test('video sidecar source is versioned, LGPL, and SHA-pinned on both platforms', async () => {
@@ -43,6 +45,8 @@ test('product packaging injects and validates the video sidecar', async () => {
   const linux = await readFile(linuxPackageUrl, 'utf8');
   const windowsPrepare = await readFile(windowsPrepareUrl, 'utf8');
   const windowsPackage = await readFile(windowsPackageUrl, 'utf8');
+  const videoPrepare = await readFile(videoPrepareUrl, 'utf8');
+  const videoRuntimeSmoke = await readFile(videoRuntimeSmokeUrl, 'utf8');
 
   assert.match(linux, /prepare-video-sidecar\.mjs/);
   assert.match(linux, /--platform linux-x64/);
@@ -51,6 +55,13 @@ test('product packaging injects and validates the video sidecar', async () => {
   assert.match(windowsPrepare, /['"]--platform['"]\s*,\s*['"]win32-x64['"]/);
   assert.match(windowsPrepare, /video-sidecar-runtime-smoke\.mjs/);
   assert.match(windowsPrepare, /GitHubProxyPrefix/);
+  assert.match(videoPrepare, /tmpdir\(\)/, 'Windows video smoke should be able to use the system short temp root');
+  assert.match(videoPrepare, /devspace-video-smoke-/, 'Windows video smoke must avoid long release staging paths');
+  assert.match(videoPrepare, /await copyFile\(executable, smokeExecutable\)/, 'Windows video smoke must execute a copied verified binary from the short path');
+  assert.match(videoPrepare, /verifyFile\(smokeExecutable, platform\[label\]\.sha256/, 'short-path video smoke must preserve pinned binary verification');
+  assert.match(videoRuntimeSmoke, /await cp\(vendorRoot, smokeVendorRoot, \{ recursive: true \}\)/, 'runtime video smoke must stage the complete sidecar on a short path');
+  assert.match(videoRuntimeSmoke, /process\.env\.DEVSPACE_VIDEO_SIDECAR_DIR = smokeVendorRoot/, 'runtime video smoke must route readVideoForModel through the short sidecar copy');
+  assert.match(videoRuntimeSmoke, /delete process\.env\.DEVSPACE_VIDEO_SIDECAR_DIR/, 'runtime video smoke must restore the caller sidecar environment');
   for (const item of ['manifest.json', 'bin/ffmpeg.exe', 'bin/ffprobe.exe', 'LICENSE.txt', 'PROVENANCE.json']) {
     assert.ok(windowsPackage.includes(item), `Windows payload gate missing ${item}`);
   }

@@ -11,7 +11,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
-using Microsoft.Win32;
 
 namespace DevSpaceControlPlatform
 {
@@ -587,25 +586,7 @@ namespace DevSpaceControlPlatform
 
         public void ApplyWindowsAutoStart(bool enabled)
         {
-            using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
-            {
-                if (key == null) return;
-                var valueName = AutoStartValueName();
-                if (enabled) key.SetValue(valueName, Quote(Process.GetCurrentProcess().MainModule.FileName), RegistryValueKind.String);
-                else key.DeleteValue(valueName, false);
-            }
-        }
-
-        private string AutoStartValueName()
-        {
-            var normalizedRoot = platformRoot
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                .ToUpperInvariant();
-            byte[] digest;
-            using (var sha256 = SHA256.Create())
-                digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedRoot));
-            var suffix = BitConverter.ToString(digest, 0, 8).Replace("-", string.Empty).ToLowerInvariant();
-            return "DevSpaceControlPlatform-" + suffix;
+            SetupInstaller.ApplyWindowsAutoStart(platformRoot, enabled);
         }
 
         public void ApplyWindowsAutoStartFromSettings()

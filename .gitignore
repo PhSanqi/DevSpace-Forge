@@ -7,6 +7,9 @@ runtime/
 /bin/
 /obj/
 /dist/
+/control-ui/dist/
+/control-ui/node_modules/
+/desktop-shell/node_modules/
 # Embedded Runtime source is tracked in runtime-src/.
 # runtime/ above remains reserved for local managed installation/state.
 *.exe

@@ -24,8 +24,10 @@ const forbiddenNames = [
 const forbidden = [
   ['project-specific hostname', new RegExp('san' + 'qi[.]org|ph' + 'san' + 'qi', 'i')],
   ['private maintainer alias', new RegExp('san' + 'qi', 'i')],
+  ['private maintainer name', new RegExp('yi' + 'hong|zha' + 'o', 'i')],
   ['private Tunnel hostname', new RegExp('cfargo' + 'tunnel[.]com', 'i')],
-  ['developer home path', new RegExp('/home/' + 'z/|C:\\\\Users\\\\Administrator', 'i')],
+  ['developer home path', new RegExp('/home/' + 'z/|C:\\\\Users\\\\Administrator|D:\\\\Desktop', 'i')],
+  ['private workspace marker', new RegExp('Code' + 'X Workspace|personal-' + 'precutover', 'i')],
   ['GitHub credential', /gh[pousr]_[a-zA-Z0-9_]{16,}/],
   ['OpenAI-style credential', /sk-[a-zA-Z0-9_-]{20,}/],
   ['AWS access key', /AKIA[0-9A-Z]{16}/],
@@ -33,6 +35,7 @@ const forbidden = [
   ['authorization secret', /Authorization\s*:\s*Bearer\s+[a-zA-Z0-9._=-]{24,}/i],
   ['real-looking request UUID', new RegExp('(?!00000000-0000-4000-8000-00000000000[0-9])\\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b', 'i')],
 ];
+const emailAddress = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const historicalCommitId = /\b[0-9a-f]{40}\b/gi;
 const allowedPublicUpstreamCommits = new Map([
   ['ops/video-sidecar-source.json', new Set([
@@ -46,6 +49,15 @@ function isPublicSafeGitEmail(value) {
   return email.endsWith('@users.noreply.github.com') || email.endsWith('@example.com');
 }
 
+function isPublicSafeTextEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return isPublicSafeGitEmail(email)
+    || email === 'git@github.com'
+    || email.endsWith('@users.noreply.local')
+    || email.endsWith('@local.invalid')
+    || email.endsWith('@example.invalid');
+}
+
 test('tracked public files contain no private deployment identifiers or known secret formats', () => {
   const problems = [];
   for (const name of tracked) {
@@ -55,6 +67,9 @@ test('tracked public files contain no private deployment identifiers or known se
     const content = data.toString('utf8');
     for (const [label, expression] of forbidden) {
       if (expression.test(content)) problems.push(name + ': ' + label);
+    }
+    for (const match of content.matchAll(emailAddress)) {
+      if (!isPublicSafeTextEmail(match[0])) problems.push(name + ': non-public email address');
     }
     const allowedCommits = allowedPublicUpstreamCommits.get(name);
     for (const match of content.matchAll(historicalCommitId)) {

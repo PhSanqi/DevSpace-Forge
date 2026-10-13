@@ -126,11 +126,15 @@ install -m 0755 "$SCRIPT_DIR/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-con
 install -m 0644 "$SCRIPT_DIR/runtime-rollback.mjs" "$INSTALL_ROOT/bin/runtime-rollback.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-jobs-guard.mjs" "$INSTALL_ROOT/bin/runtime-jobs-guard.mjs"
 install -m 0644 "$SCRIPT_DIR/control-management.mjs" "$INSTALL_ROOT/bin/control-management.mjs"
+install -m 0644 "$SCRIPT_DIR/control-service-controller.mjs" "$INSTALL_ROOT/bin/control-service-controller.mjs"
+install -m 0644 "$SCRIPT_DIR/windows-process-job.mjs" "$INSTALL_ROOT/bin/windows-process-job.mjs"
 install -m 0644 "$SCRIPT_DIR/managed-cloudflared.mjs" "$INSTALL_ROOT/bin/managed-cloudflared.mjs"
 install -m 0644 "$SCRIPT_DIR/prepare-effective-config.mjs" "$INSTALL_ROOT/bin/prepare-effective-config.mjs"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.html" "$INSTALL_ROOT/bin/runtime-console-ui.html"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.css" "$INSTALL_ROOT/bin/runtime-console-ui.css"
 install -m 0644 "$SCRIPT_DIR/runtime-console-ui.js" "$INSTALL_ROOT/bin/runtime-console-ui.js"
+mkdir -p "$INSTALL_ROOT/bin/control-ui"
+cp -a "$SCRIPT_DIR/control-ui/." "$INSTALL_ROOT/bin/control-ui/"
 cat > "$INSTALL_ROOT/runtime-console.env" <<EOF
 DEVSPACE_SERVICE=$SERVICE
 TUNNEL_SERVICE=$TUNNEL_SERVICE

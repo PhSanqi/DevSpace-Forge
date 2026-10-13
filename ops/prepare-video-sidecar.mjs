@@ -4,6 +4,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -220,12 +221,25 @@ async function main(argv = process.argv.slice(2)) {
 
     const ffmpeg = contained(vendor, platform.ffmpeg.runtime_path);
     const ffprobe = contained(vendor, platform.ffprobe.runtime_path);
-    for (const [label, executable] of [['ffmpeg', ffmpeg], ['ffprobe', ffprobe]]) {
-      const { stdout } = await run(executable, ['-version']);
-      const firstLine = stdout.split(/\r?\n/, 1)[0] ?? '';
-      if (!firstLine.includes(descriptor.ffmpeg_version)) {
-        throw new Error(`${label} version did not match ${descriptor.ffmpeg_version}: ${firstLine}`);
+    const shortSmokeRoot = process.platform === 'win32' && args.platform === 'win32-x64'
+      ? await mkdtemp(path.join(tmpdir(), 'devspace-video-smoke-'))
+      : null;
+    try {
+      for (const [label, executable] of [['ffmpeg', ffmpeg], ['ffprobe', ffprobe]]) {
+        let smokeExecutable = executable;
+        if (shortSmokeRoot) {
+          smokeExecutable = path.join(shortSmokeRoot, path.basename(executable));
+          await copyFile(executable, smokeExecutable);
+          await verifyFile(smokeExecutable, platform[label].sha256, `smoke ${args.platform} ${label}`);
+        }
+        const { stdout } = await run(smokeExecutable, ['-version']);
+        const firstLine = stdout.split(/\r?\n/, 1)[0] ?? '';
+        if (!firstLine.includes(descriptor.ffmpeg_version)) {
+          throw new Error(`${label} version did not match ${descriptor.ffmpeg_version}: ${firstLine}`);
+        }
       }
+    } finally {
+      if (shortSmokeRoot) await rm(shortSmokeRoot, { recursive: true, force: true });
     }
 
     process.stdout.write(`Video sidecar ${args.platform}: ${descriptor.ffmpeg_version} / ${descriptor.license}\n`);

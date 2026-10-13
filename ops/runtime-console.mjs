@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { switchRuntime, localRuntimeProbe } from './runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
+import { createServiceController } from './control-service-controller.mjs';
 import {
   managementSnapshot, projectDetails, observeProject, rollbackReview,
   updateManagedConfig, setTunnelToken, importLegacyQuickConfigCandidate, setAutostart, serviceAction,
@@ -129,6 +130,8 @@ function runningPackage(unit,explicitPid) {
   }catch{return {pid,packageRoot:'',evidence:'MainPID cmdline unavailable'};}
 }
 const uiAssets=['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'];
+const modernUiAsset=/^control-ui\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:html|js|css|svg|png|woff2)$/;
+const realpathWithin=(file,root)=>{try{return realpathSync(file).startsWith(realpathSync(root)+path.sep)&&lstatSync(file).isFile();}catch{return false;}};
 function manifest(file,expectedHash,uiRoot='') {
   const data=file&&readJson(file);
   if (!data || typeof data!=='object' || !data.git_commit || data.source_dirty===true) return null;
@@ -138,8 +141,32 @@ function manifest(file,expectedHash,uiRoot='') {
   const hasUiManifest=Object.hasOwn(data,'ui_sha256');
   const recordedUi=data.ui_sha256;
   if(uiRoot&&hasUiManifest){
-    if(!recordedUi||typeof recordedUi!=='object'||Array.isArray(recordedUi)||!uiAssets.every((name)=>
-      /^[0-9a-f]{64}$/i.test(recordedUi[name]||'')&&recordedUi[name]===fileHash(path.join(uiRoot,name))))return null;
+    if(!recordedUi||typeof recordedUi!=='object'||Array.isArray(recordedUi))return null;
+    const names=Object.keys(recordedUi);
+    if(names.length>515||!uiAssets.every((name)=>Object.hasOwn(recordedUi,name)))return null;
+    const root=path.resolve(uiRoot);
+    const modernNames=names.filter((name)=>name.startsWith('control-ui/'));
+    if(modernNames.length){
+      if(!modernNames.includes('control-ui/index.html'))return null;
+      const found=[];
+      const walk=(dir,relative='control-ui')=>{
+        for(const item of readdirSync(dir,{withFileTypes:true})){
+          const name=relative+'/'+item.name;
+          if(item.isDirectory())walk(path.join(dir,item.name),name);
+          else if(item.isFile()&&modernUiAsset.test(name))found.push(name);
+          else if(item.isSymbolicLink())throw new Error('Symlink in Control UI assets.');
+          if(found.length>512)throw new Error('Too many Control UI assets.');
+        }
+      };
+      try{walk(path.join(root,'control-ui'));}catch{return null;}
+      if(found.length!==modernNames.length||!found.every((name)=>Object.hasOwn(recordedUi,name)))return null;
+    }
+    for(const name of names){
+      if(!uiAssets.includes(name)&&(!modernUiAsset.test(name)||name.split('/').some((part)=>part==='.'||part==='..')))return null;
+      const target=path.resolve(root,...name.split('/'));
+      if(!target.startsWith(root+path.sep)||!realpathWithin(target,root))return null;
+      if(typeof recordedUi[name]!=='string'||!(/^[0-9a-f]{64}$/i.test(recordedUi[name]))||recordedUi[name]!==fileHash(target))return null;
+    }
   }
   const result={
     git_branch:clip(data.git_branch||data.source_ref||'',120)||null,
@@ -309,9 +336,9 @@ async function inventory(options,config,runtimePackage) {
   }catch(error){result.error=clip(error.message,250);}
   return result;
 }
-export async function snapshot(options) {
+export async function snapshot(options,controller=createServiceController(options)) {
   const config=readJson(options.configPath)||{};
-  const rt=runtimeInfo(options);
+  const rt=runtimeInfo({...options,pid:controller.state('devspace').pid||options.pid});
   const base=managementPublicBaseUrl(options,config)||'';
   let pathPart=(managementPublicBasePath(options,config)||'')+'/healthz',publicUrl='';
   try{const u=new URL(base);pathPart=u.pathname.replace(/\/+$/,'')+'/healthz';publicUrl=u.origin+pathPart;}catch{}
@@ -319,8 +346,8 @@ export async function snapshot(options) {
   const [localHealth,publicHealth,metrics,state]=await Promise.all([
     fetchHealth(localUrl),fetchHealth(publicUrl),tunnelMetrics(options.tunnelMetrics),inventory(options,config,rt.actual.package_root||rt.package_root||options.platformRoot)
   ]);
-  const devspaceStatus=systemd(options.serviceUnit,'is-active')||null;
-  const tunnelStatus=systemd(options.tunnelUnit,'is-active')||null;
+  const devspaceStatus=controller.available('devspace')?controller.state('devspace').status:null;
+  const tunnelStatus=controller.available('tunnel')?controller.state('tunnel').status:null;
   const result={
     schema_version:2,generated_at:new Date().toISOString(),instance:options.instance,platform:process.platform,
     runtime:rt,deployment:deploymentInfo(options,rt),
@@ -334,9 +361,9 @@ export async function snapshot(options) {
     },
     tunnel:{metrics,diagnostics:tunnelDiagnostics(options.tunnelUnit)},
     inventory:state,security:{credentials_included:false,loopback_console_only:true},
-    actions:{restart_devspace:!!devspaceStatus&&process.platform!=='win32',restart_tunnel:!!tunnelStatus&&process.platform!=='win32',rollback_runtime:!!devspaceStatus&&process.platform!=='win32',copy_owner_password:ownerCopyEnabled(options)},
+    actions:{restart_devspace:controller.available('devspace'),restart_tunnel:controller.available('tunnel'),rollback_runtime:!!devspaceStatus&&process.platform!=='win32',copy_owner_password:ownerCopyEnabled(options)},
   };
-  result.management=managementSnapshot(options,rt,state);
+  result.management=managementSnapshot(options,rt,state,controller);
   return result;
 }
 
@@ -368,9 +395,16 @@ function executeService(unit) {
   const r=spawnSync('systemctl',['--user','restart',unit],{encoding:'utf8',timeout:15000,windowsHide:true});
   return r.status===0 ? {ok:true,status:200,unit} : {ok:false,status:500,error:clip(r.stderr||r.error?.message||'Service restart failed',350)};
 }
+export async function restoreWindowsManagedServices(options,controller,platform=process.platform,startServices=serviceAction) {
+  if(platform!=='win32')return {ok:true,status:200,skipped:'non-windows'};
+  if(!existsSync(path.join(options.platformRoot,'settings.json')))return {ok:true,status:200,skipped:'unconfigured-root'};
+  return startServices(options,'all','start',controller);
+}
+
 export function createConsoleServer(options,services={}) {
   const token=randomBytes(32).toString('base64url');
-  const getSnapshot=services.snapshot||snapshot;
+  const controller=services.lifecycleController||createServiceController(options);
+  const getSnapshot=services.snapshot||(opts=>snapshot(opts,controller));
   const restart=services.restart||executeService;
   const getOperatorPassword=services.getOperatorPassword||readOperatorPassword;
   const changeRuntime=services.switchRuntime||switchRuntime;
@@ -380,6 +414,10 @@ export function createConsoleServer(options,services={}) {
   let switching=false;
   const staticFiles={'/':'runtime-console-ui.html','/index.html':'runtime-console-ui.html','/ui.css':'runtime-console-ui.css','/ui.js':'runtime-console-ui.js'};
   const type={'/':'text/html; charset=utf-8','/index.html':'text/html; charset=utf-8','/ui.css':'text/css; charset=utf-8','/ui.js':'text/javascript; charset=utf-8'};
+  // Migration preview: serve the built React client beside the legacy root console.
+  // Both pages use this server's existing API and state owner; remove this route after parity.
+  const packagedNextRoot=path.join(here,'control-ui');
+  const nextRoot=path.resolve(services.nextAssetRoot||(existsSync(packagedNextRoot)?packagedNextRoot:path.join(here,'../control-ui/dist')));
   const readBody=async(req,limit=32768)=>{
     let body='';
     for await(const chunk of req){body+=chunk;if(body.length>limit)throw Object.assign(new Error('Request too large.'),{status:413});}
@@ -392,12 +430,25 @@ export function createConsoleServer(options,services={}) {
     const host=req.headers.host||'';
     const port=server.address()?.port||options.serve;
     const validHost=host==='127.0.0.1:'+port||host==='localhost:'+port||host==='[::1]:'+port;
-    if(!validHost)return json(res,403,{error:'Loopback Host required.'});
+    const remote=req.socket.remoteAddress;
+    if(!validHost||!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(remote))return json(res,403,{error:'Loopback Host required.'});
     const requestUrl=new URL(req.url||'/','http://'+host);
     const url=requestUrl.pathname;
     if(req.method==='GET'&&Object.hasOwn(staticFiles,url)){
       try{return response(res,200,readFileSync(path.join(here,staticFiles[url])),type[url]);}
       catch{return json(res,500,{error:'Console asset unavailable.'});}
+    }
+    if(req.method==='GET'&&(url==='/next'||url.startsWith('/next/'))){
+      const asset=url.startsWith('/next/assets/')?url.slice('/next/'.length):'index.html';
+      if(!/^(?:index\.html|assets\/[A-Za-z0-9_.-]+\.(?:js|css|svg|png|woff2))$/.test(asset))return json(res,404,{error:'Not found.'});
+      const file=path.resolve(nextRoot,asset);
+      if(!file.startsWith(nextRoot+path.sep))return json(res,404,{error:'Not found.'});
+      try{
+        if(!realpathSync(file).startsWith(realpathSync(nextRoot)+path.sep))return json(res,404,{error:'Not found.'});
+        const ext=path.extname(file);
+        const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.woff2':'font/woff2'};
+        return response(res,200,readFileSync(file),mime[ext]);
+      }catch{return json(res,503,{error:'Preview build unavailable. Run npm run build:control-ui.'});}
     }
     if(req.method==='GET'&&url==='/api/status'){
       try{return json(res,200,await getSnapshot(options));}
@@ -418,8 +469,8 @@ export function createConsoleServer(options,services={}) {
     if(req.method==='GET'&&url==='/api/management/log'){
       const service=requestUrl.searchParams.get('service');
       const unit=service==='devspace'?options.serviceUnit:service==='tunnel'?options.tunnelUnit:'';
-      if(!unit)return json(res,404,{error:'Unknown service.'});
-      return json(res,200,{service,log:recentServiceLog(unit,200)});
+      if(!controller.available(service))return json(res,404,{error:'Unknown service.'});
+      return json(res,200,{service,log:recentServiceLog(unit,200,controller,service)});
     }
     if(req.method==='GET'&&url==='/api/management/conversation'){
       const workspaceId=requestUrl.searchParams.get('workspace_id')||'';
@@ -451,9 +502,9 @@ export function createConsoleServer(options,services={}) {
           const result=setTunnelToken(options,body.token);
           return json(res,200,{...result,restart_required:true});
         }
-        if(url==='/api/management/autostart')return json(res,200,setAutostart(options,!!body.enabled));
+        if(url==='/api/management/autostart')return json(res,200,setAutostart(options,!!body.enabled,controller));
         if(url==='/api/management/service'){
-          const result=await serviceAction(options,body.target,body.action);
+          const result=await serviceAction(options,body.target,body.action,controller);
           return json(res,result.status||200,result);
         }
         if(url==='/api/management/doctor'){
@@ -481,6 +532,7 @@ export function createConsoleServer(options,services={}) {
       if(Number(req.headers['content-length']||0)>4096)return json(res,413,{ok:false,error:'Request too large.'});
       const name=url.slice('/api/actions/'.length);
       if(name==='rollback-runtime'){
+        if(process.platform==='win32')return json(res,409,{ok:false,error:'Runtime rollback is unavailable on Windows Control.'});
         if(req.headers.origin!=='http://'+host)return json(res,403,{ok:false,error:'Same-origin confirmation required.'});
         if(switching)return json(res,409,{ok:false,error:'A runtime switch is already in progress.'});
         switching=true;
@@ -503,11 +555,14 @@ export function createConsoleServer(options,services={}) {
         }catch{return json(res,500,{ok:false,error:'Runtime operation failed; inspect the local console journal.'});}
         finally{switching=false;}
       }
-      const unit=name==='restart-devspace'?options.serviceUnit:name==='restart-tunnel'?options.tunnelUnit:'';
-      if(!unit)return json(res,404,{ok:false,error:'Unknown or disabled action.'});
-      const result=name==='restart-devspace'
-        ? await withRuntimeRestartGuard(options,async()=>restart(unit))
-        : restart(unit);
+      const serviceName=name==='restart-devspace'?'devspace':name==='restart-tunnel'?'tunnel':'';
+      if(!serviceName||!controller.available(serviceName))return json(res,404,{ok:false,error:'Unknown or disabled action.'});
+      const unit=serviceName==='devspace'?options.serviceUnit:options.tunnelUnit;
+      const result=process.platform==='win32'&&!services.restart
+        ? await serviceAction(options,serviceName,'restart',controller)
+        : name==='restart-devspace'
+          ? await withRuntimeRestartGuard(options,async()=>restart(unit))
+          : await restart(unit);
       return json(res,result.status,result);
     }
     return json(res,404,{error:'Not found.'});
@@ -518,8 +573,27 @@ export function createConsoleServer(options,services={}) {
 if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href){
   const options=parseOptions(process.argv.slice(2));
   if(options.serve){
-    const server=createConsoleServer(options);
-    server.listen(options.serve,'127.0.0.1',()=>process.stdout.write('runtime-console=http://127.0.0.1:'+options.serve+'/\n'));
+    const controller=createServiceController(options);
+    const server=createConsoleServer(options,{lifecycleController:controller});
+    if(process.platform==='win32'){
+      let closing=false;
+      for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{
+        if(closing)return;closing=true;
+        try{
+          await controller.shutdown();
+          server.close(()=>{process.exitCode=0;});
+        }catch(error){
+          process.stderr.write('Windows Control shutdown failed: '+error.message+'\n');
+          closing=false;
+        }
+      });
+    }
+    server.listen(options.serve,'127.0.0.1',()=>{
+      process.stdout.write('runtime-console=http://127.0.0.1:'+options.serve+'/\n');
+      void restoreWindowsManagedServices(options,controller).then(result=>{
+        if(!result.ok)process.stderr.write('Windows managed service startup failed: '+clip(result.error||'unknown error',240)+'\n');
+      }).catch(error=>process.stderr.write('Windows managed service startup failed: '+clip(error.message,240)+'\n'));
+    });
   } else {
     process.stdout.write(JSON.stringify(await snapshot(options),null,2)+'\n');
   }

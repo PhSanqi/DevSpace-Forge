@@ -30,6 +30,7 @@ internal static class DevSpaceConfigurationTests
         Run("managed CLI isolates modern DevSpace env", TestModernCliEnvironmentIsolation);
         Run("managed CLI applies legacy effective env", TestLegacyCliEnvironment);
         Run("setup normalizes tunnel hostname and MCP links", TestSetupHostnameNormalization);
+        Run("setup extracts Tunnel token from Cloudflare install commands", TestSetupTunnelCommandParsing);
         Run("setup detects existing configuration in place", TestSetupExistingConfiguration);
         Run("setup updates existing installation without reconfiguration", TestSetupUpdateExisting);
         Run("native GUI Runtime stop and restart respect the shared gate", TestNativeGuiRuntimeGate);
@@ -232,11 +233,40 @@ internal static class DevSpaceConfigurationTests
         AssertEqual(false, SetupInstaller.IsAcceptableEndpointStatus(530), "setup rejects Cloudflare origin failure");
         var autoStartRoot = Path.Combine(Path.GetTempPath(), "devspace-control-autostart");
         AssertEqual(
-            "\"" + Path.Combine(Path.GetFullPath(autoStartRoot), "DevSpaceControlPlatform.exe") + "\"",
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " +
+            "\"" + Path.Combine(Path.GetFullPath(autoStartRoot), "ops", "start-modern-desktop.ps1") + "\" -PlatformRoot " +
+            "\"" + Path.GetFullPath(autoStartRoot) + "\"",
             SetupInstaller.WindowsAutoStartCommand(autoStartRoot),
-            "Windows setup autostart command");
+            "Windows setup autostart command uses the modern desktop launcher");
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("http://devspace.example.com"); });
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/group?x=1"); });
+    }
+
+    private static void TestSetupTunnelCommandParsing()
+    {
+        var token = "eyJhbGciOiJIUzI1NiJ9.synthetic_payload.signature_1234567890";
+        AssertEqual(token, SetupInstaller.ExtractRemoteTunnelToken(token), "raw Tunnel token");
+        AssertEqual(
+            token,
+            SetupInstaller.ExtractRemoteTunnelToken("cloudflared.exe service install " + token),
+            "Windows service install command");
+        AssertEqual(
+            token,
+            SetupInstaller.ExtractRemoteTunnelToken("sudo cloudflared service install '" + token + "'"),
+            "Linux service install command");
+        AssertEqual(
+            token,
+            SetupInstaller.ExtractRemoteTunnelToken("docker run cloudflare/cloudflared:latest tunnel run --token=" + token),
+            "token flag command");
+        AssertEqual(
+            token,
+            SetupInstaller.ExtractRemoteTunnelToken("winget install --id Cloudflare.cloudflared\r\ncloudflared.exe service install \"" + token + "\""),
+            "multi-line dashboard command");
+        AssertEqual(string.Empty, SetupInstaller.ExtractRemoteTunnelToken(""), "empty optional token input");
+        AssertThrows<InvalidDataException>(delegate
+        {
+            SetupInstaller.ExtractRemoteTunnelToken("cloudflared.exe service install <TUNNEL_TOKEN>");
+        });
     }
 
     private static void TestSetupOfflinePayload()
@@ -548,8 +578,18 @@ internal static class DevSpaceConfigurationTests
 
         Directory.CreateDirectory(Path.Combine(bundle, "payload"));
         File.WriteAllText(Path.Combine(bundle, "README.md"), "new-readme");
-        Directory.CreateDirectory(Path.Combine(bundle, "ops"));
-        File.WriteAllText(Path.Combine(bundle, "ops", "runtime-jobs-guard.mjs"), "candidate-jobs-guard");
+        Directory.CreateDirectory(Path.Combine(bundle, "desktop"));
+        File.WriteAllText(Path.Combine(bundle, "desktop", "DevSpaceForgeDesktop.exe"), "desktop-candidate");
+        Directory.CreateDirectory(Path.Combine(bundle, "ops", "control-ui"));
+        foreach (var file in new[]
+        {
+            "runtime-console.mjs", "runtime-rollback.mjs", "runtime-jobs-guard.mjs", "check-runtime-jobs.mjs",
+            "control-management.mjs", "control-service-controller.mjs", "windows-process-job.mjs",
+            "managed-cloudflared.mjs", "prepare-effective-config.mjs", "runtime-console-ui.html",
+            "runtime-console-ui.css", "runtime-console-ui.js", "start-runtime-console.ps1", "start-modern-desktop.ps1"
+        })
+            File.WriteAllText(Path.Combine(bundle, "ops", file), file == "runtime-jobs-guard.mjs" ? "candidate-jobs-guard" : "candidate-" + file);
+        File.WriteAllText(Path.Combine(bundle, "ops", "control-ui", "index.html"), "modern-control-ui");
         var payload = Path.Combine(bundle, "payload", "runtime.tar");
         var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
         var startInfo = new ProcessStartInfo
@@ -589,6 +629,12 @@ internal static class DevSpaceConfigurationTests
         AssertEqual("new-readme", File.ReadAllText(Path.Combine(install, "README.md")), "product files upgraded");
         AssertEqual("candidate-jobs-guard", File.ReadAllText(Path.Combine(install, "ops", "runtime-jobs-guard.mjs")),
             "runtime jobs guard survives Windows existing-install update");
+        AssertEqual("desktop-candidate", File.ReadAllText(Path.Combine(install, "desktop", "DevSpaceForgeDesktop.exe")),
+            "modern desktop survives Windows existing-install update");
+        AssertEqual("candidate-start-modern-desktop.ps1", File.ReadAllText(Path.Combine(install, "ops", "start-modern-desktop.ps1")),
+            "modern launcher survives Windows existing-install update");
+        AssertEqual("modern-control-ui", File.ReadAllText(Path.Combine(install, "ops", "control-ui", "index.html")),
+            "modern Control UI survives Windows existing-install update");
 
         // The native installer is outside the Node Console process. It must
         // respect the same gate before any managed Runtime process is stopped.
@@ -1113,8 +1159,8 @@ internal static class DevSpaceConfigurationTests
     private static string TestRoot(string name)
     {
         var root = Path.Combine(
-            Environment.CurrentDirectory,
-            ".test-output",
+            Path.GetTempPath(),
+            "devspace-control-tests",
             name + "-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         return root;

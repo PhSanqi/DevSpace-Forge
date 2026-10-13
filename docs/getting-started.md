@@ -4,19 +4,43 @@ DevSpace-Forge runs the development tools on **your own** Windows or Linux machi
 
 ## Step 1: Install
 
-Download the latest platform archive and matching SHA-256 sidecar from this repository's Releases tab. Verify the checksum. On Windows, extract and run Setup.exe. On Linux, extract and run ./setup-linux.sh.
+Download the latest platform archive and matching SHA-256 sidecar from this repository's Releases tab. Verify the checksum. On Windows, extract and run `Setup.exe`. On Linux, extract and run `./setup-linux.sh`.
 
-## Step 2: Approve local folders
+The Windows installer is a guided wizard. It intentionally avoids asking new users to understand internal terms such as Origin or Endpoint before they can install the product. The Linux package currently supports Linux x86_64 and the install script rejects an incompatible platform before changing the installation.
 
-Choose an Allowed Root containing projects you intend the assistant to access. Prefer a dedicated project directory rather than your entire home directory. The setup flow shows a local Origin and MCP endpoint. Confirm that the local health check succeeds.
+## Step 2: Prepare a domain
 
-## Step 3: Optional remote access
+You need a domain that you control; it does not have to be a “free domain”. Add that domain to your own Cloudflare account and finish the DNS setup until Cloudflare reports the zone as **Active**. The Windows wizard keeps this as a checklist and does not proceed until you confirm both prerequisites.
 
-In your own Cloudflare account, create a remotely managed Tunnel and public hostname. Point the hostname at the local Origin displayed by the installer. Use a hostname such as workspace.example.com in your own domain; this example does not resolve to a project-owned service.
+## Step 3: Create the Tunnel
 
-Enter the Tunnel credential through the installer's supported protected input, and keep it out of screenshots, Git, shell history and project settings. Ordinary single-instance installation does not require an API token or a custom Worker.
+In the Cloudflare dashboard, go to **Networking → Tunnels** and create a Tunnel. A simple descriptive name is enough.
 
-## Step 4: Connect your AI client
+Cloudflare then shows **Setup Environment**. The Windows wizard displays the detected machine as Windows x64 or x86; current Windows release packages are x64. Select the matching environment in Cloudflare and copy the complete **Install and Run** command.
+
+Paste the whole command into Setup. Do not manually extract the token and do not run the service-install command in a terminal. DevSpace-Forge already contains its pinned `cloudflared` binary. Setup extracts the remotely-managed Tunnel credential, stores it only through protected local handling, and starts the bundled connector temporarily so the Cloudflare page can reach **Healthy / Connected**.
+
+This avoids two competing tunnel owners: the final DevSpace Control process, rather than a second independently installed Windows service, remains responsible for starting and supervising the bundled connector after installation.
+
+## Step 4: Publish DevSpace
+
+Once the Tunnel is Healthy, open that Tunnel's **Routes**, choose **Add route → Published application**, then choose a subdomain and your Cloudflare-managed domain.
+
+Setup shows the exact **Service URL** for the local DevSpace service, for example:
+
+    http://127.0.0.1:7677
+
+Copy that value into Cloudflare's Service URL field and save the route. Record the resulting public hostname in Setup, such as `workspace.example.com`. For a normal single-machine installation, there is no additional public-endpoint field to understand. The optional multi-machine gateway address is kept under Advanced settings.
+
+Publishing a Tunnel route and creating a Cloudflare Access application are separate operations. Access is optional; add it later if you want Cloudflare login/policy enforcement in front of the published hostname.
+
+## Step 5: Approve local folders
+
+Choose an Allowed Root containing projects you intend the assistant to access. Prefer a dedicated project directory rather than your entire home directory. Setup then shows a summary before it writes the final configuration.
+
+The Tunnel credential is stored in a current-user protected local secrets file. Keep the original Cloudflare command, token, Owner password and other credentials out of screenshots, Git, issues and project files.
+
+## Step 6: Connect your AI client
 
 In an MCP-capable client, configure the full HTTPS MCP address shown by Setup. For an ordinary hostname, it has this form:
 
@@ -30,4 +54,4 @@ If it cannot connect, check local health, the Tunnel connector, the published ho
 
 Review requested file and shell actions. Use project-level Git commits and Review checkpoints. Preserve settings and working Runtime backups when updating; do not force-stop active long jobs. See [releases and upgrades](releases-and-upgrades.md).
 
-中文要点：下载并校验离线包，安装后只授权所需项目目录；如需远程访问，请在自己的 Cloudflare 账户建立 Tunnel，把域名指向安装器显示的本地 Origin；然后在支持 MCP 的客户端完成授权。真实 Token、密码和项目日志不应进入公开仓库或截图。
+中文要点：下载并校验离线包；Windows Setup 会按“域名 → Cloudflare → Tunnel → 粘贴完整安装命令 → Tunnel Healthy → Published application → 项目目录 → 安装”逐步引导。无需自己截取 Tunnel token，也无需先在终端安装第二套 cloudflared 服务。真实 Token、密码和项目日志不应进入公开仓库或截图。

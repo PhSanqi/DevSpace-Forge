@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,12 +35,16 @@ async function main() {
   const manifest = JSON.parse(await readFile(path.join(vendorRoot, "manifest.json"), "utf8"));
   const platform = manifest.platforms?.[platformKey()];
   if (!platform?.ffmpeg?.path) throw new Error("Video sidecar manifest does not contain ffmpeg for this platform");
-  const ffmpeg = path.resolve(vendorRoot, platform.ffmpeg.path);
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "devspace-video-sidecar-smoke-"));
+  const smokeVendorRoot = path.join(tempRoot, "ffmpeg");
+  await cp(vendorRoot, smokeVendorRoot, { recursive: true });
+  const ffmpeg = path.resolve(smokeVendorRoot, platform.ffmpeg.path);
   const video = path.join(tempRoot, "source.mp4");
   const frameTemp = path.join(tempRoot, "frames");
   const previousTemp = process.env.DEVSPACE_VIDEO_TEMP_DIR;
+  const previousSidecar = process.env.DEVSPACE_VIDEO_SIDECAR_DIR;
   try {
+    process.env.DEVSPACE_VIDEO_SIDECAR_DIR = smokeVendorRoot;
     await execFileAsync(
       ffmpeg,
       [
@@ -65,6 +69,8 @@ async function main() {
   } finally {
     if (previousTemp === undefined) delete process.env.DEVSPACE_VIDEO_TEMP_DIR;
     else process.env.DEVSPACE_VIDEO_TEMP_DIR = previousTemp;
+    if (previousSidecar === undefined) delete process.env.DEVSPACE_VIDEO_SIDECAR_DIR;
+    else process.env.DEVSPACE_VIDEO_SIDECAR_DIR = previousSidecar;
     await rm(tempRoot, { recursive: true, force: true });
   }
 }

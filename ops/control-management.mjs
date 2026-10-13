@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
+import { createServiceController } from './control-service-controller.mjs';
 
 const BASE_REF='refs/devspace/control-platform/history/base';
 const HEAD_REF='refs/devspace/control-platform/history/head';
@@ -31,16 +32,6 @@ function requireGit(cwd,args,options){
   const r=git(cwd,args,options);
   if(!r.ok)throw new Error(clip(r.stderr||r.stdout||('git '+args.join(' ')+' failed'),350));
   return r.stdout.trim();
-}
-function service(unit,action){
-  if(!unit||process.platform==='win32')return {ok:false,status:-1,stdout:'',stderr:'Unavailable'};
-  return run('systemctl',['--user',action,unit],{timeout:15000});
-}
-function serviceActive(unit){const r=service(unit,'is-active');return r.ok?r.stdout.trim():'inactive';}
-function serviceEnabled(unit){const r=service(unit,'is-enabled');return r.ok?r.stdout.trim():'disabled';}
-function servicePid(unit){
-  const r=run('systemctl',['--user','show',unit,'-p','MainPID','--value'],{timeout:3000});
-  const pid=Number(r.stdout.trim());return r.ok&&Number.isSafeInteger(pid)&&pid>0?pid:null;
 }
 function atomicJson(file,value,mode=0o600){
   mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
@@ -79,7 +70,7 @@ function redactConfig(value){
   for(const [key,v] of Object.entries(value))out[key]=/token|secret|password|key/i.test(key)?'[REDACTED]':redactConfig(v);
   return out;
 }
-function tokenFile(options){return options.tunnelTokenFile||path.join(path.dirname(path.dirname(options.configPath)),'cloudflare-tunnel-token.txt');}
+function tokenFile(options){return options.tunnelTokenFile||(process.platform==='win32'?path.join(options.platformRoot,'state','secrets','cloudflare-tunnel-token.txt'):path.join(path.dirname(path.dirname(options.configPath)),'cloudflare-tunnel-token.txt'));}
 function controlSettingsFile(options){return options.controlSettingsFile||path.join(path.dirname(path.dirname(options.configPath)),'control-settings.json');}
 function quickUrlFile(options){return options.quickUrlFile||path.join(options.platformRoot,'state','quick-tunnel-url.txt');}
 function publicBasePath(value){
@@ -122,7 +113,7 @@ export function managementPublicBasePath(options,config=readJson(options.configP
   return control.public_base_path&&control.public_base_path!=='/'?'/'+control.public_base_path.replace(/^\/+|\/+$/g,''):'';
 }
 
-export function managementSnapshot(options,runtime,inventory) {
+export function managementSnapshot(options,runtime,inventory,controller=createServiceController(options)) {
   const config=readJson(options.configPath)||{};
   const control=loadControlSettings(options,config);
   const quickOrigin=readQuickUrl(options);
@@ -139,7 +130,8 @@ export function managementSnapshot(options,runtime,inventory) {
       allowed_hosts:config.server?.allowedHosts||[],
       tunnel_mode:control.tunnel_mode,
       tunnel_token_present:existsSync(tokenFile(options)),
-      auto_start:serviceEnabled(options.serviceUnit)==='enabled',
+      auto_start:controller.autostartAvailable?controller.state('devspace').enabled==='enabled':null,
+      auto_start_available:controller.autostartAvailable,
       tool_mode:config.tools?.mode||null,
       review_ui_enabled:config.ui?.enabled!==false,
       skills_enabled:config.skills?.enabled!==false,
@@ -152,15 +144,15 @@ export function managementSnapshot(options,runtime,inventory) {
       }
     },
     services:{
-      devspace:{status:serviceActive(options.serviceUnit),enabled:serviceEnabled(options.serviceUnit),pid:servicePid(options.serviceUnit)},
-      tunnel:{status:serviceActive(options.tunnelUnit),enabled:serviceEnabled(options.tunnelUnit),pid:servicePid(options.tunnelUnit)}
+      devspace:controller.state('devspace'),
+      tunnel:controller.state('tunnel')
     },
     paths:{
       config:options.configPath,
       state:config.storage?.stateDir||null,
       worktrees:config.workspaces?.worktreeRoot||null,
       agent_dir:config.skills?.agentDir||null,
-      logs:path.join(options.platformRoot,'state')
+      logs:path.join(options.platformRoot,process.platform==='win32'?'logs':'state')
     },
     config_history:listConfigHistory(options),
     projects,
@@ -284,11 +276,8 @@ export function importLegacyQuickConfigCandidate(options,legacy,runtimeVersion='
     notes
   };
 }
-export function setAutostart(options,enabled) {
-  const action=enabled?'enable':'disable';
-  const units=[options.serviceUnit,options.tunnelUnit].filter(Boolean);
-  for(const unit of units){const r=service(unit,action);if(!r.ok)throw new Error('Unable to '+action+' '+unit+': '+clip(r.stderr,200));}
-  return {ok:true,enabled:!!enabled};
+export function setAutostart(options,enabled,controller=createServiceController(options)) {
+  return controller.autostart(enabled);
 }
 const sleep=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
 async function waitForQuickUrl(options,timeoutMs=20000){
@@ -300,67 +289,71 @@ async function waitForQuickUrl(options,timeoutMs=20000){
   }
   return '';
 }
-function applyService(unit,action){
-  const r=service(unit,action);
-  return r.ok?null:clip(r.stderr||('Failed to '+action+' '+unit),250);
+async function applyService(controller,name,action,mode){
+  const r=await controller.action(name,action,mode);
+  return r.ok?null:clip(r.stderr||('Failed to '+action+' '+name),250);
 }
-export async function serviceAction(options,target,action) {
+export async function serviceAction(options,target,action,controller=createServiceController(options)) {
   if(!['start','stop','restart'].includes(action))return {ok:false,status:400,error:'Unknown service action.'};
   if(!['devspace','tunnel','all'].includes(target))return {ok:false,status:404,error:'Unknown service target.'};
-  if(!options.serviceUnit||(target!=='devspace'&&!options.tunnelUnit))return {ok:false,status:404,error:'Managed service is unavailable.'};
+  if(!controller.available('devspace')||(target!=='devspace'&&!controller.available('tunnel')))return {ok:false,status:404,error:'Managed service is unavailable.'};
+  const mode=options.configPath?loadControlSettings(options).tunnel_mode:'Remote';
   const perform=async()=>{
-  const mode=loadControlSettings(options).tunnel_mode;
   if(mode==='Quick'){
-    if(!options.tunnelUnit)return {ok:false,status:409,error:'Quick Tunnel requires a managed cloudflared service.'};
+    if(!controller.available('tunnel'))return {ok:false,status:409,error:'Quick Tunnel requires a managed cloudflared service.'};
     if(target==='devspace'){
-      if(action!=='stop'&&(serviceActive(options.tunnelUnit)!=='active'||!readQuickUrl(options)))
+      if(action!=='stop'&&(controller.state('tunnel').status!=='active'||!readQuickUrl(options)))
         return {ok:false,status:409,error:'Quick Tunnel must be active and have a generated public URL before DevSpace starts.'};
-      const error=applyService(options.serviceUnit,action);
+      const error=await applyService(controller,'devspace',action,mode);
       return error?{ok:false,status:500,error}:{ok:true,status:200,target,action,tunnel_mode:mode};
     }
     if(target==='all'&&action==='stop'){
-      let error=applyService(options.serviceUnit,'stop')||applyService(options.tunnelUnit,'stop');
+      const first=await applyService(controller,'devspace','stop',mode);
+      const error=first||await applyService(controller,'tunnel','stop',mode);
       try{rmSync(quickUrlFile(options),{force:true});}catch{}
       return error?{ok:false,status:500,error}:{ok:true,status:200,target,action,tunnel_mode:mode};
     }
     if(target==='tunnel'&&action==='stop'){
-      const error=applyService(options.tunnelUnit,'stop');
+      const error=await applyService(controller,'tunnel','stop',mode);
       try{rmSync(quickUrlFile(options),{force:true});}catch{}
       return error?{ok:false,status:500,error}:{ok:true,status:200,target,action,tunnel_mode:mode};
     }
-    const tunnelAlreadyActive=serviceActive(options.tunnelUnit)==='active';
+    const tunnelAlreadyActive=controller.state('tunnel').status==='active';
     const existingQuick=readQuickUrl(options);
-    if(target==='all'&&action==='restart')applyService(options.serviceUnit,'stop');
+    if(target==='all'&&action==='restart'){
+      const stopError=await applyService(controller,'devspace','stop',mode);
+      if(stopError)return {ok:false,status:500,error:stopError};
+    }
     let quickOrigin='';
     if(action==='start'&&tunnelAlreadyActive&&existingQuick){
       quickOrigin=existingQuick;
     }else{
       try{rmSync(quickUrlFile(options),{force:true});}catch{}
       const tunnelAction=action==='restart'||tunnelAlreadyActive?'restart':'start';
-      const tunnelError=applyService(options.tunnelUnit,tunnelAction);
+      const tunnelError=await applyService(controller,'tunnel',tunnelAction,mode);
       if(tunnelError)return {ok:false,status:500,error:tunnelError};
       quickOrigin=await waitForQuickUrl(options);
     }
     if(!quickOrigin)return {ok:false,status:504,error:'Quick Tunnel started but no trycloudflare.com URL was observed within 20 seconds.'};
-    const devspaceAction=serviceActive(options.serviceUnit)==='active'?'restart':'start';
-    const devspaceError=applyService(options.serviceUnit,devspaceAction);
+    const devspaceAction=controller.state('devspace').status==='active'?'restart':'start';
+    const devspaceError=await applyService(controller,'devspace',devspaceAction,mode);
     if(devspaceError)return {ok:false,status:500,error:devspaceError};
     return {ok:true,status:200,target,action,tunnel_mode:mode,quick_public_origin:quickOrigin};
   }
   const sequence=target==='devspace'
-    ? [[options.serviceUnit,action]]
+    ? [['devspace',action]]
     : target==='tunnel'
-      ? [[options.tunnelUnit,action]]
+      ? [['tunnel',action]]
       : action==='stop'
-        ? [[options.tunnelUnit,'stop'],[options.serviceUnit,'stop']]
-        : [[options.serviceUnit,action],[options.tunnelUnit,action]];
-  for(const [unit,unitAction] of sequence){
-    const error=applyService(unit,unitAction);
+        ? [['tunnel','stop'],['devspace','stop']]
+        : [['devspace',action],['tunnel',action]];
+  for(const [name,unitAction] of sequence){
+    const error=await applyService(controller,name,unitAction,mode);
     if(error)return {ok:false,status:500,error};
   }
   return {ok:true,status:200,target,action};
   };
-  return target!=='tunnel'&&(action!=='start'||target==='all')
+  return (target!=='tunnel'&&(action!=='start'||target==='all')||target==='tunnel'&&mode==='Quick'&&action==='restart')
     ? withRuntimeRestartGuard(options,perform)
     : perform();
 }
@@ -584,7 +577,8 @@ export function recentWorkspaceActivity(unit,workspaceId,lines=250) {
   return {log:result.join('\n'),latest_tool:latestTool};
 }
 export function recentWorkspaceLog(unit,workspaceId,lines=250){return recentWorkspaceActivity(unit,workspaceId,lines).log;}
-export function recentServiceLog(unit,lines=200) {
+export function recentServiceLog(unit,lines=200,controller=null,name='') {
+  if(controller)return controller.log(name,lines);
   if(!unit||process.platform==='win32')return '';
   const r=run('journalctl',['--user','-u',unit,'-n',String(Math.min(500,Math.max(10,lines))),'--no-pager','-o','short-iso'],{timeout:5000,maxBuffer:2*1024*1024});
   return clip(r.stdout,60000);

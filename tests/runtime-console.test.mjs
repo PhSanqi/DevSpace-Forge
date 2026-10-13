@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { createConsoleServer, parseOptions, resolveRunningPackage, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
+import { createConsoleServer, parseOptions, resolveRunningPackage, restoreWindowsManagedServices, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
 import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from '../ops/runtime-jobs-guard.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
@@ -28,6 +29,33 @@ const fixture=(prefix='devspace-console-')=>{
   }
   return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+const testLifecycleController=()=>({
+  available:()=>true,autostartAvailable:true,
+  state:()=>({status:'active',enabled:'enabled',pid:123}),
+  action:async()=>({ok:true,status:200,stdout:'',stderr:''}),
+  autostart:(enabled)=>({ok:true,enabled:!!enabled}),
+  log:()=>'',
+});
+
+test('Windows console startup restores managed services only for configured product roots',async()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'devspace-win-restore-'));
+  try{
+    const options={platformRoot:root,configPath:path.join(root,'state','devspace-config','config.jsonc')};
+    const calls=[];
+    const startServices=async(_options,target,action,controller)=>{calls.push({target,action,controller});return {ok:true,status:200};};
+    const controller={};
+    const unconfigured=await restoreWindowsManagedServices(options,controller,'win32',startServices);
+    assert.equal(unconfigured.skipped,'unconfigured-root');
+    assert.equal(calls.length,0);
+    writeFileSync(path.join(root,'settings.json'),'{}');
+    const restored=await restoreWindowsManagedServices(options,controller,'win32',startServices);
+    assert.equal(restored.ok,true);
+    assert.deepEqual(calls.map(({target,action})=>({target,action})),[{target:'all',action:'start'}]);
+    const nonWindows=await restoreWindowsManagedServices(options,controller,'linux',startServices);
+    assert.equal(nonWindows.skipped,'non-windows');
+    assert.equal(calls.length,1);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('Cloudflare gateway preserves canonical hostname on HTTP upgrade and forces HTTPS origin fetch',()=>{
   assert.equal(resolveInstance('/server/healthz'),'server');
   assert.equal(resolveInstance('/group/mcp'),'group');
@@ -193,7 +221,7 @@ test('Console refuses Runtime-affecting actions while durable jobs run, not Tunn
   db.close();
   const calls=[];
   const opts={serve:0,platformRoot:f.root,stateDir:state,explicitRuntimePackage:f.declared,serviceUnit:'devspace-test.service',tunnelUnit:'tunnel-test.service',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
-  const server=createConsoleServer(opts,{snapshot:async()=>({schema_version:2}),restart:unit=>{calls.push(unit);return {ok:true,status:200,unit};},switchRuntime:async()=>{calls.push('rollback');return {ok:true,status:200};}});
+  const server=createConsoleServer(opts,{lifecycleController:testLifecycleController(),snapshot:async()=>({schema_version:2}),restart:unit=>{calls.push(unit);return {ok:true,status:200,unit};},switchRuntime:async()=>{calls.push('rollback');return {ok:true,status:200};}});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const url='http://127.0.0.1:'+server.address().port;
   try{
@@ -209,7 +237,9 @@ test('Console refuses Runtime-affecting actions while durable jobs run, not Tunn
     const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>!x.current);
     response=await post('/api/actions/rollback-runtime',{target_id:target.id,expected_sha256:target.server_sha256,observed_pid:123});
     assert.equal(response.status,409);
-    assert.equal((await response.json()).reason_code,'active_jobs');
+    const rollbackBlocked=await response.json();
+    if(process.platform==='win32')assert.match(rollbackBlocked.error,/unavailable on Windows Control/);
+    else assert.equal(rollbackBlocked.reason_code,'active_jobs');
     assert.deepEqual(calls,[]);
     response=await post('/api/actions/restart-tunnel');
     assert.equal(response.status,200,'Tunnel is independently managed and not blocked by Runtime jobs');
@@ -307,6 +337,17 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   assert.ok(prepare.includes(`$devSpacePackageName = 'waishnav-devspace-${runtimeVersion}.tgz'`));
   assert.ok(prepare.includes(`$slotName = '${slot}'`));
   assert.ok(prepare.includes('$env:PATH = "$nodeDir;$previousPath"'),'Windows package install must put the bundled Node first in lifecycle PATH');
+  assert.ok(prepare.includes('& $node $npmCli --version *> $null'),'Windows packaging must probe bundled npm before installing dependencies');
+  assert.ok(prepare.includes('Get-Command npm.cmd -ErrorAction SilentlyContinue'),'Windows packaging may locate a system npm CLI only as a startup fallback');
+  assert.ok(prepare.includes('& $node $systemNpmCli --version *> $null'),'Windows npm fallback must still execute with the bundled Node ABI');
+  assert.ok(prepare.includes("$fallbackRoot = Join-Path ([IO.Path]::GetTempPath()) ('devspace-runtime-npm-' + [Guid]::NewGuid().ToString('N'))"),'Windows npm fallback must install from a short temporary path');
+  assert.ok(prepare.includes('& $node $systemNpmCli install --omit=dev --no-fund --no-audit'),'Windows npm fallback must still use the bundled Node ABI');
+  assert.ok(prepare.includes('& robocopy.exe @copyArgs'),'Windows npm fallback must copy dependencies with a bounded robocopy plan');
+  assert.ok(prepare.includes("'/XF', '*.map', '*.d.ts', '*.pdb'"),'Windows npm fallback must filter build metadata during the short-path copy');
+  assert.ok(prepare.includes("Get-ChildItem -LiteralPath $fallbackAnthropic -Directory -Filter 'claude-agent-sdk*'"),'Windows npm fallback must exclude the dormant Claude Agent SDK before release staging');
+  assert.ok(prepare.includes('$dependenciesAlreadyPruned = $true'),'Windows npm fallback must mark its filtered copy so the long staging tree is not rescanned');
+  assert.ok(prepare.includes('if (-not $dependenciesAlreadyPruned) {'),'normal bundled npm installs must retain the existing prune path');
+  assert.ok(prepare.includes('if ($npmExitCode -ne 0) { throw "npm install failed with code $npmExitCode" }'),'dependency install failures must remain fail-closed after npm selection');
   assert.ok(prepare.includes('$env:PATH = $previousPath'),'Windows package install must restore the caller PATH');
   assert.ok(prepare.includes("import Database from 'better-sqlite3'"),'Windows packaging must execute better-sqlite3 with the bundled Node');
   assert.ok(prepare.includes("new Database(':memory:')"),'Windows packaging must actually load and exercise the better-sqlite3 native binding');
@@ -362,11 +403,26 @@ test('Control provenance verifies the deployed UI files, not just the backend sc
       writeFileSync(path.join(bin,name),name);
       return [name,digest(name)];
     }));
+    mkdirSync(path.join(bin,'control-ui','assets'),{recursive:true});
+    writeFileSync(path.join(bin,'control-ui','index.html'),'modern index');
+    writeFileSync(path.join(bin,'control-ui','assets','app.js'),'modern script');
+    ui_sha256['control-ui/index.html']=digest('modern index');
+    ui_sha256['control-ui/assets/app.js']=digest('modern script');
     const controlManifest=path.join(f.root,'control-provenance.json');
     const entry={git_commit:'a'.repeat(40),server_sha256:digest(backend),ui_sha256};
     writeFileSync(controlManifest,JSON.stringify(entry));
     const options={platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
     assert.equal(runtimeInfo(options).provenance.control.ui_manifest_verified,true);
+    for(const invalid of ['../outside.js','control-ui/../runtime-console-ui.js','control-ui/invalid.txt','/absolute.js']){
+      writeFileSync(controlManifest,JSON.stringify({...entry,ui_sha256:{...ui_sha256,[invalid]:digest('anything')}}));
+      assert.equal(runtimeInfo(options).provenance.control,null,`invalid UI path ${invalid} must fail`);
+    }
+    writeFileSync(controlManifest,JSON.stringify({...entry,ui_sha256:{...ui_sha256,'control-ui/assets/app.js':undefined}}));
+    assert.equal(runtimeInfo(options).provenance.control,null,'a modern UI hash cannot be missing');
+    writeFileSync(controlManifest,JSON.stringify(entry));
+    writeFileSync(path.join(bin,'control-ui','assets','app.js'),'changed modern script');
+    assert.equal(runtimeInfo(options).provenance.control,null,'changed modern asset invalidates provenance');
+    writeFileSync(path.join(bin,'control-ui','assets','app.js'),'modern script');
     writeFileSync(controlManifest,JSON.stringify({...entry,ui_sha256:null}));
     assert.equal(runtimeInfo(options).provenance.control,null,'an explicitly malformed UI manifest must not be treated as legacy');
     writeFileSync(controlManifest,JSON.stringify({...entry,ui_sha256:{...ui_sha256,'runtime-console-ui.js':undefined}}));
@@ -388,6 +444,11 @@ test('provenance writer includes UI hashes in the frozen artifact',()=>{
     mkdirSync(bin,{recursive:true});
     writeFileSync(path.join(bin,'runtime-console.mjs'),'control backend');
     for(const name of ['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'])writeFileSync(path.join(bin,name),name);
+    mkdirSync(path.join(bin,'control-ui','assets'),{recursive:true});
+    writeFileSync(path.join(bin,'control-ui','index.html'),'modern index');
+    writeFileSync(path.join(bin,'control-ui','assets','app.js'),'modern script');
+    writeFileSync(path.join(bin,'control-ui','assets','logo.svg'),'<svg/>');
+    writeFileSync(path.join(bin,'control-ui','assets','ignored.map'),'not shipped provenance');
     const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
     const output=path.join(f.root,'control-provenance.json');
     const result=spawnSync(process.execPath,[path.join(repo,'ops','write-provenance.mjs'),'--source-root',repo,
@@ -396,6 +457,9 @@ test('provenance writer includes UI hashes in the frozen artifact',()=>{
     const manifest=JSON.parse(readFileSync(output,'utf8'));
     for(const name of ['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'])
       assert.equal(manifest.ui_sha256[name],createHash('sha256').update(name).digest('hex'));
+    for(const [name,body] of [['control-ui/index.html','modern index'],['control-ui/assets/app.js','modern script'],['control-ui/assets/logo.svg','<svg/>']])
+      assert.equal(manifest.ui_sha256[name],createHash('sha256').update(body).digest('hex'));
+    assert.equal(Object.hasOwn(manifest.ui_sha256,'control-ui/assets/ignored.map'),false);
   }finally{f.clean();}
 });
 test('CLI package discovery does not accept unrelated process arguments',()=>{
@@ -452,7 +516,7 @@ test('read-only inventory uses the deployed devspace.sqlite and jobs schema',asy
 test('web UI serves separate local-only assets, bounded status, and protects actions',async()=>{
   const calls=[];
   const options={serve:0,serviceUnit:'devspace-control-server.service',tunnelUnit:'devspace-server-cloudflared.service'};
-  const server=createConsoleServer(options,{snapshot:async()=>({schema_version:2,instance:'server',runtime:{version:'test'},security:{credentials_included:false}}),restart:(unit)=>{calls.push(unit);return {ok:true,status:200,unit};}});
+  const server=createConsoleServer(options,{lifecycleController:testLifecycleController(),snapshot:async()=>({schema_version:2,instance:'server',runtime:{version:'test'},security:{credentials_included:false}}),restart:(unit)=>{calls.push(unit);return {ok:true,status:200,unit};}});
   await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
   const base='http://127.0.0.1:'+server.address().port;
   try{
@@ -478,6 +542,37 @@ test('web UI serves separate local-only assets, bounded status, and protects act
     assert.deepEqual(calls,['devspace-control-server.service']);
   }finally{await new Promise((resolve)=>server.close(resolve));}
 });
+test('React preview serves only loopback assets and leaves the legacy root in place',async()=>{
+  const preview=mkdtempSync(path.join(tmpdir(),'devspace-next-assets-'));
+  mkdirSync(path.join(preview,'assets'));
+  writeFileSync(path.join(preview,'index.html'),'<!doctype html><title>Next preview fixture</title>');
+  writeFileSync(path.join(preview,'assets','preview.js'),'console.log("preview fixture")');
+  const server=createConsoleServer({serve:0},{lifecycleController:testLifecycleController(),nextAssetRoot:preview,snapshot:async()=>({schema_version:2})});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+server.address().port;
+  try{
+    const legacy=await (await fetch(base+'/')).text();
+    assert.match(legacy,/Control Console/);
+    for(const route of ['/next','/next/','/next/connection','/next/onboarding']){
+      const result=await fetch(base+route);
+      assert.equal(result.status,200,route);
+      assert.match(await result.text(),/Next preview fixture/);
+      assert.match(result.headers.get('content-security-policy'),/default-src 'none'/);
+    }
+    const asset=await fetch(base+'/next/assets/preview.js');
+    assert.equal(asset.status,200);
+    assert.match(asset.headers.get('content-type'),/text\/javascript/);
+    assert.equal((await fetch(base+'/next/assets/../../runtime-console-ui.js')).status,404);
+    assert.equal((await fetch(base+'/next/assets/missing.js')).status,503);
+    const hostile=await new Promise((resolve,reject)=>{
+      http.get(base+'/next/',{headers:{host:'external.example'}},response=>{
+        response.resume();response.on('end',()=>resolve(response.statusCode));
+      }).on('error',reject);
+    });
+    assert.equal(hostile,403);
+    assert.equal((await fetch(base+'/')).status,200,'the existing root remains available');
+  }finally{await new Promise(resolve=>server.close(resolve));rmSync(preview,{recursive:true,force:true});}
+});
 test('connection URL is public and credential is omitted from the routine snapshot',async()=>{
   const f=fixture();
   try{
@@ -492,7 +587,7 @@ test('connection URL is public and credential is omitted from the routine snapsh
 });
 test('operator password requires explicit enablement, same origin and per-process token',async()=>{
   const options={serve:0,serviceUnit:'',tunnelUnit:'',allowOwnerCopy:true,credentialFile:'/fixture/owner.json'};
-  const server=createConsoleServer(options,{snapshot:async()=>({schema_version:2,security:{credentials_included:false}}),getOperatorPassword:()=> 'fake-test-owner-password-only'});
+  const server=createConsoleServer(options,{lifecycleController:testLifecycleController(),snapshot:async()=>({schema_version:2,security:{credentials_included:false}}),getOperatorPassword:()=> 'fake-test-owner-password-only'});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const base='http://127.0.0.1:'+server.address().port;
   try{
@@ -525,7 +620,7 @@ test('rollback API requires current process, exact inventory ID, hash, token and
   const f=fixture();
   const calls=[];
   const opts={serve:0,platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'devspace-test.service',tunnelUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
-  const server=createConsoleServer(opts,{snapshot:async()=>({schema_version:2}),switchRuntime:async(args)=>{calls.push(args);return {ok:true,status:200,target_id:args.target.id};}});
+  const server=createConsoleServer(opts,{lifecycleController:testLifecycleController(),snapshot:async()=>({schema_version:2}),switchRuntime:async(args)=>{calls.push(args);return {ok:true,status:200,target_id:args.target.id};}});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const url='http://127.0.0.1:'+server.address().port;
   try{
@@ -540,10 +635,16 @@ test('rollback API requires current process, exact inventory ID, hash, token and
     assert.equal((await post(JSON.stringify({...JSON.parse(body),observed_pid:124}))).status,409);
     assert.equal(calls.length,0);
     const good=await post(body);
-    assert.equal(good.status,200);
-    assert.equal((await good.json()).target_id,target.id);
-    assert.equal(calls.length,1);
-    assert.equal(calls[0].target.id,target.id);
+    if(process.platform==='win32'){
+      assert.equal(good.status,409);
+      assert.match((await good.json()).error,/unavailable on Windows Control/);
+      assert.equal(calls.length,0);
+    }else{
+      assert.equal(good.status,200);
+      assert.equal((await good.json()).target_id,target.id);
+      assert.equal(calls.length,1);
+      assert.equal(calls[0].target.id,target.id);
+    }
   }finally{await new Promise(resolve=>server.close(resolve));f.clean();}
 });
 test('selected runtime switch validates identity and restores launcher on failed health',async()=>{

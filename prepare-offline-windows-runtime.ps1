@@ -103,17 +103,94 @@ Copy-Item -LiteralPath $runtimePackage -Destination (Join-Path $devspaceDir 'dev
 
 $node = Join-Path $nodeDir 'node.exe'
 $npmCli = Join-Path $nodeDir 'node_modules\npm\bin\npm-cli.js'
+$systemNpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+$systemNpmCli = if ($systemNpmCommand) {
+    Join-Path (Split-Path $systemNpmCommand.Source) 'node_modules\npm\bin\npm-cli.js'
+} else {
+    ''
+}
 $previousPath = $env:PATH
-Push-Location $devspaceDir
+$dependenciesAlreadyPruned = $false
 try {
     $env:PATH = "$nodeDir;$previousPath"
-    & $node $npmCli install --omit=dev --no-fund --no-audit
-    $npmExitCode = $LASTEXITCODE
-    if ($npmExitCode -ne 0) { throw "npm install failed with code $npmExitCode" }
+    & $node $npmCli --version *> $null
+    $bundledNpmReady = $LASTEXITCODE -eq 0
+    if ($bundledNpmReady) {
+        Push-Location $devspaceDir
+        try {
+            & $node $npmCli install --omit=dev --no-fund --no-audit
+            $npmExitCode = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+        if ($npmExitCode -ne 0) { throw "npm install failed with code $npmExitCode" }
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($systemNpmCli) -or -not (Test-Path -LiteralPath $systemNpmCli)) {
+            throw 'Bundled npm could not start and no system npm CLI fallback was found.'
+        }
+        & $node $systemNpmCli --version *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Bundled npm could not start and the system npm CLI fallback is incompatible with the bundled Node.'
+        }
+
+        # Some Windows installations cannot spawn dependency lifecycle scripts when
+        # npm's working directory is nested under the long release staging path.
+        # Keep the target Node/ABI, but perform only this fallback install in a short
+        # temporary directory before copying the complete dependency tree into place.
+        $fallbackRoot = Join-Path ([IO.Path]::GetTempPath()) ('devspace-runtime-npm-' + [Guid]::NewGuid().ToString('N'))
+        Write-Host 'Bundled npm could not start; using the system npm CLI with the bundled Node in a short staging path.'
+        New-Item -ItemType Directory -Force $fallbackRoot | Out-Null
+        try {
+            Copy-Item -LiteralPath (Join-Path $devspaceDir 'package.json') -Destination $fallbackRoot -Force
+            Copy-Item -LiteralPath (Join-Path $devspaceDir 'devspace-runtime.tgz') -Destination $fallbackRoot -Force
+            Push-Location $fallbackRoot
+            try {
+                & $node $systemNpmCli install --omit=dev --no-fund --no-audit
+                $npmExitCode = $LASTEXITCODE
+            }
+            finally {
+                Pop-Location
+            }
+            if ($npmExitCode -ne 0) { throw "npm install failed with code $npmExitCode" }
+
+            $fallbackNodeModules = Join-Path $fallbackRoot 'node_modules'
+            $targetNodeModules = Join-Path $devspaceDir 'node_modules'
+            if (-not (Test-Path -LiteralPath $fallbackNodeModules -PathType Container)) {
+                throw 'npm fallback completed without producing node_modules.'
+            }
+            $copyArgs = @(
+                $fallbackNodeModules,
+                $targetNodeModules,
+                '/E', '/COPY:DAT', '/DCOPY:DAT', '/R:1', '/W:1', '/MT:16',
+                '/NFL', '/NDL', '/NJH', '/NJS', '/NP',
+                '/XF', '*.map', '*.d.ts', '*.pdb'
+            )
+            $fallbackAnthropic = Join-Path $fallbackNodeModules '@anthropic-ai'
+            if (Test-Path -LiteralPath $fallbackAnthropic) {
+                $claudeSdkDirs = @(Get-ChildItem -LiteralPath $fallbackAnthropic -Directory -Filter 'claude-agent-sdk*' -ErrorAction SilentlyContinue)
+                if ($claudeSdkDirs.Count -gt 0) {
+                    $copyArgs += '/XD'
+                    $copyArgs += @($claudeSdkDirs | ForEach-Object { $_.FullName })
+                }
+            }
+            & robocopy.exe @copyArgs | Out-Null
+            $copyExitCode = $LASTEXITCODE
+            if ($copyExitCode -ge 8) { throw "npm fallback dependency copy failed with code $copyExitCode" }
+            $dependenciesAlreadyPruned = $true
+            $fallbackLock = Join-Path $fallbackRoot 'package-lock.json'
+            if (Test-Path -LiteralPath $fallbackLock) {
+                Copy-Item -LiteralPath $fallbackLock -Destination (Join-Path $devspaceDir 'package-lock.json') -Force
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $fallbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     $env:PATH = $previousPath
-    Pop-Location
 }
 
 $controlRuntimeLink = Join-Path $devspaceDir 'node_modules\devspace-control-platform-runtime'
@@ -127,16 +204,18 @@ if (Test-Path -LiteralPath $controlRuntimeLink) {
 # that Node does not need at runtime. Keep pi-coding-agent because core
 # workspace/skills code imports it directly.
 $nodeModules = Join-Path $devspaceDir 'node_modules'
-Get-ChildItem -LiteralPath $nodeModules -Recurse -File -Force | ForEach-Object {
-    $name = $_.Name.ToLowerInvariant()
-    if ($name.EndsWith('.map') -or $name.EndsWith('.d.ts') -or $name.EndsWith('.pdb')) {
-        Remove-Item -LiteralPath $_.FullName -Force
+if (-not $dependenciesAlreadyPruned) {
+    Get-ChildItem -LiteralPath $nodeModules -Recurse -File -Force | ForEach-Object {
+        $name = $_.Name.ToLowerInvariant()
+        if ($name.EndsWith('.map') -or $name.EndsWith('.d.ts') -or $name.EndsWith('.pdb')) {
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
     }
-}
-$anthropicModules = Join-Path $nodeModules '@anthropic-ai'
-if (Test-Path -LiteralPath $anthropicModules) {
-    Get-ChildItem -LiteralPath $anthropicModules -Directory -Filter 'claude-agent-sdk*' -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force
+    $anthropicModules = Join-Path $nodeModules '@anthropic-ai'
+    if (Test-Path -LiteralPath $anthropicModules) {
+        Get-ChildItem -LiteralPath $anthropicModules -Directory -Filter 'claude-agent-sdk*' -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force
+    }
 }
 
 $installed = Join-Path $devspaceDir 'node_modules\@waishnav\devspace\package.json'

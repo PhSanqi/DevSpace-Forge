@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.11',
+    [string]$Version = '0.6.12',
     [Parameter(Mandatory = $true)]
     [string]$RuntimePayloadPath
 )
@@ -44,10 +44,23 @@ Write-Host '[windows-release] running Control tests'
 & (Join-Path $root 'test.ps1') -SkipRuntimeSmoke
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host '[windows-release] installing UI and desktop dependencies'
+& npm --prefix (Join-Path $root 'control-ui') ci
+if ($LASTEXITCODE -ne 0) { throw 'Control UI dependency install failed.' }
+& npm --prefix (Join-Path $root 'desktop-shell') ci
+if ($LASTEXITCODE -ne 0) { throw 'Desktop shell dependency install failed.' }
+
+& npm --prefix (Join-Path $root 'control-ui') run build
+if ($LASTEXITCODE -ne 0) { throw 'Control UI build failed.' }
+& npm --prefix (Join-Path $root 'desktop-shell') run typecheck
+if ($LASTEXITCODE -ne 0) { throw 'Desktop shell typecheck failed.' }
+
 New-Item -ItemType Directory -Force $dist | Out-Null
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item $zip, $hashFile -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force (Join-Path $stage 'payload') | Out-Null
+& (Join-Path $root 'desktop-shell\package-windows.ps1') -OutputPath (Join-Path $stage 'desktop')
+if ($LASTEXITCODE -ne 0) { throw 'Desktop shell packaging failed.' }
 
 & (Join-Path $root 'build.ps1') -OutputPath (Join-Path 'dist' (Join-Path $packageName 'DevSpaceControlPlatform.exe'))
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -64,12 +77,12 @@ foreach ($file in @('PLATFORMS.md', 'ROADMAP.md')) {
 New-Item -ItemType Directory -Force (Join-Path $stage 'docs') | Out-Null
 Copy-Item (Join-Path $root 'docs\*.md') (Join-Path $stage 'docs') -Force
 New-Item -ItemType Directory -Force (Join-Path $stage 'ops') | Out-Null
-foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'runtime-jobs-guard.mjs', 'check-runtime-jobs.mjs', 'control-management.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1')) {
+foreach ($file in @('runtime-console.mjs', 'runtime-rollback.mjs', 'runtime-jobs-guard.mjs', 'check-runtime-jobs.mjs', 'control-management.mjs', 'control-service-controller.mjs', 'windows-process-job.mjs', 'managed-cloudflared.mjs', 'prepare-effective-config.mjs', 'runtime-console-ui.html', 'runtime-console-ui.css', 'runtime-console-ui.js', 'start-runtime-console.ps1', 'start-modern-desktop.ps1')) {
     Copy-Item (Join-Path $root ('ops\' + $file)) (Join-Path $stage 'ops') -Force
 }
+Copy-Item (Join-Path $root 'control-ui\dist') (Join-Path $stage 'ops\control-ui') -Recurse -Force
 & node (Join-Path $root 'ops\write-provenance.mjs') --source-root $root --server-file (Join-Path $stage 'ops\runtime-console.mjs') --ui-dir (Join-Path $stage 'ops') --package-file (Join-Path $root 'package.json') --output (Join-Path $stage 'control-provenance.json') --version $Version --artifact-id $packageName --strict
 if ($LASTEXITCODE -ne 0) { throw 'Control provenance generation failed.' }
-Copy-Item (Join-Path $root 'update-control-platform-out-of-band.ps1') $stage -Force
 
 $sevenZip = $null
 $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue

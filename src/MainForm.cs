@@ -106,12 +106,13 @@ namespace DevSpaceControlPlatform
             historyDirectory = Path.Combine(platformRoot, "state", "config-history");
             history = new ConfigurationHistory(historyDirectory, 20);
 
-            Text = "DevSpace Control Platform";
+            Text = "DevSpace-Forge";
             Icon = AppVisuals.CreateApplicationIcon();
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1000, 760);
             ClientSize = new Size(1000, 760);
-            Font = new Font("Microsoft YaHei UI", 9F);
+            Font = new Font("Microsoft YaHei UI", 9.5F);
+            AppVisuals.ApplyFormTheme(this);
 
             BuildLayout();
             LoadState();
@@ -128,15 +129,53 @@ namespace DevSpaceControlPlatform
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 2,
+                RowCount = 3,
                 Margin = new Padding(0),
                 Padding = new Padding(0)
             };
             shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 72F));
             shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F));
 
+            var header = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
+                BackColor = AppVisuals.Surface,
+                Padding = new Padding(24, 14, 24, 10)
+            };
+            var headerIcon = new PictureBox
+            {
+                Image = Icon.ToBitmap(),
+                Location = new Point(24, 20),
+                Size = new Size(28, 28),
+                SizeMode = PictureBoxSizeMode.StretchImage
+            };
+            header.Controls.Add(headerIcon);
+            header.Controls.Add(new Label
+            {
+                Text = "DevSpace-Forge",
+                Location = new Point(66, 14),
+                Size = new Size(300, 28),
+                Font = new Font(Font.FontFamily, 13.5F, FontStyle.Bold),
+                ForeColor = AppVisuals.TextPrimary
+            });
+            header.Controls.Add(new Label
+            {
+                Text = "本机 DevSpace、连接、项目与运行状态",
+                Location = new Point(66, 42),
+                Size = new Size(430, 22),
+                ForeColor = AppVisuals.TextSecondary
+            });
+
             tabs.Dock = DockStyle.Fill;
+            tabs.Appearance = TabAppearance.FlatButtons;
+            tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+            tabs.ItemSize = new Size(128, 40);
+            tabs.SizeMode = TabSizeMode.Fixed;
+            tabs.Padding = new Point(16, 6);
+            tabs.DrawItem += DrawTabItem;
             tabs.TabPages.Add(BuildServicesTab());
             tabs.TabPages.Add(BuildConnectionTab());
             tabs.TabPages.Add(BuildDevSpaceTab());
@@ -145,11 +184,18 @@ namespace DevSpaceControlPlatform
             tabs.TabPages.Add(BuildReviewHistoryTab());
             tabs.TabPages.Add(BuildHistoryTab());
 
-            var bottom = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(12, 8, 12, 8) };
+            var bottom = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
+                Padding = new Padding(12, 8, 12, 8),
+                BackColor = AppVisuals.Surface
+            };
+            bottom.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 1, BackColor = AppVisuals.Border });
             statusLabel.AutoEllipsis = true;
             statusLabel.Location = new Point(12, 15);
             statusLabel.Size = new Size(720, 26);
-            statusLabel.ForeColor = Color.DimGray;
+            statusLabel.ForeColor = AppVisuals.TextSecondary;
             bottom.Controls.Add(statusLabel);
 
             saveButton.Text = "保存配置";
@@ -158,84 +204,72 @@ namespace DevSpaceControlPlatform
             saveButton.Click += delegate { SaveCurrentSettings(); };
             bottom.Controls.Add(saveButton);
 
-            shell.Controls.Add(tabs, 0, 0);
-            shell.Controls.Add(bottom, 0, 1);
+            shell.Controls.Add(header, 0, 0);
+            shell.Controls.Add(tabs, 0, 1);
+            shell.Controls.Add(bottom, 0, 2);
             Controls.Add(shell);
+
+            AppVisuals.ApplyControlTheme(this);
+            AppVisuals.StylePrimaryButton(saveButton);
         }
 
         private TabPage BuildServicesTab()
         {
-            var page = NewPage("服务");
+            var page = NewPage("概览");
 
-            var devGroup = new GroupBox
-            {
-                Text = "DevSpace",
-                Location = new Point(18, 18),
-                Size = new Size(900, 145)
-            };
-            devSpaceServiceLabel.SetBounds(18, 28, 850, 45);
-            devSpaceServiceLabel.Font = new Font(Font, FontStyle.Bold);
+            var devGroup = CreateCard(page, "DevSpace", 18, 18, 900, 132);
+            devSpaceServiceLabel.SetBounds(22, 44, 840, 34);
+            devSpaceServiceLabel.Font = new Font(Font.FontFamily, 9.5F, FontStyle.Regular);
+            devSpaceServiceLabel.ForeColor = AppVisuals.TextSecondary;
             devGroup.Controls.Add(devSpaceServiceLabel);
-            var startDev = AddButton(devGroup, "启动", 18, 86, 90);
+            var startDev = AddButton(devGroup, "启动", 22, 88, 88);
             startDev.Click += delegate { RunServiceAction(supervisor.StartDevSpace); };
-            var stopDev = AddButton(devGroup, "停止", 120, 86, 90);
+            var stopDev = AddButton(devGroup, "停止", 120, 88, 88);
             stopDev.Click += delegate { RunServiceAction(supervisor.StopDevSpace); };
-            var restartDev = AddButton(devGroup, "重新启动", 222, 86, 110);
+            var restartDev = AddButton(devGroup, "重新启动", 218, 88, 108);
             restartDev.Click += delegate { RunServiceAction(supervisor.RestartDevSpace); };
-            page.Controls.Add(devGroup);
 
-            var cfGroup = new GroupBox
-            {
-                Text = "Cloudflare Tunnel",
-                Location = new Point(18, 180),
-                Size = new Size(900, 145)
-            };
-            cloudflareServiceLabel.SetBounds(18, 28, 850, 45);
-            cloudflareServiceLabel.Font = new Font(Font, FontStyle.Bold);
+            var cfGroup = CreateCard(page, "Cloudflare Tunnel", 18, 166, 900, 132);
+            cloudflareServiceLabel.SetBounds(22, 44, 840, 34);
+            cloudflareServiceLabel.Font = new Font(Font.FontFamily, 9.5F, FontStyle.Regular);
+            cloudflareServiceLabel.ForeColor = AppVisuals.TextSecondary;
             cfGroup.Controls.Add(cloudflareServiceLabel);
-            var startCf = AddButton(cfGroup, "启动", 18, 86, 90);
+            var startCf = AddButton(cfGroup, "启动", 22, 88, 88);
             startCf.Click += delegate { RunServiceAction(supervisor.StartCloudflare); };
-            var stopCf = AddButton(cfGroup, "停止", 120, 86, 90);
+            var stopCf = AddButton(cfGroup, "停止", 120, 88, 88);
             stopCf.Click += delegate { RunServiceAction(supervisor.StopCloudflare); };
-            var restartCf = AddButton(cfGroup, "重新启动", 222, 86, 110);
+            var restartCf = AddButton(cfGroup, "重新启动", 218, 88, 108);
             restartCf.Click += delegate { RunServiceAction(supervisor.RestartCloudflare); };
-            page.Controls.Add(cfGroup);
 
-            var allGroup = new GroupBox
-            {
-                Text = "全部服务",
-                Location = new Point(18, 342),
-                Size = new Size(900, 115)
-            };
-            var startAll = AddButton(allGroup, "启动全部", 18, 40, 110);
+            var allGroup = CreateCard(page, "快速操作", 18, 314, 900, 104);
+            var startAll = AddButton(allGroup, "启动全部", 22, 52, 108);
             startAll.Click += delegate { RunServiceAction(supervisor.StartAll); };
-            var stopAll = AddButton(allGroup, "停止全部", 140, 40, 110);
+            var stopAll = AddButton(allGroup, "停止全部", 140, 52, 108);
             stopAll.Click += delegate { RunServiceAction(supervisor.StopAll); };
-            var restartAll = AddButton(allGroup, "重新启动全部", 262, 40, 130);
+            var restartAll = AddButton(allGroup, "重新启动全部", 258, 52, 128);
             restartAll.Click += delegate { RunServiceAction(supervisor.RestartAll); };
-            var openLogs = AddButton(allGroup, "打开日志目录", 405, 40, 125);
+            var openLogs = AddButton(allGroup, "打开日志目录", 396, 52, 124);
             openLogs.Click += delegate { OpenDirectory(Path.Combine(platformRoot, "logs")); };
             var trayNote = new Label
             {
                 Text = "关闭此窗口只会隐藏到托盘；只有托盘菜单“退出并停止服务”才会结束后台服务。",
-                Location = new Point(550, 45),
-                Size = new Size(325, 42),
-                ForeColor = Color.DimGray
+                Location = new Point(548, 48),
+                Size = new Size(320, 44),
+                ForeColor = AppVisuals.TextSecondary
             };
             allGroup.Controls.Add(trayNote);
-            page.Controls.Add(allGroup);
 
-            AddLabel(page, "MCP 地址", 480, 18, 150);
-            managedMcpUrlBox.SetBounds(18, 505, 700, 25);
+            var accessCard = CreateCard(page, "连接信息", 18, 434, 900, 120);
+            managedMcpUrlBox.SetBounds(22, 50, 650, 28);
             managedMcpUrlBox.ReadOnly = true;
-            managedMcpUrlBox.BackColor = Color.White;
-            page.Controls.Add(managedMcpUrlBox);
-            var copyMcp = AddButton(page, "复制 MCP 地址", 730, 503, 120);
+            managedMcpUrlBox.BackColor = AppVisuals.SurfaceMuted;
+            accessCard.Controls.Add(managedMcpUrlBox);
+            var copyMcp = AddButton(accessCard, "复制 MCP 地址", 688, 49, 116);
             copyMcp.Click += delegate
             {
                 if (!string.IsNullOrWhiteSpace(managedMcpUrlBox.Text)) Clipboard.SetText(managedMcpUrlBox.Text);
             };
-            var copyOwner = AddButton(page, "复制 Owner password", 730, 545, 150);
+            var copyOwner = AddButton(accessCard, "复制 Owner password", 688, 82, 150);
             copyOwner.Click += delegate
             {
                 var value = supervisor.OwnerPassword;
@@ -1383,9 +1417,53 @@ namespace DevSpaceControlPlatform
             return new TabPage(title)
             {
                 AutoScroll = true,
-                AutoScrollMinSize = new Size(936, 660),
-                Padding = new Padding(0)
+                AutoScrollMinSize = new Size(936, 600),
+                Padding = new Padding(0),
+                BackColor = string.Equals(title, "概览", StringComparison.Ordinal)
+                    ? AppVisuals.Canvas
+                    : AppVisuals.Surface,
+                ForeColor = AppVisuals.TextPrimary
             };
+        }
+
+        private void DrawTabItem(object sender, DrawItemEventArgs e)
+        {
+            var selected = e.Index == tabs.SelectedIndex;
+            var bounds = e.Bounds;
+            bounds.Inflate(-5, -5);
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var background = new SolidBrush(selected ? AppVisuals.PrimarySoft : AppVisuals.Canvas))
+            {
+                AppVisuals.FillRoundedRectangle(e.Graphics, background, bounds, 10);
+            }
+            TextRenderer.DrawText(
+                e.Graphics,
+                tabs.TabPages[e.Index].Text,
+                Font,
+                bounds,
+                selected ? AppVisuals.Primary : AppVisuals.TextSecondary,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
+        private Panel CreateCard(Control parent, string title, int left, int top, int width, int height)
+        {
+            var card = new Panel
+            {
+                Location = new Point(left, top),
+                Size = new Size(width, height),
+                BackColor = AppVisuals.Surface
+            };
+            AppVisuals.StyleCard(card);
+            card.Controls.Add(new Label
+            {
+                Text = title,
+                Location = new Point(22, 16),
+                Size = new Size(width - 44, 24),
+                Font = new Font(Font.FontFamily, 10.5F, FontStyle.Bold),
+                ForeColor = AppVisuals.TextPrimary
+            });
+            parent.Controls.Add(card);
+            return card;
         }
 
         private static Label AddLabel(Control parent, string text, int top, int left, int width)

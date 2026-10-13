@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Build-time only: freeze source identity into the deployed artifact.
 import { createHash } from 'node:crypto';
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, readdirSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -30,8 +30,23 @@ const entry={
 };
 const uiDir=value('ui-dir');
 if(uiDir){
-  entry.ui_sha256=Object.fromEntries(['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js']
-    .map((name)=>[name,createHash('sha256').update(readFileSync(join(resolve(uiDir),name))).digest('hex')]));
+  const root=resolve(uiDir);
+  const names=['runtime-console-ui.css','runtime-console-ui.html','runtime-console-ui.js'];
+  const walk=(dir,relative='control-ui')=>{
+    for(const item of readdirSync(dir,{withFileTypes:true})){
+      const name=relative+'/'+item.name;
+      const file=join(dir,item.name);
+      if(!/^[A-Za-z0-9_.-]+$/.test(item.name)||item.name==='.'||item.name==='..')throw new Error('Invalid Control UI asset name: '+name);
+      if(item.isDirectory())walk(file,name);
+      else if(item.isFile()&&/\.(?:html|js|css|svg|png|woff2)$/.test(item.name))names.push(name);
+      else if(item.isSymbolicLink())throw new Error('Symlink in Control UI assets: '+name);
+      if(names.length>515)throw new Error('Too many Control UI assets.');
+    }
+  };
+  const modern=join(root,'control-ui');
+  try { if(lstatSync(modern).isDirectory())walk(modern); else throw new Error('Control UI asset root is not a directory.'); }
+  catch(error){ if(error.code!=='ENOENT')throw error; }
+  entry.ui_sha256=Object.fromEntries(names.sort().map((name)=>[name,createHash('sha256').update(readFileSync(join(root,...name.split('/')))).digest('hex')]));
 }
 mkdirSync(dirname(resolve(output)),{recursive:true});
 writeFileSync(resolve(output),JSON.stringify(entry,null,2)+'\n',{mode:0o644});

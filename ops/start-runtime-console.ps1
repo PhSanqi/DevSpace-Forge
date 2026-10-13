@@ -29,13 +29,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $package 'package.json'))) {
 $console = Join-Path $root 'ops\runtime-console.mjs'
 if (-not (Test-Path -LiteralPath $console)) { throw 'Runtime Console assets are missing from the Control package.' }
 $config = Join-Path $root 'state\devspace-config\config.jsonc'
-$targetCli = Join-Path $package 'dist\cli.js'
-$processInfo = Get-CimInstance Win32_Process |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($targetCli) } |
-    Select-Object -First 1
+$tokenFile = Join-Path $root 'state\secrets\cloudflare-tunnel-token.txt'
 $arguments = @(
     $console, '--instance', $Instance, '--platform-root', $root,
-    '--config', $config, '--runtime-package', $package, '--serve', "$Port"
+    '--config', $config, '--runtime-package', $package,
+    '--tunnel-token-file', $tokenFile, '--serve', "$Port"
 )
 if (-not $DisableOwnerCopy) {
     $credentials = Join-Path $root 'state\devspace-config\auth.json'
@@ -43,7 +41,6 @@ if (-not $DisableOwnerCopy) {
         $arguments += @('--credential-file', $credentials, '--allow-owner-copy', 'true')
     }
 }
-if ($processInfo) { $arguments += @('--pid', "$($processInfo.ProcessId)") }
 Write-Host "DevSpace Runtime Console: http://127.0.0.1:$Port/"
 & $node @arguments
 exit $LASTEXITCODE

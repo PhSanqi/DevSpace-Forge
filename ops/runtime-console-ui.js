@@ -312,7 +312,7 @@
       '<div class="field"><label for="cfg-tunnel-mode">'+h(t('tunnelMode'))+'</label><select id="cfg-tunnel-mode" class="select-input">'+modeOptions+'</select></div>'+
       '<div class="field full"><label for="cfg-public">'+h(t('fixedEndpoint'))+'</label><input id="cfg-public" name="public-base-url" class="text-input mono" type="url" autocomplete="off" spellcheck="false" value="'+h(v(s.public_base_url,''))+'" '+(quick?'disabled':'')+'></div>'+
       '<div class="field full"><label for="cfg-effective-public">'+h(t('effectivePublic'))+'</label><input id="cfg-effective-public" class="text-input mono" type="url" readonly value="'+h(v(effective,''))+'"></div>'+
-      '<div class="field"><label>'+h(t('autoStart'))+'</label><label class="check-row"><input id="cfg-autostart" type="checkbox" '+(s.auto_start?'checked':'')+'> '+h(t('autoStart'))+'</label></div>'+
+      '<div class="field"><label>'+h(t('autoStart'))+'</label><label class="check-row"><input id="cfg-autostart" type="checkbox" '+(s.auto_start?'checked':'')+' '+(s.auto_start_available===false?'disabled':'')+'> '+h(t('autoStart'))+'</label></div>'+
       '<div class="field"><label>'+h(t('tunnelToken'))+'</label><div class="muted">'+h(tokenState)+'</div></div>'+
       '<div class="field full"><label for="cfg-token">'+h(t('tunnelToken'))+'</label><input id="cfg-token" class="text-input" type="password" autocomplete="off" placeholder="••••••••" '+(quick?'disabled':'')+'><div><button class="secondary-button" data-save-tunnel-token '+(quick?'disabled':'')+'>'+h(t('saveToken'))+'</button></div></div>'+
       '<div class="field full"><label for="legacy-config-file">'+h(t('legacyImport'))+'</label><input id="legacy-config-file" class="text-input" type="file" accept=".json,application/json"><div><button class="secondary-button" data-import-legacy>'+h(t('legacyImportButton'))+'</button></div></div>'+
@@ -609,7 +609,8 @@
           tunnel_mode:$('cfg-tunnel-mode')?.value||'Remote'
         };
         await managementPost('/api/management/config/save',body);
-        await managementPost('/api/management/autostart',{enabled:!!$('cfg-autostart')?.checked});
+        if(snapshot?.management?.settings?.auto_start_available!==false)
+          await managementPost('/api/management/autostart',{enabled:!!$('cfg-autostart')?.checked});
         stagedConfig.connection=false;if(!stagedConfig.devspace)formSettingsOverride=null;
         formDrafts.connection=null;formDirty.connection=false;await refresh(false);notice(t('saved')+' '+t('restartRequired'));
       }catch(error){notice(t('actionFailed')+': '+error.message,'error');}

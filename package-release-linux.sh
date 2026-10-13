@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.6.11}"
+VERSION="${1:-0.6.12}"
 RUNTIME_PACKAGE="${2:?usage: package-release-linux.sh VERSION RUNTIME_PACKAGE}"
 RUNTIME_SOURCE="${3:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"${NPM:-npm}" --prefix "$ROOT/control-ui" run build
 DIST="$ROOT/dist"
 NAME="DevSpace-Forge-v${VERSION}-linux-x64"
 STAGE_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/devspace-control-release.XXXXXX")"
@@ -20,7 +21,8 @@ mkdir -p "$STAGE/runtime/devspace" "$STAGE/ops" "$DIST/.offline-cache/linux"
 
 cp "$ROOT/setup-linux.sh" "$STAGE/setup-linux.sh"
 cp "$ROOT/ops/runtime-console.sh" "$STAGE/ops/runtime-console.sh"
-cp "$ROOT/ops/runtime-console.mjs" "$ROOT/ops/runtime-rollback.mjs" "$ROOT/ops/runtime-jobs-guard.mjs" "$ROOT/ops/control-management.mjs" "$ROOT/ops/managed-cloudflared.mjs" "$ROOT/ops/prepare-effective-config.mjs" "$ROOT/ops/runtime-console-ui.html" "$ROOT/ops/runtime-console-ui.css" "$ROOT/ops/runtime-console-ui.js" "$STAGE/ops/"
+cp "$ROOT/ops/runtime-console.mjs" "$ROOT/ops/runtime-rollback.mjs" "$ROOT/ops/runtime-jobs-guard.mjs" "$ROOT/ops/control-management.mjs" "$ROOT/ops/control-service-controller.mjs" "$ROOT/ops/windows-process-job.mjs" "$ROOT/ops/managed-cloudflared.mjs" "$ROOT/ops/prepare-effective-config.mjs" "$ROOT/ops/runtime-console-ui.html" "$ROOT/ops/runtime-console-ui.css" "$ROOT/ops/runtime-console-ui.js" "$STAGE/ops/"
+cp -a "$ROOT/control-ui/dist" "$STAGE/ops/control-ui"
 cp "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/LICENSE" "$STAGE/"
 cp "$ROOT/PLATFORMS.md" "$ROOT/ROADMAP.md" "$STAGE/"
 mkdir -p "$STAGE/docs"

@@ -294,6 +294,118 @@ namespace DevSpaceControlPlatform
                 : NormalizeHostname(publicEndpoint);
         }
 
+        public static string ExtractRemoteTunnelToken(string tokenOrInstallCommand)
+        {
+            var input = (tokenOrInstallCommand ?? string.Empty).Trim();
+            if (input.Length == 0) return string.Empty;
+            if (LooksLikeRemoteTunnelToken(input)) return input;
+
+            var patterns = new[]
+            {
+                @"(?:service\s+install|--token)(?:\s+|=)(?:""(?<token>[^""]+)""|'(?<token>[^']+)'|(?<token>[A-Za-z0-9._=-]+))",
+                @"(?<token>eyJ[A-Za-z0-9._=-]{30,})"
+            };
+            foreach (var pattern in patterns)
+            {
+                var match = Regex.Match(input, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (!match.Success) continue;
+                var token = match.Groups["token"].Value.Trim();
+                if (LooksLikeRemoteTunnelToken(token)) return token;
+            }
+
+            throw new InvalidDataException(
+                "没有从 Cloudflare 安装命令中识别到 Tunnel token。请复制 Tunnel 页面 Setup Environment 中完整的 Install and Run 命令，或直接粘贴 token。");
+        }
+
+        private static bool LooksLikeRemoteTunnelToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length < 32) return false;
+            if (value.IndexOfAny(new[] { ' ', '\t', '\r', '\n', '\0' }) >= 0) return false;
+            return Regex.IsMatch(value, @"^[A-Za-z0-9._=-]+$", RegexOptions.CultureInvariant);
+        }
+
+        public static Process StartTemporaryRemoteTunnel(
+            string platformRoot,
+            string tokenOrInstallCommand,
+            out string temporaryTokenPath)
+        {
+            var root = Path.GetFullPath(platformRoot);
+            EnsureOfflinePayload(root);
+            ValidateBundle(root);
+            var token = ExtractRemoteTunnelToken(tokenOrInstallCommand);
+            if (token.Length == 0) throw new InvalidDataException("Cloudflare Tunnel token 不能为空。");
+
+            var temporaryDirectory = Path.Combine(Path.GetTempPath(), "DevSpaceControlPlatform");
+            Directory.CreateDirectory(temporaryDirectory);
+            temporaryTokenPath = Path.Combine(
+                temporaryDirectory,
+                "cloudflare-tunnel-" + Guid.NewGuid().ToString("N") + ".token");
+            File.WriteAllText(temporaryTokenPath, token + Environment.NewLine, new UTF8Encoding(false));
+            CloudflareTunnelSecretStore.RestrictPrivateFile(temporaryTokenPath);
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = RuntimeResolver.ResolveCloudflaredPath(root),
+                Arguments = "tunnel --no-autoupdate run --token-file " + Quote(temporaryTokenPath),
+                WorkingDirectory = root,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            process.OutputDataReceived += delegate { };
+            process.ErrorDataReceived += delegate { };
+            var tokenPathForCleanup = temporaryTokenPath;
+            process.Exited += delegate
+            {
+                try { File.Delete(tokenPathForCleanup); } catch { }
+            };
+            try
+            {
+                if (!process.Start()) throw new InvalidOperationException("cloudflared Connector 没有启动。");
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                Thread.Sleep(900);
+                if (process.HasExited)
+                    throw new InvalidOperationException("cloudflared Connector 启动后立即退出，请检查 Tunnel 命令是否来自当前 Tunnel。");
+                return process;
+            }
+            catch
+            {
+                process.Dispose();
+                try { File.Delete(temporaryTokenPath); } catch { }
+                temporaryTokenPath = string.Empty;
+                throw;
+            }
+        }
+
+        public static void StopTemporaryRemoteTunnel(Process process, string temporaryTokenPath)
+        {
+            if (process != null)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill();
+                        process.WaitForExit(5000);
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(temporaryTokenPath))
+            {
+                try { File.Delete(temporaryTokenPath); } catch { }
+            }
+        }
+
         public static string ConfigureRemoteEndpoints(
             PlatformSettings settings,
             string originHostname,
@@ -335,9 +447,74 @@ namespace DevSpaceControlPlatform
             return PublicEndpoint.McpUrl(hostname);
         }
 
+        public static string ModernDesktopLauncherPath(string platformRoot)
+        {
+            return Path.Combine(Path.GetFullPath(platformRoot), "ops", "start-modern-desktop.ps1");
+        }
+
+        public static string ModernDesktopExecutablePath(string platformRoot)
+        {
+            return Path.Combine(Path.GetFullPath(platformRoot), "desktop", "DevSpaceForgeDesktop.exe");
+        }
+
+        private static string WindowsDesktopPowerShellArguments(string platformRoot)
+        {
+            var root = Path.GetFullPath(platformRoot);
+            return "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " +
+                Quote(ModernDesktopLauncherPath(root)) + " -PlatformRoot " + Quote(root);
+        }
+
         public static string WindowsAutoStartCommand(string platformRoot)
         {
-            return Quote(Path.Combine(Path.GetFullPath(platformRoot), "DevSpaceControlPlatform.exe"));
+            return "powershell.exe " + WindowsDesktopPowerShellArguments(platformRoot);
+        }
+
+        private static void ValidateModernDesktopBundle(string platformRoot)
+        {
+            var root = Path.GetFullPath(platformRoot);
+            var required = new[]
+            {
+                ModernDesktopExecutablePath(root),
+                ModernDesktopLauncherPath(root),
+                Path.Combine(root, "ops", "start-runtime-console.ps1"),
+                Path.Combine(root, "ops", "runtime-console.mjs"),
+                Path.Combine(root, "ops", "control-service-controller.mjs"),
+                Path.Combine(root, "ops", "windows-process-job.mjs"),
+                Path.Combine(root, "ops", "managed-cloudflared.mjs"),
+                Path.Combine(root, "ops", "prepare-effective-config.mjs"),
+                Path.Combine(root, "ops", "control-ui", "index.html")
+            };
+            foreach (var file in required)
+                if (!File.Exists(file)) throw new FileNotFoundException("现代桌面安装包缺少必要文件。", file);
+        }
+
+        public static void StartWindowsDesktop(string platformRoot)
+        {
+            var root = Path.GetFullPath(platformRoot);
+            ValidateModernDesktopBundle(root);
+            var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = WindowsDesktopPowerShellArguments(root),
+                WorkingDirectory = root,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            });
+            if (process == null) throw new InvalidOperationException("无法启动 DevSpace-Forge Desktop。");
+            process.Dispose();
+        }
+
+        internal static string LegacyWindowsAutoStartValueName(string platformRoot)
+        {
+            var normalizedRoot = Path.GetFullPath(platformRoot)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .ToUpperInvariant();
+            byte[] digest;
+            using (var sha256 = SHA256.Create())
+                digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedRoot));
+            var suffix = BitConverter.ToString(digest, 0, 8).Replace("-", string.Empty).ToLowerInvariant();
+            return "DevSpaceControlPlatform-" + suffix;
         }
 
         public static void ApplyWindowsAutoStart(string platformRoot, bool enabled)
@@ -345,15 +522,17 @@ namespace DevSpaceControlPlatform
             using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
             {
                 if (key == null) throw new InvalidOperationException("无法打开 Windows 当前用户启动项。\n请检查当前用户注册表权限。");
+                var legacyValueName = LegacyWindowsAutoStartValueName(platformRoot);
                 if (enabled)
                 {
-                    var executable = Path.Combine(Path.GetFullPath(platformRoot), "DevSpaceControlPlatform.exe");
-                    if (!File.Exists(executable)) throw new FileNotFoundException("找不到 DevSpace Control 主程序。", executable);
-                    key.SetValue("DevSpaceControlPlatform", Quote(executable), RegistryValueKind.String);
+                    ValidateModernDesktopBundle(platformRoot);
+                    key.SetValue("DevSpaceControlPlatform", WindowsAutoStartCommand(platformRoot), RegistryValueKind.String);
+                    key.DeleteValue(legacyValueName, false);
                 }
                 else
                 {
                     key.DeleteValue("DevSpaceControlPlatform", false);
+                    key.DeleteValue(legacyValueName, false);
                 }
             }
         }
@@ -452,9 +631,11 @@ namespace DevSpaceControlPlatform
             if (normalizedOriginHostname.Length == 0)
                 throw new InvalidDataException("请填写 Cloudflare Tunnel origin hostname。");
 
-            var token = (tunnelToken ?? string.Empty).Trim();
+            var token = string.IsNullOrWhiteSpace(tunnelToken)
+                ? string.Empty
+                : ExtractRemoteTunnelToken(tunnelToken);
             if (token.Length == 0 && !CloudflareTunnelSecretStore.HasToken(root))
-                throw new InvalidDataException("请填写 Cloudflare Remote Tunnel token。");
+                throw new InvalidDataException("请粘贴 Cloudflare Tunnel 的 Install and Run 命令或 token。");
 
             var settingsPath = Path.Combine(root, "settings.json");
             PlatformSettings settings;
@@ -506,6 +687,7 @@ namespace DevSpaceControlPlatform
                 throw new FileNotFoundException("未找到现有 settings.json，不能执行直接更新。", settingsPath);
 
             var settings = PlatformSettingsStore.Load(settingsPath, root);
+            ValidateModernDesktopBundle(sourceRoot);
             if (string.Equals(settings.TunnelMode, "Remote", StringComparison.OrdinalIgnoreCase) &&
                 !CloudflareTunnelSecretStore.HasToken(root))
             {
@@ -635,8 +817,7 @@ namespace DevSpaceControlPlatform
                 "README.md",
                 "README.zh-CN.md",
                 "LICENSE",
-                "control-provenance.json",
-                "update-control-platform-out-of-band.ps1"
+                "control-provenance.json"
             })
             {
                 var from = Path.Combine(source, fileName);
@@ -653,10 +834,15 @@ namespace DevSpaceControlPlatform
                 "runtime-jobs-guard.mjs",
                 "check-runtime-jobs.mjs",
                 "control-management.mjs",
+                "control-service-controller.mjs",
+                "windows-process-job.mjs",
+                "managed-cloudflared.mjs",
+                "prepare-effective-config.mjs",
                 "runtime-console-ui.html",
                 "runtime-console-ui.css",
                 "runtime-console-ui.js",
-                "start-runtime-console.ps1"
+                "start-runtime-console.ps1",
+                "start-modern-desktop.ps1"
             })
             {
                 var from = Path.Combine(sourceOps, fileName);
@@ -664,6 +850,8 @@ namespace DevSpaceControlPlatform
                 Directory.CreateDirectory(targetOps);
                 File.Copy(from, Path.Combine(targetOps, fileName), true);
             }
+            CopyDirectoryContents(Path.Combine(sourceOps, "control-ui"), Path.Combine(targetOps, "control-ui"));
+            CopyDirectoryContents(Path.Combine(source, "desktop"), Path.Combine(target, "desktop"));
 
             var sourcePayload = OfflinePayloadPath(source);
             if (File.Exists(sourcePayload))
@@ -674,11 +862,22 @@ namespace DevSpaceControlPlatform
             }
         }
 
+        private static void CopyDirectoryContents(string sourceDirectory, string targetDirectory)
+        {
+            if (!Directory.Exists(sourceDirectory))
+                throw new DirectoryNotFoundException("产品目录缺失：" + sourceDirectory);
+            Directory.CreateDirectory(targetDirectory);
+            foreach (var file in Directory.GetFiles(sourceDirectory))
+                File.Copy(file, Path.Combine(targetDirectory, Path.GetFileName(file)), true);
+            foreach (var directory in Directory.GetDirectories(sourceDirectory))
+                CopyDirectoryContents(directory, Path.Combine(targetDirectory, Path.GetFileName(directory)));
+        }
+
         private static void StopManagedRuntimeProcesses(string platformRoot)
         {
             var root = Path.GetFullPath(platformRoot).TrimEnd(Path.DirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
-            foreach (var processName in new[] { "DevSpaceControlPlatform", "node", "cloudflared" })
+            foreach (var processName in new[] { "DevSpaceControlPlatform", "DevSpaceForgeDesktop", "node", "cloudflared" })
             {
                 foreach (var process in Process.GetProcessesByName(processName))
                 {
