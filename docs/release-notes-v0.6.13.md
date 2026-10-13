@@ -7,6 +7,9 @@ The immutable `v0.6.12` tag remains as a historical release attempt. Its Windows
 ## Highlights
 
 - **Modern Windows control ownership:** one modern Desktop launcher coordinates the local Control console, Runtime and Tunnel, replacing legacy launcher ownership during upgrades.
+- **Production Desktop uses the mature Console:** the Desktop now opens the complete loopback Control Console at `/` by default; the incomplete `/next/` React UI remains available only as a development preview.
+- **Tray-first desktop lifecycle:** closing the Desktop window hides it to the Windows system tray; an explicit tray **Exit** action performs the real application quit.
+- **Quiet background startup:** the launcher starts the Control PowerShell process hidden so normal background operation does not leave a terminal window on screen.
 - **Correct multi-instance identity:** Windows Control derives its instance name from the configured public route instead of assuming a fixed deployment name.
 - **Windows offline-package hardening:** Runtime and video dependencies are staged through bounded short paths before packaging and smoke tests.
 - **Clean Linux packaging:** `package-release-linux.sh` now runs `npm ci` for the Control UI before building it, making the release package independent of leftover local `node_modules` state.
@@ -35,6 +38,9 @@ v0.6.13 是这批 Modern Windows control-plane 改动的完整双平台公开版
 ## 主要变化
 
 - **Windows modern ownership：** 统一由 Modern Desktop launcher 协调本机 Control、Runtime 与 Tunnel，升级时收敛旧 launcher ownership。
+- **正式 Desktop 回到成熟 Console：** Desktop 默认打开完整的本机 `/` Control Console；未完成的 `/next/` React UI 继续保留，但只作为开发预览，不再作为正式入口。
+- **托盘常驻：** 点击窗口关闭按钮只隐藏到 Windows 系统托盘，只有托盘里的 **Exit** 才真正退出 Desktop。
+- **后台静默启动：** launcher 启动 Control PowerShell 时使用隐藏窗口，正常后台运行不再长期显示终端窗口。
 - **多实例身份正确继承：** Windows Control 从已配置的公网路径解析 instance，不再假设固定部署名。
 - **Windows 离线包增强：** Runtime 与视频依赖在有界短路径 staging 中完成打包与 smoke，降低长路径和原生依赖问题。
 - **Linux 干净环境打包：** `package-release-linux.sh` 在构建 Control UI 前主动执行 `npm ci`，不再依赖本机残留的 `node_modules`。

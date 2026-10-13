@@ -28,6 +28,8 @@ test('desktop package uses the existing Electron distribution and minimal app pa
   assert.match(script, /resources/);
   assert.match(script, /Rename-Item.*DevSpaceForgeDesktop\.exe/);
   assert.match(script, /Copy-Item -LiteralPath \(Join-Path \$root 'main\.cjs'\) -Destination \$app/);
+  assert.match(script, /DevSpaceControlPlatform\.ico/);
+  assert.match(script, /DevSpaceForge\.ico/);
   assert.match(script, /Set-Content.*package\.json.*"main":"main\.cjs"/);
   assert.doesNotMatch(script, /Copy-Item.*node_modules.*-Destination \$app/);
   assert.match(script, /if \(Test-Path -LiteralPath \$output\) \{ throw/);
@@ -91,6 +93,7 @@ test('launcher attaches on loopback, guards same-root legacy ownership, and has 
   assert.match(script, /\$ready = Test-ControlReady/);
   assert.match(script, /if \(-not \$ready\)/);
   assert.match(script, /start-runtime-console\.ps1/);
+  assert.match(script, /Start-Process -FilePath 'powershell\.exe'[\s\S]*-WindowStyle Hidden/);
   assert.match(script, /AddSeconds\(30\)/);
   assert.match(script, /DEVSPACE_CONTROL_URL = \$url/);
   assert.match(script, /Start-Process -FilePath \$desktop -PassThru -Wait/);
@@ -99,7 +102,7 @@ test('launcher attaches on loopback, guards same-root legacy ownership, and has 
   assert.doesNotMatch(script, /(?:owner|tunnel)[_-]?token|Stop-Process|Kill\(/i);
 });
 
-test('shell keeps loopback and /next navigation restrictions', () => {
+test('shell defaults to the mature loopback console and keeps same-origin navigation restrictions', () => {
   const script = source('desktop-shell/main.cjs');
   const module = { exports: {} };
   vm.runInNewContext(script, {
@@ -107,19 +110,31 @@ test('shell keeps loopback and /next navigation restrictions', () => {
     require: () => ({ app: { whenReady: () => new Promise(() => {}), on: () => {} } })
   });
   const { controlUrl } = module.exports;
+  assert.equal(controlUrl().pathname, '/');
+  assert.equal(controlUrl('http://127.0.0.1:17678/').pathname, '/');
   assert.equal(controlUrl('http://127.0.0.1:17678/next/').pathname, '/next/');
-  for (const url of ['https://127.0.0.1:17678/next/', 'http://example.com/next/',
-    'http://127.0.0.1:17678/', 'http://127.0.0.1:17678/next-evil/']) {
+  for (const url of ['https://127.0.0.1:17678/', 'http://example.com/',
+    'http://127.0.0.1:17678/runtime-console-ui.js']) {
     assert.throws(() => controlUrl(url));
   }
   assert.match(script, /url\.protocol !== 'http:'/);
   assert.match(script, /'127\.0\.0\.1', '\[::1\]'/);
+  assert.match(script, /url\.pathname === '\/'/);
   assert.match(script, /url\.pathname\.startsWith\('\/next\/'\)/);
   assert.match(script, /url\.origin === target\.origin/);
+  assert.doesNotMatch(script, /return url\.origin === target\.origin && url\.pathname\.startsWith\('\/next\/'\)/);
   assert.match(script, /will-navigate/);
   assert.match(script, /will-redirect/);
   assert.match(script, /setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/);
   assert.match(script, /Control is unavailable/);
+  assert.match(script, /new Tray\(path\.join\(__dirname, 'DevSpaceForge\.ico'\)\)/);
+  assert.match(script, /window\.on\('close'/);
+  assert.match(script, /event\.preventDefault\(\)/);
+  assert.match(script, /window\.hide\(\)/);
+  assert.match(script, /Open DevSpace-Forge/);
+  assert.match(script, /label: 'Exit'/);
+  assert.match(script, /tray\.on\('click', showMainWindow\)/);
+  assert.doesNotMatch(script, /window-all-closed[\s\S]*app\.quit/);
 });
 
 const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion'], { encoding: 'utf8' }).status === 0;

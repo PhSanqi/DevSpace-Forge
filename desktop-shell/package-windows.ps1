@@ -47,5 +47,6 @@ Rename-Item -LiteralPath (Join-Path $output 'electron.exe') -NewName 'DevSpaceFo
 $app = Join-Path $output 'resources\app'
 New-Item -ItemType Directory $app | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'main.cjs') -Destination $app
+Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $root) 'DevSpaceControlPlatform.ico') -Destination (Join-Path $app 'DevSpaceForge.ico')
 Set-Content -LiteralPath (Join-Path $app 'package.json') -Encoding ASCII -NoNewline -Value '{"name":"devspace-forge-desktop","version":"0.0.0","main":"main.cjs"}'
 Write-Host "Packaged $output"

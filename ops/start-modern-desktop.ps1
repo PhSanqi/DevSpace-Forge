@@ -63,7 +63,7 @@ try {
         Select-Object -First 1
     if ($conflict) { throw 'Migration conflict: legacy DevSpaceControlPlatform.exe is running from this platform root.' }
 
-    $url = 'http://127.0.0.1:17678/next/'
+    $url = 'http://127.0.0.1:17678/'
     $script:controlConflict = $false
     function Test-ControlReady {
         $script:controlConflict = $false
@@ -91,7 +91,7 @@ try {
         Start-Process -FilePath 'powershell.exe' -ArgumentList @(
             '-NoProfile', '-File', ('"' + $startConsole + '"'),
             '-PlatformRoot', ('"' + $root + '"'), '-Port', '17678', '-Instance', $instance
-        ) | Out-Null
+        ) -WindowStyle Hidden | Out-Null
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
         while (-not $ready -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds 500
