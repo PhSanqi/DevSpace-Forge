@@ -61,6 +61,7 @@ test('Windows controller assigns direct DevSpace and cloudflared children and cl
   try{
     mkdirSync(path.join(f.root,'runtime','slots','slot-a','serena','bin'),{recursive:true});
     mkdirSync(path.join(f.root,'runtime','slots','slot-a','uv'),{recursive:true});
+    writeFileSync(path.join(f.root,'settings.json'),JSON.stringify({CloudflaredProtocol:'http2'}));
     process.env.DEVSPACE_INHERITED_TEST='must-not-reach-child';
     const controller=createServiceController({platformRoot:f.root,configPath:f.configPath,tunnelTokenFile:f.tokenFile},{platform:'win32',spawnProcess,runCommand,createProcessJob});
     assert.equal(controller.autostartAvailable,false);
@@ -83,6 +84,7 @@ test('Windows controller assigns direct DevSpace and cloudflared children and cl
     assert.match(spawned[1].command,/node\.exe$/);
     assert.match(spawned[1].args[0],/managed-cloudflared\.mjs$/);
     assert.ok(spawned[1].args.includes(f.tokenFile));
+    assert.equal(spawned[1].args[spawned[1].args.indexOf('--protocol')+1],'http2');
     assert.equal(spawned[1].args.includes('synthetic-token-value'),false);
     assert.deepEqual(jobEvents,[['add',7001],['add',7002]]);
     spawned[1].child.stderr.emit('data',Buffer.from('secret synthetic-token-value\n'));
@@ -110,6 +112,23 @@ test('Windows controller assigns direct DevSpace and cloudflared children and cl
     await controller.shutdown();
     assert.equal(jobEvents.filter(x=>x[0]==='close').length,1);
   }finally{delete process.env.DEVSPACE_INHERITED_TEST;f.clean();}
+});
+
+test('Windows controller rejects an invalid persisted Tunnel protocol before launch',async()=>{
+  const f=fixture();
+  const spawned=[];
+  try{
+    writeFileSync(path.join(f.root,'settings.json'),JSON.stringify({CloudflaredProtocol:'invalid'}));
+    const controller=createServiceController({platformRoot:f.root,configPath:f.configPath,tunnelTokenFile:f.tokenFile},{
+      platform:'win32',spawnProcess:(...args)=>{spawned.push(args);throw new Error('must not spawn');},
+      createProcessJob:()=>({addPid:()=>{},close:()=>{}}),
+      runCommand:()=>({ok:true,status:0,stdout:'',stderr:''}),
+    });
+    const result=await controller.action('tunnel','start','Remote');
+    assert.equal(result.ok,false);
+    assert.match(result.stderr,/Invalid Windows Tunnel protocol setting/);
+    assert.equal(spawned.length,0);
+  }finally{f.clean();}
 });
 
 test('Windows Job assignment failure refuses ownership and confirms candidate termination',async()=>{

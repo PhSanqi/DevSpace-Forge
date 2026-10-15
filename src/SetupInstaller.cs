@@ -659,7 +659,6 @@ namespace DevSpaceControlPlatform
             settings.LogRequests = true;
             settings.LogToolCalls = true;
             settings.LogShellCommands = false;
-            settings.CloudflaredProtocol = "auto";
             PlatformSettingsStore.Save(settingsPath, settings);
 
             if (token.Length > 0) CloudflareTunnelSecretStore.SaveToken(root, token);
@@ -705,10 +704,10 @@ namespace DevSpaceControlPlatform
                 CopyProductFiles(sourceRoot, root);
                 var versionText = ValidateBundle(root);
 
-            // Previous releases could persist http2 as the compatibility fallback.
-            // Auto lets cloudflared select QUIC or HTTP/2 according to the current
-            // network instead of pinning every restart to TCP/7844.
-                settings.CloudflaredProtocol = "auto";
+                // Preserve an explicitly selected protocol across upgrades. The
+                // settings loader already normalizes missing legacy values to auto,
+                // while a user-selected http2/quic value may reflect a verified
+                // network requirement that an update must not silently discard.
                 PlatformSettingsStore.Save(settingsPath, settings);
                 if (applySystemIntegration) ApplyWindowsAutoStart(root, settings.AutoStart);
 

@@ -328,7 +328,7 @@ internal static class DevSpaceConfigurationTests
         AssertEqual(
             "http2",
             PlatformSettingsStore.Load(Path.Combine(root, "settings.json"), root).CloudflaredProtocol,
-            "existing explicit protocol remains readable until update migration");
+            "existing explicit protocol remains a durable installation setting");
     }
 
     private static void TestNativeGuiRuntimeGate()
@@ -614,7 +614,7 @@ internal static class DevSpaceConfigurationTests
         var updated = PlatformSettingsStore.Load(Path.Combine(install, "settings.json"), install);
 
         AssertEqual("1.1.0-beta.4.local.13", result.DevSpaceVersion, "runtime upgraded");
-        AssertEqual("auto", updated.CloudflaredProtocol, "legacy HTTP/2 migrated to auto");
+        AssertEqual("http2", updated.CloudflaredProtocol, "explicit Tunnel protocol preserved across update");
         AssertEqual(17677, updated.LocalPort, "port preserved");
         AssertEqual("dev.example.test/group", updated.FixedHostname, "public endpoint preserved");
         AssertEqual("existing-tunnel", updated.NamedTunnelIdOrName, "tunnel identity preserved");

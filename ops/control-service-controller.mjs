@@ -50,7 +50,18 @@ export function createServiceController(options,{platform=process.platform,spawn
   const tokenFile=options.tunnelTokenFile||path.join(options.platformRoot,'state','secrets','cloudflare-tunnel-token.txt');
   const controlSettings=options.controlSettingsFile||path.join(options.platformRoot,'state','control-settings.json');
   const quickUrl=options.quickUrlFile||path.join(options.platformRoot,'state','quick-tunnel-url.txt');
+  const platformSettings=path.join(options.platformRoot,'settings.json');
   const nodeScript=(name)=>path.join(path.dirname(fileURLToPath(import.meta.url)),name);
+  function tunnelProtocol(){
+    let settings={};
+    if(existsSync(platformSettings)){
+      try{settings=JSON.parse(readFileSync(platformSettings,'utf8').replace(/^\uFEFF/,''));}
+      catch(error){throw new Error('Unable to read Windows platform settings: '+clip(error.message));}
+    }
+    const value=String(settings?.CloudflaredProtocol??settings?.CloudflareProtocol??'auto').trim().toLowerCase();
+    if(!['auto','quic','http2'].includes(value))throw new Error('CloudflaredProtocol must be auto, quic, or http2.');
+    return value;
+  }
   async function job(runtimePackage){
     if(disposed)throw new Error('Windows Control is shut down.');
     if(!processJobPromise)processJobPromise=(async()=>{
@@ -137,8 +148,11 @@ export function createServiceController(options,{platform=process.platform,spawn
     }else{
       const cloudflared=path.join(options.platformRoot,'cloudflared.exe');
       if(!existsSync(cloudflared))return {ok:false,status:-1,stderr:'cloudflared.exe is missing.'};
+      let protocol;
+      try{protocol=tunnelProtocol();}
+      catch(error){return {ok:false,status:-1,stderr:'Invalid Windows Tunnel protocol setting: '+clip(error.message)};}
       command=node;
-      args=[nodeScript('managed-cloudflared.mjs'),'--cloudflared',cloudflared,'--control-settings',controlSettings,'--quick-url-file',quickUrl,'--local-port',String(localPort()),'--token-file',tokenFile];
+      args=[nodeScript('managed-cloudflared.mjs'),'--cloudflared',cloudflared,'--control-settings',controlSettings,'--quick-url-file',quickUrl,'--local-port',String(localPort()),'--protocol',protocol,'--token-file',tokenFile];
     }
     let owner;
     try{owner=await job(pkg);}catch(error){return {ok:false,status:-1,stderr:'Windows process Job creation failed: '+clip(error.message)};}

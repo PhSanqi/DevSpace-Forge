@@ -487,6 +487,56 @@ test('snapshot never includes owner secrets and does not mislabel missing Git pr
     assert.equal(JSON.stringify(x).includes('NEVER_SHOW_THIS'),false);
   }finally{f.clean();}
 });
+test('snapshot uses controller-owned Windows logs for MCP and Tunnel diagnostics',async()=>{
+  const f=fixture();
+  const metrics=http.createServer((request,response)=>{
+    if(request.url!=='/metrics'){response.writeHead(404);response.end();return;}
+    response.writeHead(200,{'content-type':'text/plain'});
+    response.end('cloudflared_tunnel_ha_connections 3\n');
+  });
+  await new Promise(resolve=>metrics.listen(0,'127.0.0.1',resolve));
+  const port=metrics.address().port;
+  const controller={
+    available:()=>true,
+    state:name=>({status:'active',enabled:'disabled',pid:name==='devspace'?123:456}),
+    log:(name)=>name==='devspace'
+      ? '2026-10-13T15:08:14.197Z 2026-10-13T15:08:14.196Z WARN http_request_aborted requestId="fixture-request" method="POST" path="/group/mcp" status=200 outcome="connection_closed_before_finish" disconnectPhase="while_tool_running_before_response" durationMs=2730 firstByteObservation="origin_write_head_not_client_receipt" responseStarted=false rpcMethod="tools/call" rpcToolName="exec_command" toolStartedCount=1 toolResolvedCount=0 toolRejectedCount=0\n'
+      : `2026-10-13T15:09:08.106Z INF Starting metrics server on 127.0.0.1:${port}/metrics\n2026-10-13T15:09:29.670Z INF Registered tunnel connection connIndex=0 protocol=quic\n2026-10-13T15:09:30.359Z INF Registered tunnel connection connIndex=1 protocol=quic\n`,
+  };
+  try{
+    const config=path.join(f.root,'config.jsonc');
+    writeFileSync(config,JSON.stringify({server:{host:'127.0.0.1',port:1,publicBaseUrl:'https://example.invalid/server'}}));
+    const x=await snapshot({instance:'fixture',platformRoot:f.root,configPath:config,explicitRuntimePackage:f.declared,serviceUnit:'',tunnelUnit:'',tunnelMetrics:'',stateDir:'',runtimeManifest:'',controlManifest:''},controller);
+    assert.equal(x.mcp.request_diagnostics.available,true);
+    assert.equal(x.mcp.request_diagnostics.total_observed,1);
+    assert.equal(x.mcp.request_diagnostics.aborted_observed,1);
+    assert.equal(x.mcp.request_diagnostics.recent[0].request_id,'fixture-request');
+    assert.equal(x.mcp.request_diagnostics.recent[0].outcome,'connection_closed_before_finish');
+    assert.equal(x.mcp.request_diagnostics.recent[0].tool_started,1);
+    assert.equal(x.tunnel.diagnostics.actual_protocol,'quic');
+    assert.equal(x.tunnel.diagnostics.registered_connections,2);
+    assert.equal(x.tunnel.metrics.ha_connections,3);
+  }finally{
+    await new Promise(resolve=>metrics.close(resolve));
+    f.clean();
+  }
+});
+test('snapshot keeps Tunnel connection count unknown when no diagnostic evidence exists',async()=>{
+  const f=fixture();
+  const controller={
+    available:()=>true,
+    state:name=>({status:'active',enabled:'disabled',pid:name==='devspace'?123:456}),
+    log:()=>'',
+  };
+  try{
+    const config=path.join(f.root,'config.jsonc');
+    writeFileSync(config,JSON.stringify({server:{host:'127.0.0.1',port:1,publicBaseUrl:''}}));
+    const x=await snapshot({instance:'fixture',platformRoot:f.root,configPath:config,explicitRuntimePackage:f.declared,serviceUnit:'',tunnelUnit:'',tunnelMetrics:'',stateDir:'',runtimeManifest:'',controlManifest:''},controller);
+    assert.equal(x.mcp.request_diagnostics.available,true);
+    assert.equal(x.tunnel.diagnostics.registered_connections,null);
+    assert.equal(x.tunnel.diagnostics.actual_protocol,null);
+  }finally{f.clean();}
+});
 test('read-only inventory uses the deployed devspace.sqlite and jobs schema',async()=>{
   const f=fixture();
   try{

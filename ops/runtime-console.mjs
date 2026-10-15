@@ -76,6 +76,13 @@ function unitJournal(unit,lines=350) {
   if (!unit || process.platform === 'win32') return '';
   return run('journalctl',['--user','-u',unit,'-n',String(lines),'--no-pager','-o','cat'],4000);
 }
+function diagnosticLog(controller,name,unit,lines) {
+  try {
+    const value=controller?.log?.(name,lines);
+    if(typeof value==='string'&&value)return value;
+  } catch {}
+  return unitJournal(unit,lines);
+}
 function readPointer(root,name) {
   const slot=textFile(path.join(root,'runtime',name));
   return validSlot.test(slot) ? slot : '';
@@ -248,11 +255,12 @@ export function rollbackTargets(options,rt=runtimeInfo(options)) {
   }catch{}
   return entries.sort((a,b)=>a.id.localeCompare(b.id));
 }
-function requestDiagnostics(unit) {
+function requestDiagnostics(logText,available=false) {
   const recent=[];
-  for(const line of unitJournal(unit,700).split('\n')) {
-    const start=line.indexOf('{');if(start<0)continue;
-    const x=parse(line.slice(start));
+  for(const line of String(logText||'').split('\n')) {
+    const start=line.indexOf('{');
+    let x=start>=0?parse(line.slice(start)):null;
+    if(!x)x=prettyRequestEvent(line);
     if (!x || !['http_request','http_request_aborted'].includes(x.event))continue;
     recent.push({
       ts:clip(x.ts,40),event:x.event,request_id:clip(x.requestId,100),
@@ -265,17 +273,40 @@ function requestDiagnostics(unit) {
     });
   }
   const items=recent.slice(-30).reverse();
-  return {available:!!unit,observation_scope:'origin HTTP; first byte is origin write, not client receipt',total_observed:recent.length,aborted_observed:recent.filter((x)=>x.event==='http_request_aborted').length,recent:items};
+  return {available:!!available||!!logText,observation_scope:'origin HTTP; first byte is origin write, not client receipt',total_observed:recent.length,aborted_observed:recent.filter((x)=>x.event==='http_request_aborted').length,recent:items};
 }
-function tunnelDiagnostics(unit) {
+function prettyRequestEvent(line) {
+  const header=String(line||'').match(/(\d{4}-\d{2}-\d{2}T\S+Z)\s+(?:INFO|WARN|ERROR|DEBUG)\s+(http_request(?:_aborted)?)(?:\s|$)/);
+  if(!header)return null;
+  const entry={ts:header[1],event:header[2]};
+  const fields=line.slice((header.index||0)+header[0].length);
+  const pairs=/([A-Za-z][A-Za-z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s]+)/g;
+  for(const match of fields.matchAll(pairs)){
+    let value=match[2];
+    try{value=JSON.parse(value);}catch{}
+    entry[match[1]]=value;
+  }
+  return entry;
+}
+function tunnelDiagnostics(logText) {
   const events=[];
-  for(const line of unitJournal(unit,450).split('\n')) {
+  for(const line of String(logText||'').split('\n')) {
     if(!/registered tunnel connection/i.test(line))continue;
     const index=line.match(/connIndex=(\d+)/i),protocol=line.match(/protocol=([^\s]+)/i);
     events.push({index:index?Number(index[1]):null,protocol:protocol?.[1]||null,ts:clip(line.slice(0,32),32)});
   }
   const latest=events.at(-1);
-  return {actual_protocol:latest?.protocol||null,last_registered_at:latest?.ts||null,registered_connections:new Set(events.slice(-8).map((x)=>x.index).filter((x)=>x!==null)).size};
+  return {actual_protocol:latest?.protocol||null,last_registered_at:latest?.ts||null,registered_connections:events.length?new Set(events.slice(-8).map((x)=>x.index).filter((x)=>x!==null)).size:null};
+}
+function tunnelMetricsUrlFromLog(logText) {
+  let latest='';
+  for(const line of String(logText||'').split('\n')) {
+    const match=line.match(/Starting metrics server on 127\.0\.0\.1:(\d{1,5})\/metrics\b/i);
+    if(!match)continue;
+    const port=Number(match[1]);
+    if(Number.isSafeInteger(port)&&port>0&&port<=65535)latest='http://127.0.0.1:'+port+'/metrics';
+  }
+  return latest;
 }
 async function fetchHealth(url) {
   if(!url)return {ok:false,status:0,error:'No URL configured'};
@@ -343,8 +374,11 @@ export async function snapshot(options,controller=createServiceController(option
   let pathPart=(managementPublicBasePath(options,config)||'')+'/healthz',publicUrl='';
   try{const u=new URL(base);pathPart=u.pathname.replace(/\/+$/,'')+'/healthz';publicUrl=u.origin+pathPart;}catch{}
   const localUrl=config?.server?.host&&config?.server?.port?'http://'+config.server.host+':'+config.server.port+pathPart:'';
+  const devspaceLog=diagnosticLog(controller,'devspace',options.serviceUnit,700);
+  const tunnelLog=diagnosticLog(controller,'tunnel',options.tunnelUnit,450);
+  const tunnelMetricsUrl=options.tunnelMetrics||tunnelMetricsUrlFromLog(tunnelLog);
   const [localHealth,publicHealth,metrics,state]=await Promise.all([
-    fetchHealth(localUrl),fetchHealth(publicUrl),tunnelMetrics(options.tunnelMetrics),inventory(options,config,rt.actual.package_root||rt.package_root||options.platformRoot)
+    fetchHealth(localUrl),fetchHealth(publicUrl),tunnelMetrics(tunnelMetricsUrl),inventory(options,config,rt.actual.package_root||rt.package_root||options.platformRoot)
   ]);
   const devspaceStatus=controller.available('devspace')?controller.state('devspace').status:null;
   const tunnelStatus=controller.available('tunnel')?controller.state('tunnel').status:null;
@@ -352,14 +386,14 @@ export async function snapshot(options,controller=createServiceController(option
     schema_version:2,generated_at:new Date().toISOString(),instance:options.instance,platform:process.platform,
     runtime:rt,deployment:deploymentInfo(options,rt),
     services:{devspace:devspaceStatus,tunnel:tunnelStatus},
-    mcp:{public_base_url:base,local_health:localHealth,public_health:publicHealth,request_diagnostics:requestDiagnostics(options.serviceUnit)},
+    mcp:{public_base_url:base,local_health:localHealth,public_health:publicHealth,request_diagnostics:requestDiagnostics(devspaceLog,controller.available('devspace'))},
     connection:{
       public_base_url:base||null,
       public_mcp_url:base?base.replace(/\/+$/,'')+'/mcp':null,
       local_mcp_url:localUrl?localUrl.replace(/\/healthz$/,'/mcp'):null,
       owner_copy_available:ownerCopyEnabled(options),
     },
-    tunnel:{metrics,diagnostics:tunnelDiagnostics(options.tunnelUnit)},
+    tunnel:{metrics,diagnostics:tunnelDiagnostics(tunnelLog)},
     inventory:state,security:{credentials_included:false,loopback_console_only:true},
     actions:{restart_devspace:controller.available('devspace'),restart_tunnel:controller.available('tunnel'),rollback_runtime:!!devspaceStatus&&process.platform!=='win32',copy_owner_password:ownerCopyEnabled(options)},
   };
