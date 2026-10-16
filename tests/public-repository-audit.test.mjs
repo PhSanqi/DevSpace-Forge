@@ -90,10 +90,22 @@ test('published website source uses generic configuration instead of a fixed per
   assert.match(readFileSync(resolve(root, 'ops/deploy-public-site-linux.sh'), 'utf8'), /DEVSPACE_SITE_PUBLIC_URL/);
 });
 
-test('HEAD commit metadata does not publish a personal email address', () => {
-  const identity = execFileSync('git', ['show', '-s', '--format=%ae%n%ce', 'HEAD'], { cwd: root })
+test('published commit metadata does not publish a personal email address', () => {
+  const identity = execFileSync('git', ['show', '-s', '--format=%ae%n%ce%n%P', 'HEAD'], { cwd: root })
     .toString('utf8').trim().split(/\r?\n/);
-  assert.equal(identity.length, 2, 'Expected author and committer email metadata');
-  assert.ok(isPublicSafeGitEmail(identity[0]), 'HEAD author email must use a GitHub noreply or example.com address');
-  assert.ok(isPublicSafeGitEmail(identity[1]), 'HEAD committer email must use a GitHub noreply or example.com address');
+  assert.equal(identity.length, 3, 'Expected author, committer and parent metadata');
+  const [authorEmail, committerEmail, parents] = identity;
+  const parentCount = parents.trim() ? parents.trim().split(/\s+/).length : 0;
+  const syntheticPullRequestMerge = process.env.GITHUB_ACTIONS === 'true'
+    && process.env.GITHUB_EVENT_NAME === 'pull_request'
+    && parentCount === 2;
+
+  // GitHub creates an ephemeral merge commit for pull_request checks. That
+  // object is not published to the target branch and may copy the account's
+  // profile author metadata. Real repository commits must still use a public-
+  // safe author identity; the synthetic merge must still be GitHub-committed.
+  if (!syntheticPullRequestMerge) {
+    assert.ok(isPublicSafeGitEmail(authorEmail), 'Published author email must use a GitHub noreply or example.com address');
+  }
+  assert.ok(isPublicSafeGitEmail(committerEmail), 'Published committer email must use a GitHub noreply or example.com address');
 });
