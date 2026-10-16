@@ -8,16 +8,14 @@ DevSpace-Forge 通过 MCP 将支持该协议的 AI 聊天客户端连接到你�
 
 这是社区自托管项目，不是 OpenAI 或 Cloudflare 的官方产品。客户端功能、上下文保留能力和使用额度由相应产品及套餐决定。DevSpace-Forge 不赠送 AI 额度、不绕过限制，也不承诺无限记忆。
 
-## v0.6.13 新增内容
+## v0.6.14 新增内容
 
-- **Windows 现代控制入口：** Windows 包现在由单一 Modern Desktop launcher 协调本地 Control、Runtime 与 Tunnel；升级后会收敛旧 launcher ownership，不再让新旧两套管理器并行争用。
-- **多实例启动更安全：** Windows Control 的 instance 会从已配置的公网 route 推导，不再固定为某个部署名称，因此 `/team-a`、`/team-b` 这类可复用实例可以保持各自身份。
-- **Windows 离线打包更稳定：** Runtime 与视频原生依赖在打包和 smoke test 前会经过有界短路径 staging，降低 Windows 长路径与原生依赖处理造成的打包失败。
-- **Linux Release 可在干净 runner 上完整打包：** Linux 打包脚本现在会在构建前自行安装 Control UI 依赖，不再依赖工作目录中预先存在的 `control-ui/node_modules`。
-- **媒体交付验证更严格：** 图片生成类流程现在不仅检查“生成成功”，还会验证生成媒体是否通过支持的媒体路径真正交付。
-- **公开仓库隐私收口：** 文档、示例、测试和 Release 元数据统一使用通用占位符与非个人 Git 身份；真实部署域名、凭据和本机路径只保留在用户本地配置中。
+- **Windows Tunnel 协议设置真正生效：** Modern Control 现在会读取现有 `CloudflaredProtocol` 设置；显式选择 `http2` 或 `quic` 时会传递给受管 Tunnel，而 `auto` 继续保持 Cloudflared 默认协商行为。
+- **升级不再静默重置协议：** Setup 更新与重新配置会保留已有显式协议选择；全新安装仍默认 `auto`，不会把某个网络环境的结论强行推广到所有用户。
+- **Windows Console 诊断补全：** MCP/Tunnel 诊断优先使用 Controller 自有日志，并能从 Tunnel metrics 自动识别真实 HA 连接；没有诊断证据时返回 Unknown，而不是伪造 0。
+- **回归覆盖：** 增加 Windows Controller 协议持久化、无效协议 fail-closed、Console 日志/metrics 诊断等测试。
 
-升级细节与验收方法见 [v0.6.13 发行说明](docs/release-notes-v0.6.13.md)。
+升级细节与验收方法见 [v0.6.14 发行说明](docs/release-notes-v0.6.14.md)。
 
 ## 主要功能
 
@@ -67,6 +65,7 @@ site 目录是可选的公开静态介绍站，**不是**管理 Console 或 MCP 
 - [安装与 MCP 连接](docs/getting-started.md)
 - [平台和发行包](PLATFORMS.md)
 - [版本、校验与安全升级](docs/releases-and-upgrades.md)
+- [v0.6.14 发行说明](docs/release-notes-v0.6.14.md)
 - [v0.6.13 发行说明](docs/release-notes-v0.6.13.md)
 - [图片与上下文智能](runtime-src/docs/context-intelligence.md)
 - [自适应视频理解](runtime-src/docs/video-understanding.md)

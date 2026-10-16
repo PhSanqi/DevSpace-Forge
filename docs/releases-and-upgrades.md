@@ -1,12 +1,12 @@
 # Releases and safe upgrades / 发行与安全升级
 
-## Current release: v0.6.13 / 当前版本：v0.6.13
+## Current release: v0.6.14 / 当前版本：v0.6.14
 
-v0.6.13 publishes the modern Desktop/Control ownership changes with a corrected Linux release path. Linux packaging now installs the Control UI dependencies before building, so the package can be produced on a clean runner. Existing installations should use the normal Setup update path rather than manually replacing Runtime files.
+v0.6.14 hardens Windows Tunnel protocol control and diagnostics. Modern Control now honors the persisted Cloudflared protocol setting, preserves an explicit `http2` or `quic` choice across updates/reconfiguration, and keeps fresh installations on the existing `auto` default. Windows Console diagnostics now read controller-owned logs and Tunnel metrics instead of reporting synthetic zero connection counts when evidence is unavailable.
 
-v0.6.13 正式发布 Modern Desktop / Control ownership 改动，并修复 Linux Release 在干净 runner 上缺少 Control UI 依赖的问题。已有安装应使用正常的 Setup 更新流程，不要手工替换 Runtime 文件。
+v0.6.14 加固 Windows Tunnel 协议控制与诊断。Modern Control 现在会读取并执行持久化的 Cloudflared 协议设置，升级或重新配置时保留显式的 `http2` / `quic` 选择；全新安装仍维持既有的 `auto` 默认值。Windows Console 诊断改为读取 Controller 自有日志与 Tunnel metrics，在没有证据时不再伪造 `0` 条连接。
 
-For the complete change list and post-upgrade checks, see [v0.6.13 release notes](release-notes-v0.6.13.md).
+For the complete change list and post-upgrade checks, see [v0.6.14 release notes](release-notes-v0.6.14.md).
 
 ## Choose and verify a package
 
@@ -16,7 +16,7 @@ DevSpace-Forge has one public release line. Its embedded Runtime is built from t
 
 ## Install or update
 
-**Windows:** extract the archive and run Setup.exe. If it detects an existing installation, use its update flow. Confirm the target installation before proceeding. v0.6.13 upgrades legacy Windows launcher ownership to the modern Desktop launcher and preserves the configured instance route.
+**Windows:** extract the archive and run Setup.exe. If it detects an existing installation, use its update flow. Confirm the target installation before proceeding. v0.6.14 preserves the configured instance route and any explicit Tunnel protocol selection during the normal Setup update flow.
 
 **Linux:** extract the archive and run ./setup-linux.sh. An existing configuration can be updated in place; use the explicit reconfiguration option only when you intend to change connection settings. Actual systemd unit names depend on your instance name.
 
