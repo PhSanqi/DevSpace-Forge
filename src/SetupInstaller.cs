@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -469,6 +471,69 @@ namespace DevSpaceControlPlatform
             return "powershell.exe " + WindowsDesktopPowerShellArguments(platformRoot);
         }
 
+        public static void ApplyWindowsLaunchShortcuts(string platformRoot)
+        {
+            var root = Path.GetFullPath(platformRoot);
+            var iconPath = Path.Combine(root, "desktop", "resources", "app", "DevSpaceForge.ico");
+            var shortcutName = "DevSpace-Forge.lnk";
+            var programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (string.IsNullOrWhiteSpace(programs) || string.IsNullOrWhiteSpace(desktop))
+                throw new InvalidOperationException("无法解析当前用户的开始菜单或桌面目录。");
+
+            var programsShortcut = Path.Combine(programs, shortcutName);
+            var desktopShortcut = Path.Combine(desktop, shortcutName);
+            var hadProgramsShortcut = File.Exists(programsShortcut);
+            var hadDesktopShortcut = File.Exists(desktopShortcut);
+            CreateWindowsShortcut(programsShortcut, root, iconPath);
+            if (!hadProgramsShortcut && !hadDesktopShortcut)
+                CreateWindowsShortcut(desktopShortcut, root, iconPath);
+        }
+
+        private static void CreateWindowsShortcut(string shortcutPath, string platformRoot, string iconPath)
+        {
+            var directory = Path.GetDirectoryName(shortcutPath);
+            if (string.IsNullOrWhiteSpace(directory))
+                throw new InvalidDataException("Windows 快捷方式路径无效：" + shortcutPath);
+            Directory.CreateDirectory(directory);
+
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType == null)
+                throw new InvalidOperationException("Windows Script Host 不可用，无法创建 DevSpace-Forge 快捷方式。");
+
+            object shell = null;
+            object shortcut = null;
+            try
+            {
+                shell = Activator.CreateInstance(shellType);
+                shortcut = shellType.InvokeMember(
+                    "CreateShortcut",
+                    BindingFlags.InvokeMethod,
+                    null,
+                    shell,
+                    new object[] { shortcutPath });
+                var shortcutType = shortcut.GetType();
+                shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut,
+                    new object[] { "powershell.exe" });
+                shortcutType.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut,
+                    new object[] { WindowsDesktopPowerShellArguments(platformRoot) });
+                shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut,
+                    new object[] { Path.GetFullPath(platformRoot) });
+                shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut,
+                    new object[] { iconPath + ",0" });
+                shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut,
+                    new object[] { "Open DevSpace-Forge" });
+                shortcutType.InvokeMember("WindowStyle", BindingFlags.SetProperty, null, shortcut,
+                    new object[] { 7 });
+                shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+            }
+            finally
+            {
+                if (shortcut != null && Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+                if (shell != null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+            }
+        }
+
         private static void ValidateModernDesktopBundle(string platformRoot)
         {
             var root = Path.GetFullPath(platformRoot);
@@ -663,6 +728,7 @@ namespace DevSpaceControlPlatform
 
             if (token.Length > 0) CloudflareTunnelSecretStore.SaveToken(root, token);
             ApplyWindowsAutoStart(root, autoStart);
+            ApplyWindowsLaunchShortcuts(root);
 
             var result = FinalizeConfiguration(root, settings, versionText, false);
             RememberInstallationRoot(root);
@@ -692,6 +758,7 @@ namespace DevSpaceControlPlatform
             {
                 throw new InvalidDataException("现有 Remote Tunnel 配置缺少本地 Token，无法无交互更新。");
             }
+            if (applySystemIntegration) ApplyWindowsLaunchShortcuts(root);
 
             // The native updater is not behind the Node Console's guard.
             // Hold the same atomic directory while checking jobs and replacing
