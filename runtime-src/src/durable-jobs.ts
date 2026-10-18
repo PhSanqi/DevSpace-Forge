@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { terminateProcessTree, processStartIdentity, ownedProcessState } from "./process-platform.js";
+import { terminateProcessTree, processStartIdentity, ownedProcessState, waitForOwnedProcessExit } from "./process-platform.js";
 
 export interface JobRecord {
   id: string;
@@ -160,6 +160,7 @@ function requestTrackedJobStop(row: RawJobRow, signal: NodeJS.Signals): void {
       if (ownedProcessState(pid, row.process_identity) !== "active") return false;
       try { return process.kill(pid, requested); } catch { return false; }
     } }, signal, true); } catch {}
+    waitForOwnedProcessExit(pid, row.process_identity, 3000);
   }
 }
 

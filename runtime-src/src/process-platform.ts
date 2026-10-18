@@ -87,10 +87,16 @@ export function fileTimeToDotNetTicks(fileTime: bigint): string {
   return (fileTime + FILETIME_TO_DOTNET_TICKS_OFFSET).toString();
 }
 
+const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+const SYNCHRONIZE = 0x00100000;
+const PROCESS_ACCESS = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+const WAIT_OBJECT_0 = 0;
+
 let cachedWin32Bindings: {
   openProcess: (access: number, inherit: boolean, pid: number) => unknown;
   getProcessTimes: (hProcess: unknown, creation: Uint8Array, exit: Uint8Array, kernel: Uint8Array, user: Uint8Array) => boolean;
   closeHandle: (h: unknown) => boolean;
+  waitForSingleObject: (h: unknown, ms: number) => number;
 } | null = null;
 
 function getWin32Bindings() {
@@ -102,7 +108,8 @@ function getWin32Bindings() {
     const openProcess = kernel32.func("void * __stdcall OpenProcess(uint32_t desiredAccess, bool inheritHandle, uint32_t processId)");
     const getProcessTimes = kernel32.func("bool __stdcall GetProcessTimes(void *hProcess, void *lpCreationTime, void *lpExitTime, void *lpKernelTime, void *lpUserTime)");
     const closeHandle = kernel32.func("bool __stdcall CloseHandle(void *handle)");
-    cachedWin32Bindings = { openProcess, getProcessTimes, closeHandle };
+    const waitForSingleObject = kernel32.func("uint32_t __stdcall WaitForSingleObject(void *h, uint32_t ms)");
+    cachedWin32Bindings = { openProcess, getProcessTimes, closeHandle, waitForSingleObject };
     return cachedWin32Bindings;
   } catch {
     return null;
@@ -138,10 +145,12 @@ export function processStartIdentity(pid: number): string | null {
       try {
         const bindings = getWin32Bindings();
         if (bindings) {
-          const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-          const handle = bindings.openProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+          const handle = bindings.openProcess(PROCESS_ACCESS, false, pid);
           if (handle) {
             try {
+              if (bindings.waitForSingleObject(handle, 0) === WAIT_OBJECT_0) {
+                return null;
+              }
               const creation = Buffer.alloc(8);
               const exit = Buffer.alloc(8);
               const kernel = Buffer.alloc(8);
@@ -152,13 +161,15 @@ export function processStartIdentity(pid: number): string | null {
                   return `windows:${fileTimeToDotNetTicks(creationTime)}`;
                 }
               }
+              return null;
             } finally {
               bindings.closeHandle(handle);
             }
           }
+          return null;
         }
       } catch {
-        // Fall through to PowerShell fallback
+        // Fall through to PowerShell fallback only when koffi is unavailable/throws
       }
       const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
         `$ErrorActionPreference='Stop'; (Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks.ToString()`],
@@ -186,3 +197,57 @@ export function ownedProcessState(pid: number | null, identity: string | null): 
   }
   return "unknown";
 }
+
+const syncWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+export function waitForOwnedProcessExit(pid: number, identity: string | null, timeoutMs: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid < 1) return true;
+
+  if (process.platform === "win32" && !customIdentityProvider) {
+    try {
+      const bindings = getWin32Bindings();
+      if (bindings) {
+        const handle = bindings.openProcess(PROCESS_ACCESS, false, pid);
+        if (!handle) {
+          return true;
+        }
+        try {
+          const creation = Buffer.alloc(8);
+          const exit = Buffer.alloc(8);
+          const kernel = Buffer.alloc(8);
+          const user = Buffer.alloc(8);
+          let currentIdentity: string | null = null;
+          if (bindings.getProcessTimes(handle, creation, exit, kernel, user)) {
+            const creationTime = creation.readBigUInt64LE(0);
+            if (creationTime > 0n) {
+              currentIdentity = `windows:${fileTimeToDotNetTicks(creationTime)}`;
+            }
+          }
+          if (identity && currentIdentity !== identity) {
+            return true;
+          }
+          const timeout = Math.min(0xffffffff, Math.max(0, Math.floor(timeoutMs)));
+          return bindings.waitForSingleObject(handle, timeout) === WAIT_OBJECT_0;
+        } finally {
+          bindings.closeHandle(handle);
+        }
+      }
+    } catch {
+      // Koffi unavailable/threw, fall through to poll path
+    }
+  }
+
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (true) {
+    if (ownedProcessState(pid, identity) !== "active") {
+      return true;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      break;
+    }
+    Atomics.wait(syncWaitBuffer, 0, 0, Math.min(25, remaining));
+  }
+  return ownedProcessState(pid, identity) !== "active";
+}
+

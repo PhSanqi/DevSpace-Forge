@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { DurableJobManager, canUseSystemdUserJobIsolation, durableJobSystemdUnitName } from "./durable-jobs.js";
-import { fileTimeToDotNetTicks, ownedProcessState, processStartIdentity, setProcessIdentityProviderForTests } from "./process-platform.js";
+import { fileTimeToDotNetTicks, ownedProcessState, processStartIdentity, setProcessIdentityProviderForTests, waitForOwnedProcessExit } from "./process-platform.js";
 import { resolveProjectEnvironment, getRuntimeDiagnostics } from "./runtime-env.js";
 
 function delay(ms: number): Promise<void> {
@@ -973,3 +973,42 @@ test("processStartIdentity returns stable windows:<ticks> matching PowerShell on
   assert.ok(ticks && /^\d+$/.test(ticks), `Expected numeric ticks from PowerShell, got: ${ticks}`);
   assert.equal(first, `windows:${ticks}`);
 });
+
+test("waitForOwnedProcessExit confirms exit for short-lived and killed processes, honours custom provider", () => {
+  const shortChild = spawn(process.execPath, ["-e", "setTimeout(()=>{},200)"], { stdio: "ignore" });
+  const shortPid = shortChild.pid!;
+  assert.ok(shortPid);
+  const shortIdentity = processStartIdentity(shortPid);
+  const shortExited = waitForOwnedProcessExit(shortPid, shortIdentity, 3000);
+  assert.equal(shortExited, true);
+
+  const longChild = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+  const longPid = longChild.pid!;
+  assert.ok(longPid);
+  const longIdentity = processStartIdentity(longPid);
+  try {
+    longChild.kill("SIGKILL");
+    const longExited = waitForOwnedProcessExit(longPid, longIdentity, 3000);
+    assert.equal(longExited, true);
+  } finally {
+    try { longChild.kill("SIGKILL"); } catch {}
+  }
+
+  let providerCalls = 0;
+  const syntheticPid = 8888888;
+  setProcessIdentityProviderForTests((pid) => {
+    if (pid === syntheticPid) {
+      providerCalls++;
+      return providerCalls > 2 ? null : "mock-identity";
+    }
+    return processStartIdentity(pid);
+  });
+  try {
+    const pollResult = waitForOwnedProcessExit(syntheticPid, "mock-identity", 1000);
+    assert.equal(pollResult, true);
+    assert.ok(providerCalls > 2, "poll path must query the custom identity provider");
+  } finally {
+    setProcessIdentityProviderForTests(null);
+  }
+});
+
