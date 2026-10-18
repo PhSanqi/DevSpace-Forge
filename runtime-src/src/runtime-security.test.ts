@@ -15,10 +15,22 @@ import { ProcessSessionManager } from "./process-sessions.js";
 import { ProcessRunLogger } from "./compact-runtime/process-run-store.js";
 import { writeDevspaceAuth, loadDevspaceFiles } from "./user-config.js";
 
+const fixtureClosers = new WeakMap<test.TestContext, Array<() => void>>();
+
 function fixture(t: test.TestContext) {
   const root = mkdtempSync(join(tmpdir(), "devspace-runtime-security-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const closers: Array<() => void> = [];
+  fixtureClosers.set(t, closers);
+  // Windows cannot remove an open SQLite file: close handles before removing the root.
+  t.after(() => {
+    for (const close of closers.splice(0).reverse()) close();
+    rmSync(root, { recursive: true, force: true });
+  });
   return root;
+}
+
+function closeBeforeRemove(t: test.TestContext, close: () => void) {
+  fixtureClosers.get(t)!.push(close);
 }
 
 const oauthConfig = {
@@ -29,7 +41,7 @@ const oauthConfig = {
 
 test("owner password failures back off per IP and globally, success resets the client", async (t) => {
   const provider = new SingleUserOAuthProvider(oauthConfig, new URL("https://agent.example.com/mcp"), fixture(t));
-  t.after(() => provider.close());
+  closeBeforeRemove(t, () => provider.close());
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
   const client = await provider.clientsStore.registerClient!({ redirect_uris: ["http://localhost/callback"] });
   const params = { redirectUri: "http://localhost/callback", codeChallenge: "challenge", scopes: ["devspace"], resource: new URL("https://agent.example.com/mcp") };
@@ -66,7 +78,7 @@ test("OAuth registration evicts the oldest token-free client at 200 and issuance
   const root = fixture(t);
   const store = new SqliteOAuthStore(root);
   const database = openDatabase(root);
-  t.after(() => { store.close(); database.close(); });
+  closeBeforeRemove(t, () => { store.close(); database.close(); });
   const clients = Array.from({ length: 200 }, () => store.registerClient({ redirect_uris: ["http://localhost/callback"] }, []));
   const now = Math.floor(Date.now() / 1000);
   database.sqlite.prepare("update oauth_clients set issued_at = ? where client_id = ?").run(now - 2, clients[2]!.client_id);
@@ -100,7 +112,7 @@ test("OAuth registration rejects at 200 when every client has an unexpired acces
   const root = fixture(t);
   const store = new SqliteOAuthStore(root);
   const database = openDatabase(root);
-  t.after(() => { store.close(); database.close(); });
+  closeBeforeRemove(t, () => { store.close(); database.close(); });
   const now = Math.floor(Date.now() / 1000);
   const clients = Array.from({ length: 200 }, (_, index) => {
     const client = store.registerClient({ redirect_uris: ["http://localhost/callback"] }, []);
