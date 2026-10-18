@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { DurableJobManager, canUseSystemdUserJobIsolation, durableJobSystemdUnitName } from "./durable-jobs.js";
-import { ownedProcessState, processStartIdentity } from "./process-platform.js";
+import { fileTimeToDotNetTicks, ownedProcessState, processStartIdentity, setProcessIdentityProviderForTests } from "./process-platform.js";
 import { resolveProjectEnvironment, getRuntimeDiagnostics } from "./runtime-env.js";
 
 function delay(ms: number): Promise<void> {
@@ -908,6 +908,7 @@ test("Windows fallback never signals a recycled or unidentifiable PID", (t) => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   const calls: string[] = [];
   const original = childProcess.spawnSync;
+  setProcessIdentityProviderForTests((pid) => (pid === 1234 ? "windows:12345" : null));
   t.mock.method(childProcess, "spawnSync", ((file: string, args: string[]) => {
     if (file === "powershell.exe") return { status: 0, stdout: "12345\n", stderr: "" };
     if (file === "taskkill.exe") { calls.push("taskkill"); return { status: 0, stdout: "", stderr: "" }; }
@@ -935,8 +936,40 @@ test("Windows fallback never signals a recycled or unidentifiable PID", (t) => {
     manager.cancelJob(id);
     assert.deepEqual(calls, ["taskkill"], "matching identity on win32 routes to taskkill");
   } finally {
+    setProcessIdentityProviderForTests(null);
     Object.defineProperty(process, "platform", platform);
     t.mock.restoreAll(); syncBuiltinESMExports();
     db.close(); manager.close(); rmSync(state, { recursive: true, force: true });
   }
+});
+
+test("fileTimeToDotNetTicks converts Windows FILETIME to .NET ticks", () => {
+  assert.equal(fileTimeToDotNetTicks(0n), "504911232000000000");
+
+  const ms = BigInt(Date.UTC(2026, 0, 1));
+  const fileTime = ms * 10000n + 116444736000000000n;
+  const dotNetTicks = ms * 10000n + 621355968000000000n;
+  assert.equal(fileTimeToDotNetTicks(fileTime), dotNetTicks.toString());
+});
+
+test("processStartIdentity returns stable windows:<ticks> matching PowerShell on win32", {
+  skip: process.platform !== "win32",
+}, () => {
+  const first = processStartIdentity(process.pid);
+  assert.ok(first, "processStartIdentity(process.pid) must be non-null");
+  assert.match(first, /^windows:\d+$/);
+
+  const second = processStartIdentity(process.pid);
+  assert.equal(second, first, "processStartIdentity must be stable across calls");
+
+  const result = spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `$ErrorActionPreference='Stop'; (Get-Process -Id ${process.pid}).StartTime.ToUniversalTime().Ticks.ToString()`,
+  ], { encoding: "utf8", windowsHide: true, timeout: 5_000 });
+  assert.equal(result.status, 0, `PowerShell command failed: ${result.stderr}`);
+  const ticks = result.stdout?.trim();
+  assert.ok(ticks && /^\d+$/.test(ticks), `Expected numeric ticks from PowerShell, got: ${ticks}`);
+  assert.equal(first, `windows:${ticks}`);
 });

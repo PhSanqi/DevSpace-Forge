@@ -81,9 +81,15 @@ export function terminateProcessTree(
   child.kill(signal);
 }
 
+const FILETIME_TO_DOTNET_TICKS_OFFSET = 504911232000000000n; // 584388 days * 864000000000 ticks/day
+
+export function fileTimeToDotNetTicks(fileTime: bigint): string {
+  return (fileTime + FILETIME_TO_DOTNET_TICKS_OFFSET).toString();
+}
+
 let cachedWin32Bindings: {
   openProcess: (access: number, inherit: boolean, pid: number) => unknown;
-  getProcessTimes: (hProcess: unknown, creation: bigint[], exit: bigint[], kernel: bigint[], user: bigint[]) => boolean;
+  getProcessTimes: (hProcess: unknown, creation: Uint8Array, exit: Uint8Array, kernel: Uint8Array, user: Uint8Array) => boolean;
   closeHandle: (h: unknown) => boolean;
 } | null = null;
 
@@ -94,7 +100,7 @@ function getWin32Bindings() {
     const koffi = require("koffi");
     const kernel32 = koffi.load("kernel32.dll");
     const openProcess = kernel32.func("void * __stdcall OpenProcess(uint32_t desiredAccess, bool inheritHandle, uint32_t processId)");
-    const getProcessTimes = kernel32.func("bool __stdcall GetProcessTimes(void *hProcess, _Out_ uint64_t *lpCreationTime, _Out_ uint64_t *lpExitTime, _Out_ uint64_t *lpKernelTime, _Out_ uint64_t *lpUserTime)");
+    const getProcessTimes = kernel32.func("bool __stdcall GetProcessTimes(void *hProcess, void *lpCreationTime, void *lpExitTime, void *lpKernelTime, void *lpUserTime)");
     const closeHandle = kernel32.func("bool __stdcall CloseHandle(void *handle)");
     cachedWin32Bindings = { openProcess, getProcessTimes, closeHandle };
     return cachedWin32Bindings;
@@ -103,9 +109,24 @@ function getWin32Bindings() {
   }
 }
 
+let customIdentityProvider: ((pid: number) => string | null) | null = null;
+
+export function setProcessIdentityProviderForTests(
+  provider: ((pid: number) => string | null) | null,
+): void {
+  customIdentityProvider = provider;
+}
+
 // A PID alone is not durable ownership: it may have been recycled after restart.
 export function processStartIdentity(pid: number): string | null {
   if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  if (customIdentityProvider) {
+    try {
+      return customIdentityProvider(pid);
+    } catch {
+      return null;
+    }
+  }
   try {
     if (process.platform === "linux") {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -114,24 +135,30 @@ export function processStartIdentity(pid: number): string | null {
       return fields[19] ? `linux:${fields[19]}` : null;
     }
     if (process.platform === "win32") {
-      const bindings = getWin32Bindings();
-      if (bindings) {
-        const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-        const handle = bindings.openProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-        if (handle) {
-          try {
-            const creation = [0n];
-            const exit = [0n];
-            const kernel = [0n];
-            const user = [0n];
-            if (bindings.getProcessTimes(handle, creation, exit, kernel, user) && creation[0] > 0n) {
-              const ticks = (creation[0] + 504911232000000000n).toString();
-              return `windows:${ticks}`;
+      try {
+        const bindings = getWin32Bindings();
+        if (bindings) {
+          const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+          const handle = bindings.openProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+          if (handle) {
+            try {
+              const creation = Buffer.alloc(8);
+              const exit = Buffer.alloc(8);
+              const kernel = Buffer.alloc(8);
+              const user = Buffer.alloc(8);
+              if (bindings.getProcessTimes(handle, creation, exit, kernel, user)) {
+                const creationTime = creation.readBigUInt64LE(0);
+                if (creationTime > 0n) {
+                  return `windows:${fileTimeToDotNetTicks(creationTime)}`;
+                }
+              }
+            } finally {
+              bindings.closeHandle(handle);
             }
-          } finally {
-            bindings.closeHandle(handle);
           }
         }
+      } catch {
+        // Fall through to PowerShell fallback
       }
       const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
         `$ErrorActionPreference='Stop'; (Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks.ToString()`],
