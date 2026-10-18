@@ -198,56 +198,13 @@ export function ownedProcessState(pid: number | null, identity: string | null): 
   return "unknown";
 }
 
-const syncWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
-
-export function waitForOwnedProcessExit(pid: number, identity: string | null, timeoutMs: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid < 1) return true;
-
-  if (process.platform === "win32" && !customIdentityProvider) {
-    try {
-      const bindings = getWin32Bindings();
-      if (bindings) {
-        const handle = bindings.openProcess(PROCESS_ACCESS, false, pid);
-        if (!handle) {
-          return true;
-        }
-        try {
-          const creation = Buffer.alloc(8);
-          const exit = Buffer.alloc(8);
-          const kernel = Buffer.alloc(8);
-          const user = Buffer.alloc(8);
-          let currentIdentity: string | null = null;
-          if (bindings.getProcessTimes(handle, creation, exit, kernel, user)) {
-            const creationTime = creation.readBigUInt64LE(0);
-            if (creationTime > 0n) {
-              currentIdentity = `windows:${fileTimeToDotNetTicks(creationTime)}`;
-            }
-          }
-          if (identity && currentIdentity !== identity) {
-            return true;
-          }
-          const timeout = Math.min(0xffffffff, Math.max(0, Math.floor(timeoutMs)));
-          return bindings.waitForSingleObject(handle, timeout) === WAIT_OBJECT_0;
-        } finally {
-          bindings.closeHandle(handle);
-        }
-      }
-    } catch {
-      // Koffi unavailable/threw, fall through to poll path
-    }
-  }
-
+export async function waitForOwnedProcessExit(pid: number, identity: string | null, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (true) {
-    if (ownedProcessState(pid, identity) !== "active") {
-      return true;
-    }
+    const state = ownedProcessState(pid, identity);
+    if (state !== "active") return state === "inactive";
     const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      break;
-    }
-    Atomics.wait(syncWaitBuffer, 0, 0, Math.min(25, remaining));
+    if (remaining <= 0) return false;
+    await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, remaining)));
   }
-  return ownedProcessState(pid, identity) !== "active";
 }
-

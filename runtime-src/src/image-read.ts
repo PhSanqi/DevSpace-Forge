@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { open } from "node:fs/promises";
+import { constants } from "node:fs";
 import { extname } from "node:path";
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -123,7 +124,7 @@ async function inspectImageFile(
     throw new Error(`${toolName} only supports .jpg, .jpeg, and .png files`);
   }
 
-  const handle = await open(path, "r");
+  const handle = await open(path, process.platform === "win32" ? "r" : constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const metadata = await handle.stat();
     if (!metadata.isFile()) throw new Error(`${toolName} target is not a regular file`);

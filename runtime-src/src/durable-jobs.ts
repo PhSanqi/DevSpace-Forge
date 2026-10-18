@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { terminateProcessTree, processStartIdentity, ownedProcessState, waitForOwnedProcessExit } from "./process-platform.js";
+import { terminateProcessTree, processStartIdentity, ownedProcessState } from "./process-platform.js";
 
 export interface JobRecord {
   id: string;
@@ -156,11 +156,16 @@ function requestTrackedJobStop(row: RawJobRow, signal: NodeJS.Signals): void {
   }
   if (row.pid && ownedProcessState(row.pid, row.process_identity) === "active") {
     const pid = row.pid;
+    // The POSIX runner forwards termination to its detached command group and
+    // waits for close before exiting. Killing its group would bypass that owner.
+    if (process.platform !== "win32") {
+      try { process.kill(pid, "SIGTERM"); } catch {}
+      return;
+    }
     try { terminateProcessTree({ pid, kill: (requested) => {
       if (ownedProcessState(pid, row.process_identity) !== "active") return false;
       try { return process.kill(pid, requested); } catch { return false; }
     } }, signal, true); } catch {}
-    waitForOwnedProcessExit(pid, row.process_identity, 3000);
   }
 }
 
@@ -338,6 +343,29 @@ export class DurableJobManager {
     }
   }
 
+  private switchGateBlocks(): boolean {
+    const gate = join(this.jobsDir, "..", ".runtime-switch-gate");
+    if (!existsSync(gate)) return false;
+    try {
+      const ownerPath = join(gate, "owner.json");
+      const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as {
+        pid: number; processStartIdentity: string | null; createdAt: number;
+      };
+      if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(owner.createdAt) ||
+        !(owner.processStartIdentity === null || typeof owner.processStartIdentity === "string") ||
+        ownedProcessState(owner.pid, owner.processStartIdentity) !== "inactive") return true;
+      // Race with a late runner: only one of the two guarded claims can win.
+      const now = Math.floor(Date.now() / 1000);
+      this.db.prepare(`UPDATE durable_jobs SET status = 'failed', error = ?, ended_at = ?, last_heartbeat = ?
+        WHERE status = 'pending' AND pid IS NULL
+        AND error = 'Launch intent persisted; runner start not yet confirmed'`)
+        .run("Launch abandoned before runner claim; starter owner is inactive", now, now);
+      unlinkSync(ownerPath);
+      rmdirSync(gate);
+      return false;
+    } catch { return true; }
+  }
+
   public startJob(params: StartJobParams): JobRecord {
     const id = `job_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const now = Math.floor(Date.now() / 1000);
@@ -352,12 +380,15 @@ export class DurableJobManager {
       .run(id, params.workspaceId, params.workspaceRoot, params.command, params.workingDirectory,
         status, logPath, now, now, maxRuntime, reason, status === "failed" ? now : null);
     const gate = join(this.jobsDir, "..", ".runtime-switch-gate");
+    this.switchGateBlocks();
     try { mkdirSync(gate); }
     catch {
       insert("failed", "Job start blocked by the runtime switch gate.");
       return this.getJob(id)!;
     }
     try {
+      writeFileSync(join(gate, "owner.json"), JSON.stringify({ pid: process.pid,
+        processStartIdentity: processStartIdentity(process.pid), createdAt: Date.now() }), { mode: 0o600, flag: "wx" });
       // No launch or hand-off is allowed until this blocking row is durable.
       insert("pending", "Launch intent persisted; runner start not yet confirmed");
       let attempted = false;
@@ -420,21 +451,31 @@ export class DurableJobManager {
       }
       return this.getJob(id)!;
     } finally {
-      try { rmdirSync(gate); } catch {}
+      try { unlinkSync(join(gate, "owner.json")); rmdirSync(gate); } catch {}
     }
   }
 
-  public cancelJob(id: string): { success: boolean; message: string; record: JobRecord | null } {
+  public async cancelJob(id: string): Promise<{ success: boolean; message: string; record: JobRecord | null }> {
     const record = this.getJob(id);
     if (!record) return { success: false, message: `Job ${id} not found`, record: null };
     if (!["pending", "running", "cancelling"].includes(record.status)) {
       return { success: false, message: `Job ${id} is already ${record.status}`, record };
     }
-    this.db.prepare(`UPDATE durable_jobs SET error = ? WHERE id = ? AND status IN ${NON_TERMINAL}`)
+    const intent = this.db.prepare(`UPDATE durable_jobs SET error = ? WHERE id = ? AND status IN ${NON_TERMINAL}`)
       .run(CANCELLATION_PENDING, id);
+    if (intent.changes === 0) {
+      const authoritative = this.getJob(id);
+      return { success: false, message: `already ${authoritative?.status ?? "missing"}`, record: authoritative };
+    }
     const row = this.db.prepare("SELECT * FROM durable_jobs WHERE id = ?").get(id) as RawJobRow;
     requestTrackedJobStop(row, "SIGTERM");
-    if (trackedJobState(row) !== "inactive") {
+    const deadline = Date.now() + 3000;
+    let state = trackedJobState(row);
+    while (state === "active" && Date.now() < deadline) {
+      await new Promise<void>(resolve => setTimeout(resolve, 25));
+      state = trackedJobState(row);
+    }
+    if (state !== "inactive") {
       return { success: false, message: `Job ${id} exit/identity unconfirmed; cancellation will retry`, record: this.getJob(id) };
     }
     publishJobCompletion(this.db, id, 1, "SIGTERM", Math.floor(Date.now() / 1000));
@@ -505,8 +546,8 @@ export class DurableJobManager {
   }
 
   public reconcile() {
-    // A live starter owns pending launch decisions while holding this gate.
-    if (existsSync(join(this.jobsDir, "..", ".runtime-switch-gate"))) return;
+    // A live or unidentifiable starter still owns pending launch decisions.
+    if (this.switchGateBlocks()) return;
     const rows = this.db.prepare(`SELECT * FROM durable_jobs WHERE status IN ${NON_TERMINAL}`).all() as RawJobRow[];
     const now = Math.floor(Date.now() / 1000);
     for (const row of rows) {

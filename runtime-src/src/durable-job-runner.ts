@@ -17,6 +17,8 @@ function writeMarker(path: string, marker: CompletionMarker): void {
   renameSync(temporary, path);
 }
 
+let completion: CompletionMarker | undefined;
+
 async function main(): Promise<void> {
   const markerPath = process.argv[2];
   let command = process.argv[3];
@@ -60,24 +62,30 @@ async function main(): Promise<void> {
       if (row.status === "cancelling" || row.error?.startsWith(CANCELLATION_PENDING) ||
         row.error?.startsWith(TIMEOUT_REASON) || row.error?.startsWith("Launch cleanup unconfirmed")) {
         const endedAt = Math.floor(Date.now() / 1000);
+        completion = { exitCode: 1, signal: null, endedAt };
+        writeMarker(markerPath, completion);
         publishJobCompletion(db, id, 1, null, endedAt);
-        writeMarker(markerPath, { exitCode: 1, signal: null, endedAt });
         return;
       }
       const baseline = row.started_at ?? row.created_at;
       deadline = (baseline + row.max_runtime_seconds) * 1000;
-      db.prepare(`UPDATE durable_jobs SET pid = ?, process_identity = ?, status = 'running',
+      const claim = db.prepare(`UPDATE durable_jobs SET pid = ?, process_identity = ?, status = 'running',
         started_at = COALESCE(started_at, ?), error = NULL
         WHERE id = ? AND status IN ('pending', 'running') AND
         (error IS NULL OR error = 'Launch intent persisted; runner start not yet confirmed')`)
         .run(process.pid, processStartIdentity(process.pid), Math.floor(Date.now() / 1000), id);
       const claimed = db.prepare("SELECT status, error FROM durable_jobs WHERE id = ?").get(id) as {status: string; error: string | null};
-      if (claimed.status !== "running" || claimed.error || Date.now() >= deadline) {
+      if (!claimed || !["pending", "running", "cancelling"].includes(claimed.status)) return;
+      const stopRequested = claimed.status === "cancelling" || claimed.error?.startsWith(CANCELLATION_PENDING) ||
+        claimed.error?.startsWith(TIMEOUT_REASON) || claimed.error?.startsWith("Launch cleanup unconfirmed");
+      if (claim.changes === 0 && !stopRequested) return;
+      if (claim.changes === 0 || claimed.status !== "running" || claimed.error || Date.now() >= deadline) {
         if (Date.now() >= deadline) db.prepare(`UPDATE durable_jobs SET error = ? WHERE id = ?
           AND status IN ('pending', 'running') AND error IS NULL`).run(TIMEOUT_REASON, id);
         const endedAt = Math.floor(Date.now() / 1000);
+        completion = { exitCode: 1, signal: null, endedAt };
+        writeMarker(markerPath, completion);
         publishJobCompletion(db, id, 1, null, endedAt);
-        writeMarker(markerPath, { exitCode: 1, signal: null, endedAt });
         return;
       }
     }
@@ -98,6 +106,9 @@ async function main(): Promise<void> {
           windowsHide: true,
           detached: true,
         });
+
+    const forwardTermination = () => terminateProcessTree(child, "SIGKILL", true);
+    if (process.platform !== "win32") process.on("SIGTERM", forwardTermination);
 
     const selectStatusStmt = db && id ? db.prepare("SELECT status, error FROM durable_jobs WHERE id = ?") : null;
     const updateTimeoutStmt = db && id ? db.prepare(`UPDATE durable_jobs SET error = ? WHERE id = ? AND status IN ('pending', 'running')
@@ -131,19 +142,19 @@ async function main(): Promise<void> {
         child.on("error", () => {});
         child.once("close", (code, signal) => resolve({ code: code ?? 1, signal: signal ?? null }));
       });
-    } finally { clearInterval(timer); }
+    } finally {
+      clearInterval(timer);
+      process.removeListener("SIGTERM", forwardTermination);
+    }
+    completion = { exitCode: result.code, signal: result.signal, endedAt: Math.floor(Date.now() / 1000) };
+    writeMarker(markerPath, completion);
     if (db && id) {
       // A blocked event loop/SQLite wait may have crossed the deadline at exit.
       if (Date.now() >= deadline) db.prepare(`UPDATE durable_jobs SET error = ? WHERE id = ?
         AND status IN ('pending', 'running') AND error IS NULL`).run(TIMEOUT_REASON, id);
-      publishJobCompletion(db, id, result.code, result.signal, Math.floor(Date.now() / 1000));
+      publishJobCompletion(db, id, result.code, result.signal, completion.endedAt);
     }
 
-    writeMarker(markerPath, {
-      exitCode: result.code,
-      signal: result.signal,
-      endedAt: Math.floor(Date.now() / 1000),
-    });
     process.exitCode = result.code;
   } finally {
     db?.close();
@@ -153,7 +164,7 @@ async function main(): Promise<void> {
 void main().catch((error) => {
   const dbPath = process.argv[5];
   const id = process.argv[6];
-  if (dbPath && id) {
+  if (!completion && dbPath && id) {
     let db: Database.Database | undefined;
     try {
       db = new Database(dbPath, { fileMustExist: true });
@@ -168,7 +179,7 @@ void main().catch((error) => {
     } catch {} finally { db?.close(); }
   }
   const markerPath = process.argv[2];
-  if (markerPath) {
+  if (!completion && markerPath) {
     try {
       writeMarker(markerPath, {
         exitCode: 1,
