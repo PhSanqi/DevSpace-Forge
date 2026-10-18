@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { resolveProjectEnvironment } from "./runtime-env.js";
 import { ProcessRunLogger } from "./compact-runtime/process-run-store.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
@@ -56,9 +57,12 @@ interface ManagedProcess {
 }
 
 interface PtyHandle {
+  pid: number;
   write(data: string): void;
   kill(signal?: string): void;
   resize(columns: number, rows: number): void;
+  pause(): void;
+  resume(): void;
   onData(listener: (data: string) => void): unknown;
   onExit(listener: (event: { exitCode: number; signal: number }) => void): unknown;
 }
@@ -124,18 +128,27 @@ interface ProcessSession {
   rows: number;
   buffer: HeadTailBuffer;
   running: boolean;
+  finishing?: boolean;
   exitCode?: number;
   signal?: string;
   exitPromise: Promise<void>;
   resolveExit: () => void;
   cleanupTimer?: NodeJS.Timeout;
+  lifetimeTimer?: NodeJS.Timeout;
+  idleTimer?: NodeJS.Timeout;
   logger?: ProcessRunLogger;
+  flushPromise?: Promise<unknown>;
+  drainPromise?: Promise<void>;
+  pauseGeneration?: number;
 }
 
 interface ProcessSessionManagerOptions {
   maxBufferCharacters?: number;
   completedSessionTtlMs?: number;
   runRoot?: string;
+  maxSessions?: number;
+  maxRuntimeMs?: number;
+  idleTimeoutMs?: number;
 }
 
 function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
@@ -160,7 +173,7 @@ function processEnvironment(input?: {
 }): Record<string, string> {
   return {
     ...Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+      Object.entries(resolveProjectEnvironment(input?.workspaceRoot)).filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
     NO_COLOR: "1",
     TERM: "dumb",
@@ -283,45 +296,69 @@ export class ProcessSessionManager {
   private readonly maxBufferCharacters: number;
   private readonly completedSessionTtlMs: number;
   private nextSessionId = 1;
+  private readonly maxSessions: number;
+  private readonly maxRuntimeMs: number;
+  private readonly idleTimeoutMs: number;
   readonly runRoot?: string;
 
   constructor(options: ProcessSessionManagerOptions = {}) {
     this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
     this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
     this.runRoot = options.runRoot;
+    this.maxSessions = options.maxSessions ?? 10;
+    this.maxRuntimeMs = options.maxRuntimeMs ?? 8 * 60 * 60_000;
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 2 * 60 * 60_000;
+    for (const value of [this.maxSessions, this.maxRuntimeMs, this.idleTimeoutMs]) {
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error("Process session limits must be positive integers.");
+    }
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
-    const logger = this.runRoot
-      ? await ProcessRunLogger.create({
-          command: input.command,
-          cwd: input.cwd,
-          workspaceRoot: input.workspaceRoot ?? input.cwd,
-          root: this.runRoot,
-        })
-      : undefined;
-    const session = this.createSession(input, logger);
+    if (this.sessions.size >= this.maxSessions) {
+      for (const session of this.sessions.values()) {
+        if (!session.running) this.removeSession(session.id);
+      }
+      if (this.sessions.size >= this.maxSessions) {
+        throw new Error(`Process session limit of ${this.maxSessions} running sessions reached; wait for a session to exit or terminate one to free a slot.`);
+      }
+    }
+    const session = this.createSession(input);
     this.sessions.set(session.id, session);
-
     try {
+      if (this.runRoot) session.logger = await ProcessRunLogger.create({
+        command: input.command, cwd: input.cwd,
+        workspaceRoot: input.workspaceRoot ?? input.cwd, root: this.runRoot,
+      });
+      if (!this.sessions.has(session.id)) throw new Error("Process session manager shut down during launch.");
       if (input.tty && process.platform !== "win32") await this.startPty(session, input);
       else this.startPipe(session, input);
     } catch (error) {
       this.sessions.delete(session.id);
-      if (logger) void logger.finish({ exitCode: 1 });
+      if (session.logger) void session.logger.finish({ exitCode: 1 });
       throw error;
     }
 
+    if (session.running) {
+      session.lifetimeTimer = setTimeout(() => session.process?.kill("SIGKILL"), this.maxRuntimeMs);
+      session.lifetimeTimer.unref();
+      this.resetIdleTimer(session);
+    }
     const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_PROCESS_YIELD_MS);
     await this.waitForExit(session, yieldTimeMs);
 
-    const snapshot = this.consume(session, input.maxOutputTokens);
-    if (!session.running) this.removeSession(session.id);
+    const snapshot = await this.consume(session, input.maxOutputTokens);
+    if (!snapshot.running) this.removeSession(session.id);
     return snapshot;
   }
 
   async write(input: WriteStdinInput): Promise<ProcessSnapshot> {
     const session = this.getOwnedSession(input.workspaceId, input.sessionId);
+    if (!session.running || session.finishing) {
+      const snapshot = await this.consume(session, input.maxOutputTokens);
+      this.removeSession(session.id);
+      return snapshot;
+    }
+    this.resetIdleTimer(session);
     const chars = input.chars ?? "";
     const interactionRequested =
       chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
@@ -348,8 +385,8 @@ export class ProcessSessionManager {
       await this.waitForExit(session, yieldTimeMs);
     }
 
-    const snapshot = this.consume(session, input.maxOutputTokens);
-    if (!session.running) this.removeSession(session.id);
+    const snapshot = await this.consume(session, input.maxOutputTokens);
+    if (!snapshot.running) this.removeSession(session.id);
     return snapshot;
   }
 
@@ -361,9 +398,18 @@ export class ProcessSessionManager {
   shutdown(): void {
     for (const session of this.sessions.values()) {
       if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
+      if (session.lifetimeTimer) clearTimeout(session.lifetimeTimer);
+      if (session.idleTimer) clearTimeout(session.idleTimer);
       if (session.running) session.process?.kill("SIGTERM");
     }
     this.sessions.clear();
+  }
+
+  private resetIdleTimer(session: ProcessSession): void {
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    if (!session.running || session.finishing) return;
+    session.idleTimer = setTimeout(() => session.process?.kill("SIGKILL"), this.idleTimeoutMs);
+    session.idleTimer.unref();
   }
 
   private async waitForExit(session: ProcessSession, yieldTimeMs: number): Promise<void> {
@@ -382,7 +428,6 @@ export class ProcessSessionManager {
 
   private createSession(
     input: StartCommandInput,
-    logger?: ProcessRunLogger,
   ): ProcessSession {
     let resolveExit = (): void => undefined;
     const exitPromise = new Promise<void>((resolve) => {
@@ -399,7 +444,6 @@ export class ProcessSessionManager {
       running: true,
       exitPromise,
       resolveExit,
-      logger,
     };
   }
 
@@ -410,7 +454,7 @@ export class ProcessSessionManager {
       cwd: input.cwd,
       env: processEnvironment({
         workspaceId: input.workspaceId,
-        workspaceRoot: input.workspaceRoot,
+        workspaceRoot: input.workspaceRoot ?? input.cwd,
       }),
       stdio: "pipe",
       windowsHide: true,
@@ -423,8 +467,15 @@ export class ProcessSessionManager {
       kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
       resize: input.tty ? () => undefined : undefined,
     };
-    child.stdout.on("data", (data: Buffer) => this.append(session, data.toString("utf8")));
-    child.stderr.on("data", (data: Buffer) => this.append(session, data.toString("utf8")));
+    const onData = (data: Buffer) => {
+      if (!this.append(session, data.toString("utf8"))) {
+        child.stdout.pause();
+        child.stderr.pause();
+        this.drainOutput(session, () => { child.stdout.resume(); child.stderr.resume(); });
+      }
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
     child.on("error", (error) => this.append(session, `${error.message}\n`));
     child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
   }
@@ -437,7 +488,7 @@ export class ProcessSessionManager {
       cwd: input.cwd,
       env: processEnvironment({
         workspaceId: input.workspaceId,
-        workspaceRoot: input.workspaceRoot,
+        workspaceRoot: input.workspaceRoot ?? input.cwd,
       }),
       name: "xterm-256color",
       cols: session.columns,
@@ -446,37 +497,62 @@ export class ProcessSessionManager {
 
     session.process = {
       write: (data) => pty.write(data),
-      kill: (signal) => pty.kill(signal),
+      kill: (signal = "SIGTERM") => terminateProcessTree({
+        pid: pty.pid, kill: (requested) => { pty.kill(requested); return true; },
+      }, signal, true),
       resize: (columns, rows) => pty.resize(columns, rows),
     };
-    pty.onData((data) => this.append(session, data));
+    pty.onData((data) => {
+      if (!this.append(session, data)) {
+        pty.pause();
+        this.drainOutput(session, () => pty.resume());
+      }
+    });
     pty.onExit(({ exitCode, signal }) => {
       this.finish(session, exitCode, signal === 0 ? undefined : String(signal));
     });
   }
 
+  private drainOutput(session: ProcessSession, resume: () => void): void {
+    session.pauseGeneration = (session.pauseGeneration ?? 0) + 1;
+    if (session.drainPromise) return;
+    session.drainPromise = (async () => {
+      let generation: number;
+      do {
+        generation = session.pauseGeneration!;
+        await session.logger!.drain();
+      } while (session.running && !session.finishing && generation !== session.pauseGeneration);
+      if (session.running && !session.finishing) resume();
+    })().finally(() => { session.drainPromise = undefined; });
+  }
+
   private finish(session: ProcessSession, exitCode?: number, signal?: string): void {
-    if (!session.running) return;
+    if (!session.running || session.finishing) return;
+    session.finishing = true;
     session.running = false;
+    if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
+    if (session.lifetimeTimer) clearTimeout(session.lifetimeTimer);
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    session.cleanupTimer = session.lifetimeTimer = session.idleTimer = undefined;
     session.exitCode = exitCode;
     session.signal = signal;
     session.resolveExit();
-    if (session.logger) {
-      void session.logger.finish({ exitCode, signal });
-    }
     session.cleanupTimer = setTimeout(
       () => this.sessions.delete(session.id),
       this.completedSessionTtlMs,
     );
     session.cleanupTimer.unref();
+    session.flushPromise = session.logger?.finish({ exitCode, signal });
   }
 
-  private append(session: ProcessSession, output: string): void {
-    session.logger?.append(output);
+  private append(session: ProcessSession, output: string): boolean {
+    const ready = session.logger?.append(output) ?? true;
     session.buffer.append(output);
+    return ready;
   }
 
-  private consume(session: ProcessSession, maxOutputTokens?: number): ProcessSnapshot {
+  private async consume(session: ProcessSession, maxOutputTokens?: number): Promise<ProcessSnapshot> {
+    if (!session.running) await session.flushPromise;
     const limit = boundedInteger(maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
     const maxCharacters = Math.max(256, limit * 4);
     const buffered = session.buffer.drain(maxCharacters);

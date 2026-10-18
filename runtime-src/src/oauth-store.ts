@@ -39,6 +39,7 @@ function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boole
 
 export class SqliteOAuthStore {
   private readonly database: DatabaseHandle;
+  private nextTokenCleanup = 0;
 
   constructor(stateDir: string) {
     this.database = openDatabase(stateDir);
@@ -71,14 +72,30 @@ export class SqliteOAuthStore {
       response_types: client.response_types ?? ["code"],
     };
 
-    this.database.sqlite
-      .prepare("insert into oauth_clients (client_id, client_json, issued_at) values (?, ?, ?)")
-      .run(registered.client_id, JSON.stringify(registered), now);
+    this.database.sqlite.transaction(() => {
+      const count = (this.database.sqlite.prepare("select count(*) as count from oauth_clients").get() as { count: number }).count;
+      if (count >= 200) {
+        this.database.sqlite.prepare(`delete from oauth_clients where client_id in (
+          select client_id from oauth_clients as client
+          where not exists (select 1 from oauth_access_tokens where client_id = client.client_id and expires_at > ?)
+            and not exists (select 1 from oauth_refresh_tokens where client_id = client.client_id and expires_at > ?)
+          order by issued_at asc, rowid asc limit ?
+        )`).run(now, now, count - 199);
+        if ((this.database.sqlite.prepare("select count(*) as count from oauth_clients").get() as { count: number }).count >= 200) {
+          throw new InvalidRequestError("OAuth client registration limit of 200 reached; every client has live tokens");
+        }
+      }
+      this.database.sqlite
+        .prepare("insert into oauth_clients (client_id, client_json, issued_at) values (?, ?, ?)")
+        .run(registered.client_id, JSON.stringify(registered), now);
+    }).immediate();
 
     return registered;
   }
 
   saveAccessToken(tokenHash: string, record: PersistedAccessTokenRecord): void {
+    const now = Math.floor(Date.now() / 1000);
+    if (now >= this.nextTokenCleanup) this.deleteExpiredTokens(now);
     this.database.sqlite
       .prepare(
         `insert into oauth_access_tokens (token_hash, client_id, scopes_json, expires_at, resource)
@@ -120,6 +137,8 @@ export class SqliteOAuthStore {
   }
 
   saveRefreshToken(tokenHash: string, record: PersistedRefreshTokenRecord): void {
+    const now = Math.floor(Date.now() / 1000);
+    if (now >= this.nextTokenCleanup) this.deleteExpiredTokens(now);
     this.database.sqlite
       .prepare(
         `insert into oauth_refresh_tokens (token_hash, client_id, scopes_json, expires_at, resource)
@@ -182,8 +201,9 @@ export class SqliteOAuthStore {
   }
 
   private deleteExpiredTokens(nowSeconds: number): void {
-    this.database.sqlite.prepare("delete from oauth_access_tokens where expires_at < ?").run(nowSeconds);
-    this.database.sqlite.prepare("delete from oauth_refresh_tokens where expires_at < ?").run(nowSeconds);
+    this.nextTokenCleanup = nowSeconds + 3600;
+    this.database.sqlite.prepare("delete from oauth_access_tokens where expires_at <= ?").run(nowSeconds);
+    this.database.sqlite.prepare("delete from oauth_refresh_tokens where expires_at <= ?").run(nowSeconds);
   }
 }
 

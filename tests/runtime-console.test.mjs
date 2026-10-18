@@ -1,4 +1,7 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -209,6 +212,59 @@ test('Windows uses the shared job gate without invoking Linux systemd',{skip:pro
     assert.equal(calls,1);
     assert.equal(existsSync(path.join(state,'.runtime-switch-gate')),false);
   }finally{f.clean();}
+});
+test('runtime guard release retries rename contention and falls back after five failures',async(t)=>{
+  const f=fixture();
+  const originalRename=fs.renameSync;
+  const warnings=t.mock.method(console,'warn',()=>{});
+  let failures=2;
+  let attempts=0;
+  const rename=t.mock.method(fs,'renameSync',(source,destination)=>{
+    if(String(destination).includes('.runtime-switch-gate.released-')&&++attempts<=failures){
+      throw Object.assign(new Error('synthetic handle contention'),{code:'EBUSY'});
+    }
+    return originalRename(source,destination);
+  });
+  syncBuiltinESMExports();
+  try{
+    const state=path.join(f.root,'guard-release');
+    const gate=path.join(state,'.runtime-switch-gate');
+    for(failures of [2,5]){
+      attempts=0;
+      const result=await withRuntimeRestartGuard({stateDir:state},()=>({ok:true,status:200}));
+      assert.equal(result.ok,true);
+      assert.equal(attempts,failures===5?5:3);
+      assert.equal(existsSync(gate),false);
+    }
+    assert.equal(warnings.mock.callCount(),1);
+    failures=0;
+    assert.equal((await withRuntimeRestartGuard({stateDir:state},()=>({ok:true}))).ok,true);
+  }finally{rename.mock.restore();syncBuiltinESMExports();f.clean();}
+});
+test('macOS guard records the Runtime ps identity and fails closed on unavailable identity',async(t)=>{
+  const f=fixture();
+  const platform=Object.getOwnPropertyDescriptor(process,'platform');
+  Object.defineProperty(process,'platform',{...platform,value:'darwin'});
+  let result={status:0,stdout:'  synthetic process start  \n'};
+  const ps=t.mock.method(childProcess,'spawnSync',(command,args,options)=>{
+    assert.equal(command,'ps');
+    assert.deepEqual(args,['-p',String(process.pid),'-o','lstart=']);
+    assert.equal(options.timeout,2000);
+    return result;
+  });
+  syncBuiltinESMExports();
+  try{
+    const state=path.join(f.root,'guard-darwin');
+    for(const identity of ['ps:synthetic process start',null]){
+      if(identity===null)result={status:null,stdout:'',error:new Error('synthetic timeout')};
+      assert.equal((await withRuntimeRestartGuard({stateDir:state},()=>{
+        const owner=JSON.parse(readFileSync(path.join(state,'.runtime-switch-gate','owner.json'),'utf8'));
+        assert.equal(owner.processStartIdentity,identity);
+        return {ok:true};
+      })).ok,true);
+    }
+    assert.equal(ps.mock.callCount(),2);
+  }finally{ps.mock.restore();syncBuiltinESMExports();Object.defineProperty(process,'platform',platform);f.clean();}
 });
 test('Console refuses Runtime-affecting actions while durable jobs run, not Tunnel restart',async()=>{
   const f=fixture();

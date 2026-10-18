@@ -47,3 +47,24 @@ test("compact process logs keep full output while model preview stays bounded", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("process logger signals backpressure and flushes all bytes before completion", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-log-pressure-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const logger = await ProcessRunLogger.create({ command: "synthetic-output", cwd: root, workspaceRoot: root, root });
+  const chunk = "x".repeat(256 * 1024) + "\n";
+  let paused = false;
+  for (let index = 0; index < 8; index++) {
+    if (!logger.append(chunk)) { paused = true; await logger.drain(); }
+  }
+  assert.equal(paused, true);
+  const meta = await logger.finish({ exitCode: 0 });
+  const { readFile } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const stored = await readFile(meta.outputPath);
+  assert.equal(stored.toString(), chunk.repeat(8));
+  assert.equal(meta.outputBytes, stored.length);
+  assert.equal(meta.outputLines, 8);
+  assert.equal(meta.sha256, createHash("sha256").update(stored).digest("hex"));
+  assert.equal(meta.logError, null);
+});

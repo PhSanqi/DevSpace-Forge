@@ -144,7 +144,7 @@ export function writeDevspaceAuth(
 ): string {
   const filePath = devspaceAuthPath(env);
   mkdirSync(devspaceConfigDir(env), { recursive: true });
-  writeJsonFile(filePath, devspaceAuthConfigSchema.parse(auth), 0o600);
+  atomicWrite(filePath, serializeConfig(devspaceAuthConfigSchema.parse(auth)), 0o600);
   return filePath;
 }
 
@@ -224,7 +224,7 @@ function parseJsoncConfig(source: string, filePath: string): DevspaceConfig {
   }
 }
 
-function serializeConfig(config: DevspaceConfig): string {
+function serializeConfig(config: unknown): string {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
@@ -253,10 +253,6 @@ function readJsonFile<T>(filePath: string, schema: z.ZodType<T>): T {
   } catch (error) {
     throw fileError("read", filePath, error);
   }
-}
-
-function writeJsonFile(filePath: string, value: unknown, mode: number): void {
-  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode });
 }
 
 function fileError(action: "read" | "migrate", filePath: string, error: unknown): Error {

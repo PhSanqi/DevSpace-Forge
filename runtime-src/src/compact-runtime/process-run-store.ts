@@ -1,4 +1,5 @@
-import { closeSync, openSync, writeSync } from "node:fs";
+import { createWriteStream, openSync, type WriteStream } from "node:fs";
+import { finished } from "node:stream/promises";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -45,7 +46,7 @@ export class ProcessRunLogger {
   private readonly workspaceRoot: string;
   private readonly startedAtMs: number;
   private readonly metaPath: string;
-  private readonly fd: number;
+  private readonly stream: WriteStream;
   private readonly hash = createHash("sha256");
   private bytes = 0;
   private newlines = 0;
@@ -72,7 +73,8 @@ export class ProcessRunLogger {
     this.root = input.root;
     this.outputPath = input.outputPath;
     this.metaPath = input.metaPath;
-    this.fd = input.fd;
+    this.stream = createWriteStream(input.outputPath, { fd: input.fd, autoClose: true });
+    this.stream.on("error", error => { this.writeError ??= errorMessage(error); });
   }
 
   static async create(input: {
@@ -104,27 +106,32 @@ export class ProcessRunLogger {
     });
   }
 
-  append(output: string): void {
-    if (!output || this.closed || this.writeError) return;
+  append(output: string): boolean {
+    if (!output || this.closed || this.writeError) return true;
     const buffer = Buffer.from(output, "utf8");
-    try {
-      writeSync(this.fd, buffer, 0, buffer.length);
-    } catch (error) {
-      this.writeError = errorMessage(error);
-      try {
-        closeSync(this.fd);
-      } catch {
-        // Best effort: command execution must continue if logging fails.
-      }
-      this.closed = true;
-      return;
-    }
+    const ready = this.stream.write(buffer);
     this.hash.update(buffer);
     this.bytes += buffer.length;
     if (buffer.length > 0) this.lastByte = buffer[buffer.length - 1] ?? null;
     for (let index = 0; index < buffer.length; index += 1) {
       if (buffer[index] === 0x0a) this.newlines += 1;
     }
+    return ready;
+  }
+
+  async drain(): Promise<void> {
+    if (!this.stream.writableNeedDrain || this.stream.destroyed) return;
+    await new Promise<void>(resolve => {
+      const done = () => {
+        this.stream.off("drain", done);
+        this.stream.off("error", done);
+        this.stream.off("close", done);
+        resolve();
+      };
+      this.stream.once("drain", done);
+      this.stream.once("error", done);
+      this.stream.once("close", done);
+    });
   }
 
   snapshot(): ProcessRunLoggerSnapshot {
@@ -145,12 +152,10 @@ export class ProcessRunLogger {
     signal?: string;
   }): Promise<ProcessRunMetadata> {
     if (!this.closed) {
-      try {
-        closeSync(this.fd);
-      } catch (error) {
-        this.writeError ??= errorMessage(error);
-      }
       this.closed = true;
+      this.stream.end();
+      try { await finished(this.stream, { cleanup: true }); }
+      catch (error) { this.writeError ??= errorMessage(error); }
     }
     const finishedAtMs = Date.now();
     const snap = this.snapshot();

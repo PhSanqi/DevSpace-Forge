@@ -34,9 +34,8 @@ function randomToken(): string {
 }
 
 function safeEquals(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  if (left.byteLength !== right.byteLength) return false;
+  const left = createHash("sha256").update(a).digest();
+  const right = createHash("sha256").update(b).digest();
   return timingSafeEqual(left, right);
 }
 
@@ -114,6 +113,8 @@ function requestedScopesAllowed(requested: string[], supported: string[]): boole
 
 export class SingleUserOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
+  private readonly loginFailures = new Map<string, { count: number; until: number }>();
+  private globalFailures = { count: 0, until: 0 };
   private readonly codes = new Map<string, AuthorizationCodeRecord>();
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
@@ -158,8 +159,24 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     }
 
     const providedToken = String(res.req.body?.owner_token ?? "");
-    if (!safeEquals(providedToken, this.config.ownerToken)) {
-      res.status(401).setHeader("Content-Type", "text/html; charset=utf-8");
+    const now = Date.now();
+    const clientIp = res.req.ip ?? res.req.socket?.remoteAddress ?? "unknown";
+    const previous = this.loginFailures.get(clientIp);
+    const blocked = (previous?.until ?? 0) > now || this.globalFailures.until > now;
+    const accepted = safeEquals(providedToken, this.config.ownerToken);
+    if (blocked || !accepted) {
+      if (!blocked) {
+        // Expire quiet clients and bound memory even when source addresses vary.
+        for (const [ip, failure] of this.loginFailures) {
+          if (failure.until + 15 * 60_000 < now) this.loginFailures.delete(ip);
+        }
+        if (this.loginFailures.size >= 1024) this.loginFailures.delete(this.loginFailures.keys().next().value!);
+        const count = Math.min(10, (previous && previous.until + 15 * 60_000 >= now ? previous.count : 0) + 1);
+        this.loginFailures.set(clientIp, { count, until: now + Math.min(60_000, 1000 * 2 ** (count - 1)) });
+        const globalCount = this.globalFailures.until + 15 * 60_000 < now ? 1 : Math.min(10, this.globalFailures.count + 1);
+        this.globalFailures = { count: globalCount, until: now + Math.min(60_000, 1000 * 2 ** (globalCount - 1)) };
+      }
+      res.status(blocked ? 429 : 401).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(
         formHtml({
           error: "The Owner password was not accepted.",
@@ -172,6 +189,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       return;
     }
 
+    this.loginFailures.delete(clientIp);
     const code = `code-${randomUUID()}`;
     this.codes.set(code, {
       clientId: client.client_id,

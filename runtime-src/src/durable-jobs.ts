@@ -4,7 +4,6 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
-  rmdirSync,
   statSync,
   readSync,
   readFileSync,
@@ -16,6 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import { acquireSwitchGate, releaseSwitchGate, readSwitchGateOwner, recoverSwitchGate, sweepSwitchGateDebris } from "./runtime-switch-gate.js";
 import { terminateProcessTree, processStartIdentity, ownedProcessState } from "./process-platform.js";
 
 export interface JobRecord {
@@ -345,24 +345,23 @@ export class DurableJobManager {
 
   private switchGateBlocks(): boolean {
     const gate = join(this.jobsDir, "..", ".runtime-switch-gate");
+    sweepSwitchGateDebris(gate);
     if (!existsSync(gate)) return false;
     try {
-      const ownerPath = join(gate, "owner.json");
-      const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as {
-        pid: number; processStartIdentity: string | null; createdAt: number;
-      };
-      if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(owner.createdAt) ||
-        !(owner.processStartIdentity === null || typeof owner.processStartIdentity === "string") ||
-        ownedProcessState(owner.pid, owner.processStartIdentity) !== "inactive") return true;
-      // Race with a late runner: only one of the two guarded claims can win.
-      const now = Math.floor(Date.now() / 1000);
-      this.db.prepare(`UPDATE durable_jobs SET status = 'failed', error = ?, ended_at = ?, last_heartbeat = ?
-        WHERE status = 'pending' AND pid IS NULL
-        AND error = 'Launch intent persisted; runner start not yet confirmed'`)
-        .run("Launch abandoned before runner claim; starter owner is inactive", now, now);
-      unlinkSync(ownerPath);
-      rmdirSync(gate);
-      return false;
+      const owner = readSwitchGateOwner(gate);
+      if (ownedProcessState(owner.pid, owner.processStartIdentity) !== "inactive") return true;
+      const abandoned = this.db.prepare(`SELECT id FROM durable_jobs WHERE status = 'pending' AND pid IS NULL
+        AND error = 'Launch intent persisted; runner start not yet confirmed'`).all() as { id: string }[];
+      return !recoverSwitchGate(gate, owner, () => {
+        // Race with a late runner: only one of the two guarded claims can win.
+        const now = Math.floor(Date.now() / 1000);
+        const update = this.db.prepare(`UPDATE durable_jobs SET status = 'failed', error = ?, ended_at = ?, last_heartbeat = ?
+          WHERE id = ? AND status = 'pending' AND pid IS NULL
+          AND error = 'Launch intent persisted; runner start not yet confirmed'`);
+        this.db.transaction(() => {
+          for (const row of abandoned) update.run("Launch abandoned before runner claim; starter owner is inactive", now, now, row.id);
+        })();
+      });
     } catch { return true; }
   }
 
@@ -380,15 +379,13 @@ export class DurableJobManager {
       .run(id, params.workspaceId, params.workspaceRoot, params.command, params.workingDirectory,
         status, logPath, now, now, maxRuntime, reason, status === "failed" ? now : null);
     const gate = join(this.jobsDir, "..", ".runtime-switch-gate");
-    this.switchGateBlocks();
-    try { mkdirSync(gate); }
-    catch {
+    const blocked = this.switchGateBlocks();
+    const nonce = blocked ? null : acquireSwitchGate(gate, processStartIdentity(process.pid));
+    if (!nonce) {
       insert("failed", "Job start blocked by the runtime switch gate.");
       return this.getJob(id)!;
     }
     try {
-      writeFileSync(join(gate, "owner.json"), JSON.stringify({ pid: process.pid,
-        processStartIdentity: processStartIdentity(process.pid), createdAt: Date.now() }), { mode: 0o600, flag: "wx" });
       // No launch or hand-off is allowed until this blocking row is durable.
       insert("pending", "Launch intent persisted; runner start not yet confirmed");
       let attempted = false;
@@ -451,7 +448,7 @@ export class DurableJobManager {
       }
       return this.getJob(id)!;
     } finally {
-      try { unlinkSync(join(gate, "owner.json")); rmdirSync(gate); } catch {}
+      releaseSwitchGate(gate, nonce);
     }
   }
 

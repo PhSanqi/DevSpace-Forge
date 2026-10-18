@@ -35,6 +35,17 @@ jobs:
         with:
           path: dist/.offline-cache/video
           key: video-sidecar-${{ runner.os }}-n8.1.3-16-ge0a878dd70-20261009
+      # The installed-package smoke test runs a cold `npm install` of the packed
+      # tarball (~6-7 min on Windows). Caching npm's download cache keeps the
+      # real install/resolve path while skipping repeated registry downloads.
+      - name: Cache npm download cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/AppData/Local/npm-cache
+          key: npm-cache-${{ runner.os }}-${{ hashFiles('runtime-src/package.json', 'runtime-src/pnpm-lock.yaml') }}
+          restore-keys: npm-cache-${{ runner.os }}-
       - name: Install embedded Runtime dependencies
         working-directory: runtime-src
         run: pnpm install --frozen-lockfile

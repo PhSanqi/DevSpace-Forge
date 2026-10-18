@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -117,6 +117,9 @@ test("readVideoForModel fails closed for unsupported paths and invalid intervals
   };
 
   await assert.rejects(readVideoForModel(textPath, {}, backend), /only supports/);
+  for (const unsafe of ["https://example.com/video.mp4", "file:/tmp/video.mp4", "pipe:0", "-sample.mp4", "//example.com/video.mp4"]) {
+    await assert.rejects(readVideoForModel(unsafe, {}, backend), /local file path/);
+  }
   await assert.rejects(
     readVideoForModel(videoPath, { startSeconds: 9, endSeconds: 8 }, backend),
     /greater than start_seconds/,
@@ -165,7 +168,7 @@ test("readVideoForModel avoids sampling beyond the last nominal frame", async (t
 });
 
 
-test("readVideoForModel removes stale frame directories left by dead processes", async (t) => {
+test("readVideoForModel isolates private calls and preserves unowned legacy directories", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devspace-video-recovery-test-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
   const prior = process.env.DEVSPACE_VIDEO_TEMP_DIR;
@@ -180,15 +183,57 @@ test("readVideoForModel removes stale frame directories left by dead processes",
   await writeFile(path.join(stale, "frame.jpg"), "stale");
   const videoPath = path.join(root, "sample.mp4");
   await writeFile(videoPath, Buffer.from("fake-video-container"));
+  const callDirs = new Set<string>();
   const backend: VideoBackend = {
     identity: { provider: "test", ffmpegVersion: "1", license: "test", sourceUrl: "https://example.invalid" },
     async probe() { return { durationSeconds: 0.05, width: 64, height: 36, hasAudio: false }; },
     async extractFrame(_input, _timestamp, output) {
+      const directory = path.dirname(output);
+      callDirs.add(directory);
+      assert.equal(path.dirname(directory), root);
+      assert.match(path.basename(directory), /^call-/);
+      if (process.platform !== "win32") assert.equal((await stat(directory)).mode & 0o777, 0o700);
       await sharp({ create: { width: 8, height: 8, channels: 3, background: "#ffffff" } }).jpeg().toFile(output);
     },
   };
 
   const result = await readVideoForModel(videoPath, {}, backend);
   assert.equal(result.frames.length, 1);
-  await assert.rejects(access(path.join(root, "process-99999999")));
+  await Promise.all([readVideoForModel(videoPath, {}, backend), readVideoForModel(videoPath, {}, backend)]);
+  assert.equal(callDirs.size, 3);
+  for (const directory of callDirs) await assert.rejects(access(directory));
+  await access(path.join(stale, "frame.jpg"));
+});
+
+test("packaged video executables receive only absolute local inputs and the file protocol", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devspace-video-protocol-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { chmod, readFile } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const jpeg = path.join(root, "fixture.jpg");
+  await sharp({ create: { width: 8, height: 8, channels: 3, background: "#ffffff" } }).jpeg().toFile(jpeg);
+  const records = path.join(root, "args.jsonl");
+  const script = `#!${process.execPath}\nconst fs=require('node:fs');const args=process.argv.slice(2);if(args[0]==='-version'){console.log('fixture');process.exit(0)}fs.appendFileSync(${JSON.stringify(records)},JSON.stringify(args)+'\\n');if(process.argv[1].endsWith('ffprobe'))console.log(JSON.stringify({format:{duration:'0.05'},streams:[{codec_type:'video',width:8,height:8}]}));else fs.copyFileSync(${JSON.stringify(jpeg)},args.at(-1));\n`;
+  for (const name of ["ffprobe", "ffmpeg"]) {
+    await writeFile(path.join(root, name), script);
+    await chmod(path.join(root, name), 0o700);
+  }
+  const hash = createHash("sha256").update(script).digest("hex");
+  await writeFile(path.join(root, "manifest.json"), JSON.stringify({
+    schema_version: 1, provider: "test", ffmpeg_version: "test", license: "test", source_url: "https://example.com/source",
+    platforms: { "linux-x64": { ffprobe: { path: "ffprobe", sha256: hash }, ffmpeg: { path: "ffmpeg", sha256: hash } } },
+  }));
+  const previous = process.env.DEVSPACE_VIDEO_SIDECAR_DIR;
+  process.env.DEVSPACE_VIDEO_SIDECAR_DIR = root;
+  t.after(() => { if (previous === undefined) delete process.env.DEVSPACE_VIDEO_SIDECAR_DIR; else process.env.DEVSPACE_VIDEO_SIDECAR_DIR = previous; });
+  const video = path.join(root, "sample.mp4");
+  await writeFile(video, "synthetic-container");
+  const result = await readVideoForModel(path.relative(process.cwd(), video));
+  assert.equal(result.frames.length, 1);
+  const args = (await readFile(records, "utf8")).trim().split("\n").map(line => JSON.parse(line) as string[]);
+  assert.equal(args.length, 2);
+  for (const invocation of args) {
+    assert.equal(invocation[invocation.indexOf("-protocol_whitelist") + 1], "file");
+    assert.ok(invocation.includes(video));
+  }
 });
