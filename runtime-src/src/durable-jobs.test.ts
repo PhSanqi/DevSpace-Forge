@@ -978,7 +978,8 @@ test("processStartIdentity returns stable windows:<ticks> matching PowerShell on
     "-NonInteractive",
     "-Command",
     `$ErrorActionPreference='Stop'; (Get-Process -Id ${process.pid}).StartTime.ToUniversalTime().Ticks.ToString()`,
-  ], { encoding: "utf8", windowsHide: true, timeout: 5_000 });
+  // Reference value only: a cold PowerShell start on CI runners can exceed 5 s.
+  ], { encoding: "utf8", windowsHide: true, timeout: 30_000 });
   assert.equal(result.status, 0, `PowerShell command failed: ${result.stderr}`);
   const ticks = result.stdout?.trim();
   assert.ok(ticks && /^\d+$/.test(ticks), `Expected numeric ticks from PowerShell, got: ${ticks}`);
