@@ -18,6 +18,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # test.ps1 runs the root suites, including the privacy audit that reads
+          # the real PR head (HEAD^2) of GitHub's synthetic merge ref.
+          fetch-depth: 2
       - uses: pnpm/action-setup@v4
         with:
           version: 11.25.0
