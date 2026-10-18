@@ -110,8 +110,8 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
                 workspaceId,
                 path: input.path,
               },
-              response.content,
               startedAt,
+              response.failure,
             );
             return response;
           }
@@ -203,8 +203,8 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
                 workspaceId,
                 path: input.path,
               },
-              response.content,
               startedAt,
+              response.failure,
             );
             return response;
           }
@@ -301,8 +301,8 @@ function registerShellTool(context: ToolRegistrationContext): void {
                 command: input.command,
                 commandLength: input.command.length,
               },
-              response.content,
               startedAt,
+              response.failure,
             );
             return response;
           }

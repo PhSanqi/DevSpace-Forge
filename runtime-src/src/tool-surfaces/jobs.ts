@@ -11,7 +11,7 @@ import { type ToolRegistrationContext, workspaceIdDescription } from "./types.js
 
 const jobManagers = new Map<string, DurableJobManager>();
 
-function getJobManager(stateDir: string): DurableJobManager {
+export function getJobManager(stateDir: string): DurableJobManager {
   const key = path.resolve(stateDir);
   let manager = jobManagers.get(key);
   if (!manager) {
@@ -67,8 +67,8 @@ export function registerDurableJobTools(context: ToolRegistrationContext): void 
 
       const diag = getRuntimeDiagnostics(workspaceRoot);
       const jobs = jobManager().listJobs(workspace_id, 100, workspaceRoot);
-      const activeJobs = jobs.filter((j) => j.status === "running").length;
-      const completedJobs = jobs.filter((j) => j.status !== "running").length;
+      const activeJobs = jobs.filter((j) => ["pending", "running", "cancelling"].includes(j.status)).length;
+      const completedJobs = jobs.filter((j) => !["pending", "running", "cancelling"].includes(j.status)).length;
 
       const safeAllowedRoots = config.allowedRoots || [];
       const info = {
@@ -399,7 +399,7 @@ export function registerDurableJobTools(context: ToolRegistrationContext): void 
             structuredContent: { result: `Error: Job ${job_id} not found.` },
           };
         }
-        if (record.status !== "running") {
+        if (!["pending", "running", "cancelling"].includes(record.status)) {
           const logs = jobManager().readLogs(job_id, { tail: true, maxBytes: 8192 });
           const summary = `Job ${job_id} finished with status: ${record.status}${record.exitCode !== null ? ` (exit code: ${record.exitCode})` : ""}.\n\n--- Output Tail ---\n${logs.content || "(no output)"}`;
           return {

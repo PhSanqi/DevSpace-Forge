@@ -16,6 +16,7 @@ export type ToolResponse<TDetails = unknown> = {
   content: McpContent[];
   details?: TDetails;
   isError?: boolean;
+  failure?: { errorClass: string; exitCode?: number; signal?: string };
 };
 
 interface ToolContext {
@@ -53,7 +54,10 @@ async function runTool<TInput, TDetails = unknown>(
       details: result.details,
     };
   } catch (error) {
-    return { content: formatToolError(error), isError: true };
+    const message = error instanceof Error ? error.message : "";
+    const exit = /(?:^|\n)Command exited with code (-?\d+)\s*$/.exec(message);
+    return { content: formatToolError(error), isError: true,
+      failure: { errorClass: "ToolExecutionError", ...(exit ? { exitCode: Number(exit[1]) } : {}) } };
   }
 }
 

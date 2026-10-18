@@ -6,9 +6,10 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, u
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
+import childProcess, { spawn, spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { DurableJobManager, canUseSystemdUserJobIsolation, durableJobSystemdUnitName } from "./durable-jobs.js";
+import { ownedProcessState, processStartIdentity } from "./process-platform.js";
 import { resolveProjectEnvironment, getRuntimeDiagnostics } from "./runtime-env.js";
 
 function delay(ms: number): Promise<void> {
@@ -36,6 +37,58 @@ function delayedNodeCommand(delayMs = 600): string {
     : JSON.stringify(process.execPath);
   return `${node} -e "setTimeout(() => console.log('restart-done'), ${delayMs})"`;
 }
+
+test("launch INSERT failure starts nothing; post-launch persistence failure remains blocking until confirmed stopped", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const state = mkdtempSync(join(tmpdir(), "devspace-launch-order-"));
+  const { DurableJobManager: LaunchManager } = await import(new URL("./durable-jobs.ts?launch-order", import.meta.url).href) as typeof import("./durable-jobs.js");
+  const manager = new LaunchManager(state);
+  const db = new Database(join(state, "jobs", "jobs.sqlite"));
+  let launched = 0;
+  let active = true;
+  const original = childProcess.spawnSync;
+  t.mock.method(childProcess, "spawnSync", ((file: string, args: string[]) => {
+    if (file === "systemd-run" && !args.includes("--version")) {
+      const row = db.prepare("SELECT status, error FROM durable_jobs").get() as {status: string; error: string};
+      assert.equal(row.status, "pending", "row must exist before launch");
+      assert.match(row.error, /Launch intent/);
+      launched++;
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (file === "systemd-run" || file === "systemctl") {
+      if (args.includes("is-active")) return { status: active ? 0 : 3, stdout: active ? "active" : "inactive", stderr: "" };
+      if (args.includes("MainPID")) return { status: 0, stdout: "", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    return original(file, args);
+  }) as typeof spawnSync);
+  syncBuiltinESMExports();
+  try {
+    // The separately loaded module probes the mocked supervisor, not the real bus.
+    db.exec("CREATE TRIGGER reject_insert BEFORE INSERT ON durable_jobs BEGIN SELECT RAISE(FAIL, 'synthetic insert failure'); END");
+    assert.throws(() => manager.startJob({ workspaceId: "test", workspaceRoot: state,
+      workingDirectory: state, command: "echo safe" }), /synthetic insert failure/);
+    assert.equal(launched, 0);
+    assert.deepEqual(db.prepare("SELECT COUNT(*) AS n FROM durable_jobs").get(), { n: 0 });
+    db.exec("DROP TRIGGER reject_insert");
+    db.exec(`CREATE TRIGGER reject_running BEFORE UPDATE ON durable_jobs
+      WHEN NEW.status = 'running' BEGIN SELECT RAISE(FAIL, 'synthetic update failure'); END`);
+    const job = manager.startJob({ workspaceId: "test", workspaceRoot: state, workingDirectory: state, command: "echo safe" });
+    assert.equal(job.status, "pending");
+    assert.equal(launched, 1);
+    assert.match(job.error ?? "", /cleanup unconfirmed/);
+    assert.equal(manager.pruneCompleted(Number.MAX_SAFE_INTEGER), 0, "pending rows must never be pruned");
+    manager.reconcile();
+    assert.equal(manager.getJob(job.id)?.status, "pending");
+    active = false;
+    manager.reconcile();
+    assert.equal(manager.getJob(job.id)?.status, "failed");
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    db.close(); manager.close(); rmSync(state, { recursive: true, force: true });
+  }
+});
 
 test("DurableJobManager: malformed and unknown handles never access metadata", (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-job-handles-"));
@@ -81,7 +134,9 @@ test("DurableJobManager: malformed and unknown handles never access metadata", (
   }
 });
 
-test("DurableJobManager: starts, tracks, and reads logs from detached job", async () => {
+test("DurableJobManager: starts, tracks, and reads logs from detached job", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-test-"));
   const mgr = new DurableJobManager(tempDir);
 
@@ -117,7 +172,9 @@ test("DurableJobManager: starts, tracks, and reads logs from detached job", asyn
   }
 });
 
-test("DurableJobManager: preserves explicit environment through the job supervisor", async () => {
+test("DurableJobManager: preserves explicit environment through the job supervisor", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-env-test-"));
   const mgr = new DurableJobManager(tempDir);
   try {
@@ -359,7 +416,7 @@ test("DurableJobManager: a failed systemd-run never falls back or leaves an envi
 });
 
 test("DurableJobManager: reaps only stale inactive launch hand-offs outside the launch gate", {
-  skip: process.platform !== "linux",
+  skip: !canUseSystemdUserJobIsolation(),
 }, () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-orphan-test-"));
   const mgr = new DurableJobManager(tempDir);
@@ -413,7 +470,7 @@ test("DurableJobManager: ambiguous systemd launch stays tracked until unit exits
   writeFileSync(join(fakeBin, "systemd-run"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
   writeFileSync(join(fakeBin, "systemctl"), [
     "#!/bin/sh", "case \"$*\" in",
-    "  *is-active*) if [ \"$FAKE_UNIT_ACTIVE\" = 1 ]; then exit 0; elif [ \"$FAKE_UNIT_ACTIVE\" = unknown ]; then exit 1; else exit 3; fi ;;",
+    "  *is-active*) if [ \"$FAKE_UNIT_ACTIVE\" = 1 ]; then exit 0; elif [ \"$FAKE_UNIT_ACTIVE\" = unknown ]; then exit 1; else echo inactive; exit 3; fi ;;",
     "  *show*) echo 0; exit 0 ;;",
     "  *stop*) exit 1 ;;",
     "esac", "exit 1", "",
@@ -428,12 +485,12 @@ test("DurableJobManager: ambiguous systemd launch stays tracked until unit exits
       workspaceId: "uncertain_ws", workspaceRoot: process.cwd(),
       command: shellCommands("echo must-not-run"), workingDirectory: process.cwd(),
     });
-    assert.equal(job.status, "running", "a potentially live unit must block rollback");
-    assert.match(job.error ?? "", /confirmation failed/);
+    assert.equal(job.status, "pending", "an unconfirmed launch must block rollback");
+    assert.match(job.error ?? "", /cleanup unconfirmed/);
     assert.equal(readdirSync(join(tempDir, "jobs", "meta")).filter(name => name.endsWith(".env.json")).length, 1);
     process.env.FAKE_UNIT_ACTIVE = "unknown";
     mgr.reconcile();
-    assert.equal(mgr.getJob(job.id)?.status, "running", "a failed status query must not clear a possibly active unit");
+    assert.equal(mgr.getJob(job.id)?.status, "pending", "a failed status query must not clear a possibly active unit");
     process.env.FAKE_UNIT_ACTIVE = "0";
     mgr.reconcile();
     assert.equal(mgr.getJob(job.id)?.status, "failed");
@@ -456,7 +513,7 @@ test("DurableJobManager: unconfirmed cancel and timeout remain active until stop
   mkdirSync(fakeBin);
   writeFileSync(join(fakeBin, "systemctl"), [
     "#!/bin/sh", 'case "$*" in',
-    '  *is-active*) case "$FAKE_UNIT_ACTIVE" in 1) exit 0 ;; unknown) exit 1 ;; *) exit 3 ;; esac ;;',
+    '  *is-active*) case "$FAKE_UNIT_ACTIVE" in 1) exit 0 ;; unknown) exit 1 ;; stopping) echo deactivating; exit 3 ;; *) echo inactive; exit 3 ;; esac ;;',
     '  *stop*) exit 1 ;;',
     "esac", "exit 1", "",
   ].join("\n"), { mode: 0o700 });
@@ -492,6 +549,9 @@ test("DurableJobManager: unconfirmed cancel and timeout remain active until stop
     mgr.reconcile();
     assert.equal(mgr.getJob(ids.timeout)?.status, "running", "timeout alone is not proof of exit");
     assert.match(mgr.getJob(ids.timeout)?.error ?? "", /maxRuntimeSeconds/);
+    process.env.FAKE_UNIT_ACTIVE = "stopping";
+    mgr.reconcile();
+    assert.equal(mgr.getJob(ids.cancel)?.status, "running", "deactivating is not a confirmed exit");
     process.env.FAKE_UNIT_ACTIVE = "unknown";
     mgr.reconcile();
     assert.equal(mgr.getJob(ids.cancel)?.status, "running", "unknown unit state remains blocking");
@@ -515,7 +575,9 @@ test("DurableJobManager: unconfirmed cancel and timeout remain active until stop
   }
 });
 
-test("DurableJobManager: cancels running job and updates record", async () => {
+test("DurableJobManager: cancels running job and updates record", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-cancel-test-"));
   const mgr = new DurableJobManager(tempDir);
 
@@ -539,7 +601,9 @@ test("DurableJobManager: cancels running job and updates record", async () => {
   }
 });
 
-test("DurableJobManager: reconnect preserves job handle and confirms cancellation", async () => {
+test("DurableJobManager: reconnect preserves job handle and confirms cancellation", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-reconnect-cancel-test-"));
   let first: DurableJobManager | undefined;
   let second: DurableJobManager | undefined;
@@ -577,7 +641,9 @@ test("DurableJobManager: reconnect preserves job handle and confirms cancellatio
   }
 });
 
-test("DurableJobManager: log pagination with maxLines preserves nextOffset", async () => {
+test("DurableJobManager: log pagination with maxLines preserves nextOffset", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-pagination-test-"));
   const mgr = new DurableJobManager(tempDir);
 
@@ -608,7 +674,9 @@ test("DurableJobManager: log pagination with maxLines preserves nextOffset", asy
   }
 });
 
-test("DurableJobManager: prunes completed jobs after retention", async () => {
+test("DurableJobManager: prunes completed jobs after retention", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-retention-test-"));
   const mgr = new DurableJobManager(tempDir, {
     completedRetentionSeconds: 60,
@@ -641,7 +709,9 @@ test("DurableJobManager: prunes completed jobs after retention", async () => {
   }
 });
 
-test("DurableJobManager: reconciles a detached job after manager restart", async () => {
+test("DurableJobManager: reconciles a detached job after manager restart", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-restart-test-"));
   let first: DurableJobManager | undefined;
   let second: DurableJobManager | undefined;
@@ -723,5 +793,150 @@ test("Runtime environment normalization and LTS alias discovery", () => {
     process.env.HOME = origHome;
     rmSync(tempWs, { recursive: true, force: true });
     rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+for (const mode of ["timeout", "success", "cancel"] as const) {
+  test(`runner owns ${mode} terminal persistence without a Runtime manager`, async () => {
+    const state = mkdtempSync(join(tmpdir(), "devspace-runner-owner-"));
+    const dbPath = join(state, "jobs.sqlite");
+    const db = new Database(dbPath);
+    const id = "job_eeeeeeeeeeeeeeee";
+    const marker = join(state, `${id}.exit`);
+    const runner = fileURLToPath(new URL("./durable-job-runner.ts", import.meta.url));
+    const node = process.platform === "win32" ? `"${process.execPath}"` : JSON.stringify(process.execPath);
+    const command = mode === "timeout" ? `${node} -e "setInterval(()=>{},100)"` :
+      `${node} -e "setTimeout(()=>process.exit(0),500)"`;
+    let child: ReturnType<typeof spawn> | undefined;
+    try {
+      db.pragma("journal_mode = WAL");
+      db.exec(`CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT, error TEXT,
+        created_at INTEGER, started_at INTEGER, max_runtime_seconds REAL, pid INTEGER, process_identity TEXT,
+        exit_code INTEGER, signal TEXT, ended_at INTEGER, last_heartbeat INTEGER)`);
+      db.prepare("INSERT INTO durable_jobs (id,status,created_at,max_runtime_seconds) VALUES (?, 'pending', ?, ?)")
+        .run(id, Math.floor(Date.now() / 1000), mode === "timeout" ? 2 : 30);
+      child = spawn(process.execPath, ["--import", "tsx", runner, marker, command, "", dbPath, id],
+        { cwd: process.cwd(), stdio: "ignore", windowsHide: true });
+      const closed = new Promise<void>((resolve, reject) => { child!.once("close", () => resolve()); child!.once("error", reject); });
+      if (mode === "cancel") {
+        for (let i = 0; i < 100; i++) {
+          const row = db.prepare("SELECT status FROM durable_jobs").get() as {status: string};
+          if (row.status === "running") break;
+          await delay(20);
+        }
+        // Simulate cancellation arriving just as a successful command exits.
+        db.prepare("UPDATE durable_jobs SET error = 'Cancellation requested; process exit not yet confirmed'").run();
+      }
+      await closed;
+      const row = db.prepare("SELECT * FROM durable_jobs").get() as {status: string; error: string; pid: number; process_identity: string; ended_at: number};
+      assert.equal(row.status, mode === "timeout" ? "failed" : mode === "cancel" ? "cancelled" : "succeeded");
+      assert.ok(row.ended_at);
+      assert.ok(row.process_identity, "runner must persist its own start identity");
+      if (mode === "timeout") assert.match(row.error, /maxRuntimeSeconds/);
+      assert.ok(existsSync(marker), "completion marker remains available for recovery");
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      db.close(); rmSync(state, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a recycled PID is not owned, cannot keep an inactive Linux unit alive, and is never signalled", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const state = mkdtempSync(join(tmpdir(), "devspace-pid-reuse-"));
+  const manager = new DurableJobManager(state);
+  const db = new Database(join(state, "jobs", "jobs.sqlite"));
+  const id = "job_dddddddddddddddd";
+  const realKill = process.kill;
+  const signals: unknown[] = [];
+  const original = childProcess.spawnSync;
+  t.mock.method(childProcess, "spawnSync", ((file: string, args: string[]) => file === "systemctl"
+    ? { status: args.includes("is-active") ? 3 : 1, stdout: "inactive", stderr: "" } : original(file, args)) as typeof spawnSync);
+  t.mock.method(process, "kill", ((pid: number, signal: NodeJS.Signals | number) => {
+    if (signal !== 0) { signals.push([pid, signal]); return true; }
+    return realKill(pid, signal);
+  }) as typeof process.kill);
+  syncBuiltinESMExports();
+  try {
+    assert.ok(processStartIdentity(process.pid));
+    assert.equal(ownedProcessState(process.pid, "linux:synthetic-mismatch"), "inactive");
+    assert.equal(ownedProcessState(process.pid, null), "unknown");
+    db.prepare(`INSERT INTO durable_jobs (id,workspace_id,workspace_root,command,working_directory,
+      pid,process_identity,status,log_path,created_at,last_heartbeat,max_runtime_seconds)
+      VALUES (?, 'test', ?, 'echo safe', ?, ?, 'linux:synthetic-mismatch', 'running', ?, ?, ?, 60)`)
+      .run(id, state, state, process.pid, join(state, "log"), Math.floor(Date.now()/1000), Math.floor(Date.now()/1000));
+    assert.equal(manager.cancelJob(id).record?.status, "cancelled");
+    assert.deepEqual(signals, []);
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    db.close(); manager.close(); rmSync(state, {recursive: true, force: true});
+  }
+});
+
+test("terminal publication preserves persisted cancel/timeout intent against late success", async () => {
+  const { publishJobCompletion, CANCELLATION_PENDING, TIMEOUT_REASON } = await import("./durable-jobs.js");
+  const state = mkdtempSync(join(tmpdir(), "devspace-terminal-intent-"));
+  const manager = new DurableJobManager(state);
+  const db = new Database(join(state, "jobs", "jobs.sqlite"));
+  const id = "job_ffffffffffffffff";
+  try {
+    db.prepare(`INSERT INTO durable_jobs (id,workspace_id,workspace_root,command,working_directory,
+      status,log_path,created_at,last_heartbeat,max_runtime_seconds)
+      VALUES (?, 'test', ?, 'echo safe', ?, 'running', ?, 1, 1, 60)`)
+      .run(id, state, state, join(state, "log"));
+    for (const status of ["pending", "running", "cancelling"]) {
+      for (const error of [null, CANCELLATION_PENDING, TIMEOUT_REASON]) {
+        db.prepare("UPDATE durable_jobs SET status = ?, error = ? WHERE id = ?").run(status, error, id);
+        publishJobCompletion(db, id, 0, null, 10);
+        const row = db.prepare("SELECT status FROM durable_jobs WHERE id = ?").get(id) as {status: string};
+        assert.equal(row.status, status === "cancelling" || error === CANCELLATION_PENDING ? "cancelled" :
+          error === TIMEOUT_REASON ? "failed" : "succeeded");
+        publishJobCompletion(db, id, 1, "SIGKILL", 20);
+        assert.deepEqual(db.prepare("SELECT status, ended_at FROM durable_jobs WHERE id = ?").get(id),
+          { status: row.status, ended_at: 10 }, "terminal rows must not be overwritten");
+      }
+    }
+  } finally { db.close(); manager.close(); rmSync(state, { recursive: true, force: true }); }
+});
+
+test("Windows fallback never signals a recycled or unidentifiable PID", (t) => {
+  const state = mkdtempSync(join(tmpdir(), "devspace-windows-identity-"));
+  const manager = new DurableJobManager(state);
+  const db = new Database(join(state, "jobs", "jobs.sqlite"));
+  const id = "job_aaaaaaaaaaaaaaab";
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const calls: string[] = [];
+  const original = childProcess.spawnSync;
+  t.mock.method(childProcess, "spawnSync", ((file: string, args: string[]) => {
+    if (file === "powershell.exe") return { status: 0, stdout: "12345\n", stderr: "" };
+    if (file === "taskkill.exe") { calls.push("taskkill"); return { status: 0, stdout: "", stderr: "" }; }
+    return original(file, args);
+  }) as typeof spawnSync);
+  t.mock.method(process, "kill", ((_pid: number, signal: NodeJS.Signals | number) => {
+    if (signal !== 0) calls.push("signal");
+    return true;
+  }) as typeof process.kill);
+  syncBuiltinESMExports();
+  try {
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`INSERT INTO durable_jobs (id,workspace_id,workspace_root,command,working_directory,
+      pid,process_identity,status,log_path,created_at,last_heartbeat,max_runtime_seconds)
+      VALUES (?, 'test', ?, 'echo safe', ?, 1234, 'windows:other-creation-time', 'running', ?, ?, ?, 60)`)
+      .run(id, state, state, join(state, "log"), now, now);
+    assert.equal(manager.cancelJob(id).record?.status, "cancelled");
+    assert.deepEqual(calls, [], "mismatched identity must never reach taskkill or kill");
+    db.prepare("UPDATE durable_jobs SET status = 'running', process_identity = NULL, error = NULL").run();
+    assert.equal(manager.cancelJob(id).success, false);
+    assert.equal(manager.getJob(id)?.status, "running", "unidentifiable live PID remains blocking");
+    assert.deepEqual(calls, [], "unknown identity permits existence probes only");
+    db.prepare("UPDATE durable_jobs SET status = 'running', process_identity = 'windows:12345', error = NULL").run();
+    manager.cancelJob(id);
+    assert.deepEqual(calls, ["taskkill"], "matching identity on win32 routes to taskkill");
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    db.close(); manager.close(); rmSync(state, { recursive: true, force: true });
   }
 });

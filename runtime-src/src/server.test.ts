@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { access, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
@@ -29,6 +31,7 @@ import {
   observeHttpResponseStart,
   waitForExpressMiddleware,
 } from "./server.js";
+import { canUseSystemdUserJobIsolation } from "./durable-jobs.js";
 import { closeDurableJobManager } from "./tool-surfaces/jobs.js";
 import { closeWorkflowSessionManager } from "./tool-surfaces/workflows.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
@@ -328,7 +331,7 @@ test("Codex mutation operation_id safely replays an identical lost response", as
 
   const first = await context.client.callTool(request);
   const replayed = await context.client.callTool(request);
-  assert.notEqual(first.isError, true);
+  assert.notEqual(first.isError, true, JSON.stringify(first));
   assert.notEqual(replayed.isError, true);
   assert.equal(structuredContent(first).operation_replayed, false);
   assert.equal(structuredContent(replayed).operation_replayed, true);
@@ -601,7 +604,9 @@ test("durable job_start operation_id replays the same job after a lost response"
   assert.notEqual(waited.isError, true);
 });
 
-test("durable jobs remain discoverable after reconnecting the same workspace", async (t) => {
+test("durable jobs remain discoverable after reconnecting the same workspace", {
+  skip: process.platform === "linux" && !canUseSystemdUserJobIsolation() ? "Linux user-systemd unavailable" : false,
+}, async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const first = structuredContent(
     await callOpen(context.client, context.project, "job-rebind-before"),
@@ -2133,6 +2138,7 @@ async function fixture(
     : options.localAgentProviders ?? [];
   const loadedConfig = loadConfig(writeTestDevspaceConfig(join(root, ".config"), {
     server: { port: 1 },
+    storage: { stateDir },
     workspaces: { allowedRoots: [root], worktreeRoot: join(root, ".worktrees") },
     skills: { agentDir },
     subagents: {
@@ -2434,7 +2440,7 @@ async function callOpen(
 }
 
 function structuredContent(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {
-  assert.ok(result.structuredContent);
+  assert.ok(result.structuredContent, JSON.stringify(result));
   return result.structuredContent as Record<string, unknown>;
 }
 
@@ -2445,3 +2451,72 @@ function responseCard(result: Awaited<ReturnType<Client["callTool"]>>): Record<s
   assert.ok(card && typeof card === "object");
   return card as Record<string, unknown>;
 }
+
+
+test("image reads stay on the validated handle and cap actual bytes if it grows", async (t) => {
+  const { readImageFile, MAX_IMAGE_BYTES } = await import("./image-read.js");
+  const root = await mkdtemp(join(tmpdir(), "devspace-image-race-"));
+  const path = join(root, "image.png");
+  const originalBytes = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+  const originalOpen = fsPromises.open;
+  let mode: "replace" | "grow" = "replace";
+  let swaps = 0;
+  t.mock.method(fsPromises, "open", async (...args: Parameters<typeof originalOpen>) => {
+    const handle = await originalOpen(...args);
+    if (args[0] === path) {
+      const originalStat = handle.stat.bind(handle);
+      t.mock.method(handle, "stat", async () => {
+        const metadata = await originalStat();
+        if (mode === "replace") {
+          await fsPromises.rename(path, join(root, "original.png"));
+          await writeFile(path, originalBytes);
+        }
+        await truncate(path, MAX_IMAGE_BYTES + 1);
+        swaps++;
+        return metadata;
+      });
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  try {
+    await writeFile(path, originalBytes);
+    const read = await readImageFile(path);
+    assert.equal(read.sizeBytes, originalBytes.length, "path replacement must never redirect the validated read");
+    assert.equal(read.data, originalBytes.toString("base64"));
+    mode = "grow";
+    await writeFile(path, originalBytes);
+    await assert.rejects(readImageFile(path), /exceeds/);
+    assert.equal(swaps, 2);
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Runtime startup recovers durable completion before any job tool is called", async () => {
+  const { default: Database } = await import("better-sqlite3");
+  const { DurableJobManager } = await import("./durable-jobs.js");
+  const root = await mkdtemp(join(tmpdir(), "devspace-startup-reconcile-"));
+  const state = join(root, "state");
+  const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
+    server: { port: 1, publicBaseUrl: "https://example.com" },
+    storage: { stateDir: state },
+    workspaces: { allowedRoots: [root], worktreeRoot: join(root, "worktrees") },
+  }));
+  new DurableJobManager(state).close();
+  const db = new Database(join(state, "jobs", "jobs.sqlite"));
+  const id = "job_aaaaaaaaaaaaaaaa";
+  let running: ReturnType<typeof createServer> | undefined;
+  try {
+    db.prepare(`INSERT INTO durable_jobs (id,workspace_id,workspace_root,command,working_directory,
+      status,log_path,created_at,last_heartbeat,max_runtime_seconds)
+      VALUES (?, 'test', ?, 'echo safe', ?, 'running', ?, 1, 1, 60)`)
+      .run(id, root, root, join(state, "jobs", "logs", `${id}.log`));
+    await writeFile(join(state, "jobs", "meta", `${id}.exit`), JSON.stringify({ exitCode: 0, signal: null, endedAt: Math.floor(Date.now() / 1000) }));
+    running = createServer(config, { incomingArtifactAdapters: [] });
+    assert.deepEqual(db.prepare("SELECT status FROM durable_jobs WHERE id = ?").get(id), { status: "succeeded" });
+  } finally {
+    await running?.close(); db.close(); await rm(root, { recursive: true, force: true });
+  }
+});
