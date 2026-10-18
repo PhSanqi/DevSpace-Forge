@@ -8,7 +8,7 @@ const appIcon = path.join(__dirname, 'DevSpaceForge.ico');
 function controlUrl(value) {
   const url = new URL(value || DEFAULT_URL);
   if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(url.hostname) ||
-      !((url.pathname === '/') || url.pathname.startsWith('/next/')) || url.username || url.password) {
+      !((url.pathname === '/') || url.pathname === '/next' || url.pathname.startsWith('/next/')) || url.username || url.password) {
     throw new Error('DEVSPACE_CONTROL_URL must be an HTTP loopback Control URL.');
   }
   return url;

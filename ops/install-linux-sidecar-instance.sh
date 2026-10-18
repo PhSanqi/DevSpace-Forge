@@ -2,6 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Quote one ExecStart argument using systemd unit-file rules. Both specifiers
+# (`%`) and variable expansion (`$`) are doubled so systemd keeps them literal.
+systemd_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  value="${value//\$/\$\$}"
+  printf '"%s"' "$value"
+}
+
 INSTANCE=""
 PORT="17677"
 CONSOLE_PORT=""
@@ -214,7 +226,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-devspace
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-devspace")
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -234,7 +246,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-runtime-console
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-runtime-console")
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -249,8 +261,10 @@ EOF
 if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
   [[ -f "$TUNNEL_TOKEN_FILE" ]] || { echo "Tunnel token file not found: $TUNNEL_TOKEN_FILE" >&2; exit 1; }
   [[ -x "$INSTANCE_CLOUDFLARED" ]] || { echo "cloudflared not found in isolated runtime: $INSTANCE_CLOUDFLARED" >&2; exit 1; }
-  INSTANCE_TOKEN_FILE="$CONFIG_ROOT/cloudflare-tunnel-token.txt"
-  install -m 0600 "$TUNNEL_TOKEN_FILE" "$INSTANCE_TOKEN_FILE"
+  INSTANCE_TOKEN_PATH="$CONFIG_ROOT/cloudflare-tunnel-token.txt"
+  install -m 0600 "$TUNNEL_TOKEN_FILE" "$INSTANCE_TOKEN_PATH"
+  # Pre-quoted for the generated ExecStart; systemd parses the quotes.
+  INSTANCE_TOKEN_FILE="$(systemd_quote "$INSTANCE_TOKEN_PATH")"
   cat > "$SYSTEMD_DIR/$TUNNEL_SERVICE" <<EOF
 [Unit]
 Description=DevSpace $INSTANCE dedicated Cloudflare Tunnel
@@ -259,7 +273,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$NODE $INSTALL_ROOT/bin/managed-cloudflared.mjs --cloudflared $INSTANCE_CLOUDFLARED --control-settings $CONTROL_SETTINGS --quick-url-file $QUICK_URL_FILE --local-port $PORT --protocol $TUNNEL_PROTOCOL --token-file $INSTANCE_TOKEN_FILE --metrics 127.0.0.1:$TUNNEL_METRICS_PORT
+ExecStart=$(systemd_quote "$NODE") $(systemd_quote "$INSTALL_ROOT/bin/managed-cloudflared.mjs") --cloudflared $(systemd_quote "$INSTANCE_CLOUDFLARED") --control-settings $(systemd_quote "$CONTROL_SETTINGS") --quick-url-file $(systemd_quote "$QUICK_URL_FILE") --local-port $PORT --protocol $TUNNEL_PROTOCOL --token-file $INSTANCE_TOKEN_FILE --metrics 127.0.0.1:$TUNNEL_METRICS_PORT
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -441,7 +455,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$INSTALL_ROOT/bin/check-cloudflared
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/check-cloudflared")
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

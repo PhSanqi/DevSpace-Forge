@@ -2,6 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Quote one ExecStart argument using systemd unit-file rules. Both specifiers
+# (`%`) and variable expansion (`$`) are doubled so systemd keeps them literal.
+systemd_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  value="${value//\$/\$\$}"
+  printf '"%s"' "$value"
+}
+
 PORT="7677"
 CONSOLE_PORT=""
 OWNER_COPY=1
@@ -16,6 +28,9 @@ NON_INTERACTIVE=0
 CONFIG_OVERRIDE=0
 FORCE_RECONFIGURE=0
 UPGRADE_EXISTING=0
+TUNNEL_TOKEN_ARGV=0
+TUNNEL_TOKEN_FILE_ARG=""
+TUNNEL_TOKEN_STDIN=0
 
 usage() {
   cat <<'EOF'
@@ -34,7 +49,12 @@ Options:
   --disable-owner-copy  Disable Owner Password copy even on localhost
   --public-url URL      Public base URL; path bases are supported (example: https://dev.example.com/server)
   --origin-host HOST    Cloudflare Tunnel origin hostname accepted by DevSpace
-  --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
+  --tunnel-token TOKEN  Deprecated: exposes the token in process listings;
+                        prefer --tunnel-token-file or --tunnel-token-stdin
+  --tunnel-token-file PATH
+                        Read the Cloudflare remotely-managed Tunnel token from PATH
+  --tunnel-token-stdin  Read the Cloudflare remotely-managed Tunnel token from
+                        standard input
   --reuse-existing-tunnel
                         Start only DevSpace; reuse an already-running Tunnel on this machine
   --reconfigure         Ignore an existing local configuration and configure again
@@ -54,7 +74,9 @@ while [[ $# -gt 0 ]]; do
     --disable-owner-copy) OWNER_COPY=0; shift ;;
     --public-url) PUBLIC_URL="${2:?missing URL}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --origin-host) ORIGIN_HOST="${2:?missing hostname}"; CONFIG_OVERRIDE=1; shift 2 ;;
-    --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; TUNNEL_TOKEN_ARGV=1; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token-file) TUNNEL_TOKEN_FILE_ARG="${2:?missing token file}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token-stdin) TUNNEL_TOKEN_STDIN=1; CONFIG_OVERRIDE=1; shift ;;
     --reuse-existing-tunnel) REUSE_EXISTING_TUNNEL=1; CONFIG_OVERRIDE=1; shift ;;
     --reconfigure) FORCE_RECONFIGURE=1; shift ;;
     --no-start) START_SERVICES=0; shift ;;
@@ -67,6 +89,37 @@ done
 if [[ -n "$INSTANCE" ]] && ! [[ "$INSTANCE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   echo 'Instance name must contain only lowercase letters, digits, and hyphens.' >&2
   exit 1
+fi
+
+TOKEN_SOURCES="$TUNNEL_TOKEN_ARGV"
+if [[ "$TUNNEL_TOKEN_STDIN" -eq 1 ]]; then TOKEN_SOURCES=$((TOKEN_SOURCES + 1)); fi
+if [[ -n "$TUNNEL_TOKEN_FILE_ARG" ]]; then TOKEN_SOURCES=$((TOKEN_SOURCES + 1)); fi
+if (( TOKEN_SOURCES > 1 )); then
+  echo 'Specify only one of --tunnel-token, --tunnel-token-file, or --tunnel-token-stdin.' >&2
+  exit 2
+fi
+if (( TUNNEL_TOKEN_ARGV == 1 )); then
+  echo 'warning: --tunnel-token exposes the token in process listings; use --tunnel-token-file or --tunnel-token-stdin.' >&2
+fi
+if [[ -n "$TUNNEL_TOKEN_FILE_ARG" ]]; then
+  if [[ ! -r "$TUNNEL_TOKEN_FILE_ARG" ]]; then
+    echo "Tunnel token file is not readable: $TUNNEL_TOKEN_FILE_ARG" >&2
+    exit 1
+  fi
+  TUNNEL_TOKEN="$(<"$TUNNEL_TOKEN_FILE_ARG")"
+fi
+if [[ "$TUNNEL_TOKEN_STDIN" -eq 1 ]]; then
+  if [[ -t 0 ]]; then
+    printf 'Cloudflare Remote Tunnel token: ' >&2
+    IFS= read -r -s TUNNEL_TOKEN || true
+    printf '\n' >&2
+  else
+    IFS= read -r TUNNEL_TOKEN || true
+  fi
+  if [[ -z "$TUNNEL_TOKEN" ]]; then
+    echo 'Tunnel token from standard input is empty.' >&2
+    exit 1
+  fi
 fi
 
 INSTANCE_SUFFIX=""
@@ -306,8 +359,8 @@ fi
 
 if [[ ! -f "$DEVSPACE_CONFIG_DIR/auth.json" ]]; then
   OWNER_TOKEN="$("$NODE" -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))")"
+  install -m 0600 /dev/null "$DEVSPACE_CONFIG_DIR/auth.json"
   printf '{"ownerToken":"%s"}\n' "$OWNER_TOKEN" > "$DEVSPACE_CONFIG_DIR/auth.json"
-  chmod 0600 "$DEVSPACE_CONFIG_DIR/auth.json"
 else
   OWNER_TOKEN="$("$NODE" -e "const a=require(process.argv[1]); console.log(a.ownerToken||'')" "$DEVSPACE_CONFIG_DIR/auth.json")"
 fi
@@ -323,16 +376,16 @@ fi
 
 if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
   if [[ -n "$TUNNEL_TOKEN" ]]; then
+    install -m 0600 /dev/null "$CLOUDFLARE_TOKEN_FILE"
     printf '%s\n' "$TUNNEL_TOKEN" > "$CLOUDFLARE_TOKEN_FILE"
-    chmod 0600 "$CLOUDFLARE_TOKEN_FILE"
   elif [[ ! -f "$CLOUDFLARE_TOKEN_FILE" && -f "$CLOUDFLARE_ENV" ]]; then
     set +u
     source "$CLOUDFLARE_ENV"
     legacy_token="${CLOUDFLARED_TOKEN:-}"
     set -u
     if [[ -n "$legacy_token" ]]; then
+      install -m 0600 /dev/null "$CLOUDFLARE_TOKEN_FILE"
       printf '%s\n' "$legacy_token" > "$CLOUDFLARE_TOKEN_FILE"
-      chmod 0600 "$CLOUDFLARE_TOKEN_FILE"
     fi
     unset legacy_token CLOUDFLARED_TOKEN || true
   fi
@@ -379,9 +432,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-devspace
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-devspace")
 Restart=on-failure
 RestartSec=3
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -396,7 +450,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-runtime-console
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-runtime-console")
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -417,9 +471,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-cloudflared
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-cloudflared")
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -604,7 +662,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$INSTALL_ROOT/bin/check-cloudflared
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/check-cloudflared")
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

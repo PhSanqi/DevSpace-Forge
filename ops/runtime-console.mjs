@@ -536,7 +536,10 @@ export function createConsoleServer(options,services={}) {
           const result=setTunnelToken(options,body.token);
           return json(res,200,{...result,restart_required:true});
         }
-        if(url==='/api/management/autostart')return json(res,200,setAutostart(options,!!body.enabled,controller));
+        if(url==='/api/management/autostart'){
+          if(controller.autostartAvailable===false)return json(res,200,{ok:true,skipped:'windows-native-autostart'});
+          return json(res,200,setAutostart(options,!!body.enabled,controller));
+        }
         if(url==='/api/management/service'){
           const result=await serviceAction(options,body.target,body.action,controller);
           return json(res,result.status||200,result);

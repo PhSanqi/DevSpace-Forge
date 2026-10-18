@@ -166,3 +166,19 @@ test('PowerShell sources parse when pwsh is available', { skip: !hasPwsh }, () =
     assert.equal(result.status, 0, `${file}: ${result.stderr}`);
   }
 });
+
+test('shell accepts the /next Control URL without a trailing slash', () => {
+  const script = source('desktop-shell/main.cjs');
+  const module = { exports: {} };
+  vm.runInNewContext(script, {
+    module, process: { env: {} }, URL,
+    __dirname: path.join(root, 'desktop-shell'),
+    require: (id) => id === 'node:path'
+      ? path
+      : ({ app: { whenReady: () => new Promise(() => {}), on: () => {} } })
+  });
+  const { controlUrl } = module.exports;
+  assert.equal(controlUrl('http://127.0.0.1:17678/next').pathname, '/next');
+  assert.equal(controlUrl('http://127.0.0.1:17678/next/connection').pathname, '/next/connection');
+  assert.throws(() => controlUrl('http://127.0.0.1:17678/nextish'));
+});

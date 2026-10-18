@@ -1038,6 +1038,25 @@ namespace DevSpaceControlPlatform
             }
         }
 
+        private void RunServiceAction(Func<bool> action)
+        {
+            try
+            {
+                var completed = action();
+                RefreshServiceStatus();
+                statusLabel.Text = completed ? "服务操作完成。" : "服务操作未完全完成，请查看服务状态和日志。";
+                if (!completed)
+                    MessageBox.Show("Cloudflare Tunnel 停止未确认，进程可能仍在运行；本次操作未完成，请稍后重试。",
+                        "服务操作警告", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(exception.Message, "服务操作失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                RefreshServiceStatus();
+                statusLabel.Text = "服务操作失败。";
+            }
+        }
+
         internal void AllowApplicationClose()
         {
             allowApplicationClose = true;

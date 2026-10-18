@@ -31,9 +31,11 @@ internal static class DevSpaceConfigurationTests
         Run("managed CLI applies legacy effective env", TestLegacyCliEnvironment);
         Run("setup normalizes tunnel hostname and MCP links", TestSetupHostnameNormalization);
         Run("setup extracts Tunnel token from Cloudflare install commands", TestSetupTunnelCommandParsing);
+        Run("Tunnel token is stored with a private ACL", TestTunnelSecretStoredPrivately);
         Run("setup detects existing configuration in place", TestSetupExistingConfiguration);
         Run("setup updates existing installation without reconfiguration", TestSetupUpdateExisting);
         Run("native GUI Runtime stop and restart respect the shared gate", TestNativeGuiRuntimeGate);
+        Run("cloudflare stop keeps an unconfirmed handle for retry", TestCloudflareStopUnconfirmed);
         Run("native JobObject forced close preserves Runtime grandchildren", TestNativeJobObjectBreakaway);
         Run("setup expands offline runtime payload", TestSetupOfflinePayload);
         Run("runtime PATH exposes project Serena and uv tools", TestRuntimeToolPath);
@@ -242,6 +244,26 @@ internal static class DevSpaceConfigurationTests
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/group?x=1"); });
     }
 
+    private static void TestTunnelSecretStoredPrivately()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-secret-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var token = new string('a', 32);
+            CloudflareTunnelSecretStore.SaveToken(root, token);
+            var path = CloudflareTunnelSecretStore.TokenPath(root);
+            AssertTrue(File.Exists(path), "token file exists");
+            var security = File.GetAccessControl(path);
+            AssertTrue(security.AreAccessRulesProtected, "token ACL is not inherited");
+            AssertEqual(token + Environment.NewLine, File.ReadAllText(path), "token persisted");
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); }
+            catch { }
+        }
+    }
+
     private static void TestSetupTunnelCommandParsing()
     {
         var token = "eyJhbGciOiJIUzI1NiJ9.synthetic_payload.signature_1234567890";
@@ -440,6 +462,56 @@ internal static class DevSpaceConfigurationTests
                 finally { dummyRuntime.Dispose(); }
             }
             Directory.Delete(root, true);
+        }
+    }
+
+    private static void TestCloudflareStopUnconfirmed()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-cloudflare-stop-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var supervisor = new ServiceSupervisor(root);
+        var processField = typeof(ServiceSupervisor).GetField("cloudflareProcess",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var unconfirmedField = typeof(ServiceSupervisor).GetField("cloudflareStopUnconfirmed",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        AssertTrue(processField != null && unconfirmedField != null, "cloudflare stop state fields exist");
+        Process exitedProcess = null;
+        Process unstartedProcess = null;
+        try
+        {
+            exitedProcess = Process.Start(new ProcessStartInfo
+            {
+                FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe",
+                Arguments = "/c exit 0",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            AssertTrue(exitedProcess != null && exitedProcess.WaitForExit(10000), "sacrificial exited process started");
+            processField.SetValue(supervisor, exitedProcess);
+            AssertTrue(supervisor.StopCloudflare(), "confirmed exit reports a successful stop");
+            AssertTrue(processField.GetValue(supervisor) == null, "confirmed stop clears the cloudflare handle");
+            AssertTrue(!(bool)unconfirmedField.GetValue(supervisor), "confirmed stop clears the unconfirmed marker");
+            exitedProcess = null; // disposed by StopProcess after confirming the exit
+
+            // A Process that was never started cannot report HasExited, which
+            // deterministically exercises the unconfirmed branch.
+            unstartedProcess = new Process();
+            processField.SetValue(supervisor, unstartedProcess);
+            AssertTrue(!supervisor.StopCloudflare(), "unconfirmed exit reports failure instead of throwing");
+            AssertTrue(ReferenceEquals(processField.GetValue(supervisor), unstartedProcess),
+                "unconfirmed stop retains the handle for a later retry");
+            AssertTrue((bool)unconfirmedField.GetValue(supervisor), "unconfirmed stop marks the state for retry");
+            AssertTrue(!supervisor.RestartCloudflare(), "restart refuses while the previous stop is unconfirmed");
+            AssertTrue(ReferenceEquals(processField.GetValue(supervisor), unstartedProcess),
+                "refused restart leaves the old handle in place");
+        }
+        finally
+        {
+            processField.SetValue(supervisor, null);
+            unconfirmedField.SetValue(supervisor, false);
+            if (exitedProcess != null) exitedProcess.Dispose();
+            if (unstartedProcess != null) unstartedProcess.Dispose();
+            try { Directory.Delete(root, true); } catch { }
         }
     }
 

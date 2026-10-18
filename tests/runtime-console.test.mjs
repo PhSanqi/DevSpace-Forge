@@ -1044,3 +1044,21 @@ test('UI includes semantic navigation, theme/language controls, responsive and a
   assert.match(js,/sourceConversation/);
   assert.match(js,/latestTool/);
 });
+test('Windows autostart management request returns a non-error skipped result',async()=>{
+  let called=false;
+  const controller={...testLifecycleController(),autostartAvailable:false,autostart:()=>{called=true;throw new Error('must not be called');}};
+  const server=createConsoleServer({serve:0},{lifecycleController:controller,snapshot:async()=>({schema_version:2})});
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+server.address().port;
+  try{
+    const token=(await (await fetch(base+'/api/action-token')).json()).token;
+    const response=await fetch(base+'/api/management/autostart',{
+      method:'POST',
+      headers:{'content-type':'application/json','x-devspace-console-token':token,origin:base},
+      body:JSON.stringify({enabled:true})
+    });
+    assert.equal(response.status,200);
+    assert.deepEqual(await response.json(),{ok:true,skipped:'windows-native-autostart'});
+    assert.equal(called,false);
+  }finally{await new Promise((resolve)=>server.close(resolve));}
+});
