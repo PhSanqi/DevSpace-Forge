@@ -59,7 +59,7 @@ test('Linux installer writes secrets privately and quotes systemd ExecStart path
 });
 
 test('tunnel token stdin prompts silently on a TTY and rejects empty input',()=>{
-  const script=source('setup-linux.sh');
+  const script=source('setup-linux.sh').replace(/\r\n/g,'\n'); // Windows checkouts may use CRLF.
   const match=script.match(/if \[\[ "\$TUNNEL_TOKEN_STDIN" -eq 1 \]\]; then\n[\s\S]*?\nfi/);
   assert.ok(match,'--tunnel-token-stdin handling block exists');
   const block=match[0];
