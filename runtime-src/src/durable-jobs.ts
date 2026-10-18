@@ -87,6 +87,9 @@ export interface DurableJobManagerOptions {
   maxCompletedJobs?: number;
 }
 
+// Require the exact generated handle; $ alone also permits a trailing newline.
+export const DURABLE_JOB_ID_PATTERN = /^job_[0-9a-f]{16}(?![\s\S])/;
+
 const DEFAULT_COMPLETED_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_MAX_COMPLETED_JOBS = 1_000;
 
@@ -235,12 +238,12 @@ export class DurableJobManager {
   }
 
   public getJob(id: string): JobRecord | null {
-    // Check if detached finish marker exists on disk
+    if (!DURABLE_JOB_ID_PATTERN.test(id)) return null;
+    const query = this.db.prepare("SELECT * FROM durable_jobs WHERE id = ?");
+    const row = query.get(id) as RawJobRow | undefined;
+    if (!row) return null;
     this.checkCompletionMarker(id);
-    const row = this.db.prepare("SELECT * FROM durable_jobs WHERE id = ?").get(id) as
-      | RawJobRow
-      | undefined;
-    return row ? this.rowToRecord(row) : null;
+    return this.rowToRecord(query.get(id) as RawJobRow);
   }
 
   public listJobs(workspaceId?: string, limit = 50, workspaceRoot?: string): JobRecord[] {
@@ -308,6 +311,7 @@ export class DurableJobManager {
   }
 
   private checkCompletionMarker(id: string): void {
+    if (!DURABLE_JOB_ID_PATTERN.test(id)) return;
     const markerPath = this.getMarkerPath(id);
     if (existsSync(markerPath)) {
       try {

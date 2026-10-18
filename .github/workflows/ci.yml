@@ -40,6 +40,10 @@ jobs:
       - name: Test embedded Runtime
         working-directory: runtime-src
         run: pnpm test
+      - name: Test Windows control configuration
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\test.ps1 -SkipRuntimeSmoke
       - name: Test installed Runtime package
         working-directory: runtime-src
         run: pnpm test:package-install
@@ -86,5 +90,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install control UI dependencies
+        run: npm --prefix control-ui ci
+      - name: Typecheck and build control UI
+        run: |
+          npm --prefix control-ui run typecheck
+          npm --prefix control-ui run build
+      - name: Install desktop shell dependencies
+        run: npm --prefix desktop-shell ci
+      - name: Typecheck desktop shell
+        run: npm --prefix desktop-shell run typecheck
       - name: Validate control, public site and privacy guard
-        run: node --test tests/runtime-console.test.mjs tests/public-site.test.mjs tests/public-repository-audit.test.mjs tests/video-sidecar-source.test.mjs
+        run: npm test

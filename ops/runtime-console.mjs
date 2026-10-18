@@ -614,7 +614,8 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1]
       for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{
         if(closing)return;closing=true;
         try{
-          await controller.shutdown();
+          const result=await controller.shutdown();
+          if(!result.ok)process.stderr.write('Windows Control stopped Tunnel/Console; Runtime left running: '+result.reason_code+'\n');
           server.close(()=>{process.exitCode=0;});
         }catch(error){
           process.stderr.write('Windows Control shutdown failed: '+error.message+'\n');

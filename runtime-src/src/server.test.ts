@@ -550,6 +550,21 @@ test("workspace hygiene prunes recoverably and replays a lost response", async (
   assert.match(restoredText, /hello from recoverable hygiene/);
 });
 
+test("durable job tools reject malformed handles in their published schemas", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const { tools } = await context.client.listTools();
+  for (const name of ["job_status", "job_logs", "job_cancel", "job_wait"]) {
+    const tool = tools.find((item) => item.name === name)!;
+    const idSchema = tool.inputSchema.properties!.job_id as { pattern: string };
+    assert.equal(new RegExp(idSchema.pattern).test("job_aaaaaaaaaaaaaaaa"), true);
+    for (const job_id of ["../../sibling", "..\\..\\sibling", "job_wrong", "job_aaaaaaaaaaaaaaaa\n"]) {
+      assert.equal(new RegExp(idSchema.pattern).test(job_id), false);
+      const response = await context.client.callTool({ name, arguments: { job_id } });
+      assert.equal(response.isError, true, `${name} must reject ${JSON.stringify(job_id)}`);
+    }
+  }
+});
+
 test("durable job_start operation_id replays the same job after a lost response", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const opened = structuredContent(

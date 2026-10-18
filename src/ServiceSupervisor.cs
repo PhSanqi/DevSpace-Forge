@@ -919,43 +919,6 @@ namespace DevSpaceControlPlatform
             return null;
         }
 
-        private string ResolveDevSpacePackageRoot()
-        {
-            var candidates = new List<string>
-            {
-                Path.Combine(platformRoot, "runtime", "devspace", "node_modules", "@waishnav", "devspace")
-            };
-            var parent = Directory.GetParent(platformRoot);
-            if (parent != null) candidates.Add(Path.Combine(parent.FullName, "runtime", "devspace", "node_modules", "@waishnav", "devspace"));
-            foreach (var candidate in candidates)
-                if (File.Exists(Path.Combine(candidate, "package.json"))) return candidate;
-            throw new DirectoryNotFoundException("找不到独立 DevSpace runtime package。");
-        }
-
-        private static string ResolveNodePath()
-        {
-            var candidate = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe");
-            if (File.Exists(candidate)) return candidate;
-            foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator))
-            {
-                if (string.IsNullOrWhiteSpace(directory)) continue;
-                candidate = Path.Combine(directory.Trim(), "node.exe");
-                if (File.Exists(candidate)) return candidate;
-            }
-            throw new FileNotFoundException("找不到 node.exe。", "node.exe");
-        }
-
-        private string ResolveCloudflaredPath()
-        {
-            var candidates = new[]
-            {
-                Path.Combine(platformRoot, "cloudflared.exe"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "cloudflared", "cloudflared.exe")
-            };
-            foreach (var candidate in candidates) if (File.Exists(candidate)) return candidate;
-            throw new FileNotFoundException("找不到 cloudflared.exe。", candidates[candidates.Length - 1]);
-        }
-
         private void EnsureOwnerAuth()
         {
             Directory.CreateDirectory(configDirectory);

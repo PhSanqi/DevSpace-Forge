@@ -1,4 +1,6 @@
 import test from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, utimesSync, writeFileSync, existsSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,6 +36,50 @@ function delayedNodeCommand(delayMs = 600): string {
     : JSON.stringify(process.execPath);
   return `${node} -e "setTimeout(() => console.log('restart-done'), ${delayMs})"`;
 }
+
+test("DurableJobManager: malformed and unknown handles never access metadata", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "devspace-job-handles-"));
+  const mgr = new DurableJobManager(tempDir);
+  const sibling = join(tempDir, "sibling.env.json");
+  const unknown = "job_aaaaaaaaaaaaaaaa";
+  const marker = join(tempDir, "jobs", "meta", `${unknown}.exit`);
+  writeFileSync(sibling, "synthetic environment");
+  writeFileSync(join(tempDir, "sibling.exit"), JSON.stringify({ exitCode: 0, endedAt: 1, signal: null }));
+  writeFileSync(marker, JSON.stringify({ exitCode: 0, endedAt: 1, signal: null }));
+  const accesses: unknown[] = [];
+  try {
+    for (const name of ["existsSync", "readFileSync", "unlinkSync"] as const) {
+      t.mock.method(fs, name, (...args: unknown[]) => { accesses.push(args[0]); throw new Error("Unexpected metadata access"); });
+    }
+    syncBuiltinESMExports();
+    for (const id of ["../../sibling", "..\\..\\sibling", "/sibling", "", "job_wrong", `${unknown}\n`, unknown]) {
+      assert.equal(mgr.getJob(id), null);
+      assert.equal(mgr.readLogs(id).content, "");
+      assert.equal(mgr.cancelJob(id).success, false);
+    }
+    assert.deepEqual(accesses, []);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    const db = new Database(join(tempDir, "jobs", "jobs.sqlite"));
+    try {
+      db.prepare(`INSERT INTO durable_jobs
+        (id, workspace_id, workspace_root, command, working_directory, status, log_path,
+         created_at, last_heartbeat, max_runtime_seconds)
+        VALUES (?, 'test', ?, 'echo safe', ?, 'running', ?, 1, 1, 60)`)
+        .run(unknown, tempDir, tempDir, join(tempDir, "jobs", "logs", `${unknown}.log`));
+      const launchSpec = join(tempDir, "jobs", "meta", `${unknown}.env.json`);
+      writeFileSync(launchSpec, "synthetic environment");
+      assert.equal(mgr.getJob(unknown)?.status, "succeeded");
+      assert.equal(existsSync(launchSpec), false, "an existing row may consume its own completion metadata");
+    } finally { db.close(); }
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(readFileSync(sibling, "utf8"), "synthetic environment");
+    mgr.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("DurableJobManager: starts, tracks, and reads logs from detached job", async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "devspace-jobs-test-"));

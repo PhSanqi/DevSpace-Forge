@@ -80,6 +80,8 @@ test('Windows setup, autostart and script entrypoints use the modern desktop lau
   assert.match(setup, /SetupInstaller\.StartWindowsDesktop\(platformRoot\)/);
   assert.doesNotMatch(setup, /Path\.Combine\(platformRoot, "DevSpaceControlPlatform\.exe"\)/);
   assert.match(install, /start-modern-desktop\.ps1/);
+  assert.match(install, /Join-Path \$root 'Setup\.exe'/);
+  assert.doesNotMatch(install, /setup-runtime\.ps1/);
   assert.match(install, /DevSpaceForgeDesktop\.exe/);
   assert.doesNotMatch(install, /Start-Process -FilePath \$exe/);
 });

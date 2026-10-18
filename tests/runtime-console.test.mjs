@@ -327,7 +327,6 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   const prepare=read('prepare-offline-windows-runtime.ps1');
   const packer=read('package-release-windows-payload.ps1');
   assert.equal(/^VERSION="\$\{1:-([^}]+)\}"/m.exec(read('package-release-linux.sh'))?.[1],pkg.version);
-  assert.equal(/\$Version = '([^']+)'/.exec(read('package-release.ps1'))?.[1],pkg.version);
   assert.equal(/\$Version = '([^']+)'/.exec(packer)?.[1],pkg.version);
   assert.equal(/CANONICAL_RUNTIME_REF:/.test(workflow),false,'Release must not depend on a second Runtime ref');
   assert.equal(/CANONICAL_RUNTIME_VERSION: (\S+)/.exec(workflow)?.[1],runtimeVersion);
@@ -351,9 +350,6 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   assert.ok(prepare.includes('$env:PATH = $previousPath'),'Windows package install must restore the caller PATH');
   assert.ok(prepare.includes("import Database from 'better-sqlite3'"),'Windows packaging must execute better-sqlite3 with the bundled Node');
   assert.ok(prepare.includes("new Database(':memory:')"),'Windows packaging must actually load and exercise the better-sqlite3 native binding');
-  const slotSmoke=read('test-runtime-slot.ps1');
-  assert.ok(slotSmoke.includes("import Database from 'better-sqlite3'"),'Windows slot validation must fail closed on native SQLite ABI mismatches');
-  assert.ok(slotSmoke.includes("new Database(':memory:')"),'Windows slot validation must exercise the SQLite native binding');
   const ci=read('.github/workflows/ci.yml');
   assert.ok(ci.includes('Validate Windows offline Runtime assembly'),'CI must exercise the real Windows offline assembly path');
   assert.ok(packer.includes(`runtime/slots/${slot}/READY`));

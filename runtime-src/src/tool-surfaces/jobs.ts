@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 import path from "node:path";
-import { DurableJobManager } from "../durable-jobs.js";
+import { DURABLE_JOB_ID_PATTERN, DurableJobManager } from "../durable-jobs.js";
 import {
   OPERATION_ID_DESCRIPTION,
   OPERATION_ID_PATTERN,
@@ -218,7 +218,7 @@ export function registerDurableJobTools(context: ToolRegistrationContext): void 
       description:
         "Check the current execution status, exit code, termination signal, duration, and error of a durable background job.",
       inputSchema: {
-        job_id: z.string().describe("Durable job ID returned by job_start."),
+        job_id: z.string().regex(DURABLE_JOB_ID_PATTERN).describe("Job ID from job_start."),
       },
       outputSchema: {
         result: z.string(),
@@ -255,7 +255,7 @@ export function registerDurableJobTools(context: ToolRegistrationContext): void 
       description:
         "Read paginated or tail output logs from a durable background job safely without exceeding MCP response size limits.",
       inputSchema: {
-        job_id: z.string().describe("Durable job ID returned by job_start."),
+        job_id: z.string().regex(DURABLE_JOB_ID_PATTERN).describe("Job ID from job_start."),
         offset: z.number().nonnegative().optional().describe("Byte offset to start reading from. Defaults to 0."),
         max_bytes: z
           .number()
@@ -303,7 +303,7 @@ export function registerDurableJobTools(context: ToolRegistrationContext): void 
       description:
         "Cancel a running durable background job, terminating its full process group / process tree safely.",
       inputSchema: {
-        job_id: z.string().describe("Durable job ID returned by job_start."),
+        job_id: z.string().regex(DURABLE_JOB_ID_PATTERN).describe("Job ID from job_start."),
         operation_id: z
           .string()
           .regex(OPERATION_ID_PATTERN)
@@ -367,7 +367,7 @@ export function registerDurableJobTools(context: ToolRegistrationContext): void 
       description:
         "Wait briefly for a durable job to complete. Defaults to 3 seconds and is capped at 10 seconds so polling does not sit near common MCP host timeout boundaries. If still running, returns promptly so the client can poll again.",
       inputSchema: {
-        job_id: z.string().describe("Durable job ID returned by job_start."),
+        job_id: z.string().regex(DURABLE_JOB_ID_PATTERN).describe("Job ID from job_start."),
         timeout_seconds: z
           .number()
           .positive()

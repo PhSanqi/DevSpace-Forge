@@ -5,6 +5,7 @@ VERSION="${1:-0.6.14}"
 RUNTIME_PACKAGE="${2:?usage: package-release-linux.sh VERSION RUNTIME_PACKAGE}"
 RUNTIME_SOURCE="${3:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"${NPM:-npm}" --prefix "$ROOT" test
 "${NPM:-npm}" --prefix "$ROOT/control-ui" ci
 "${NPM:-npm}" --prefix "$ROOT/control-ui" run build
 DIST="$ROOT/dist"
