@@ -315,5 +315,34 @@ test('Linux installers point Runtime and Console at the same durable job state',
   assert.match(setup,/const stateDir = `\$\{process\.argv\[6\]\}\/devspace-state`/);
   assert.match(setup,/storage: \{ stateDir \}/);
   assert.match(sidecar,/storage:\{stateDir:`\$\{stateDir\}\/devspace-state`\}/);
-  for(const script of [setup,sidecar])assert.match(script,/--state-dir "\$STATE_DIR\/devspace-state"/);
+  // The main installer derives the effective state directory from its config;
+  // an upgraded instance may have a custom path rather than the default.
+  assert.doesNotMatch(setup,/--state-dir "\$STATE_DIR\/devspace-state"/);
+  assert.match(sidecar,/--state-dir "\$STATE_DIR\/devspace-state"/);
+});
+
+test('Windows controller uses JSON selection over a stale mirror and refuses malformed JSON',async()=>{
+  const f=fixture();
+  try{
+    const runtime=path.join(f.root,'runtime','slots','slot-json');
+    const pkg=path.join(runtime,'devspace','node_modules','@waishnav','devspace');
+    for(const file of [path.join(runtime,'node','node.exe'),path.join(runtime,'READY'),path.join(pkg,'dist','cli.js'),path.join(pkg,'dist','server.js')]){
+      mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,'synthetic');
+    }
+    const {createHash}=await import('node:crypto');
+    writeFileSync(path.join(pkg,'package.json'),JSON.stringify({version:'1.1.0-beta.4.local.13'}));
+    const selection=path.join(f.root,'state','devspace-state','runtime-selection.json');mkdirSync(path.dirname(selection),{recursive:true});
+    writeFileSync(selection,JSON.stringify({schema_version:1,slot:'slot-json',server_sha256:createHash('sha256').update('synthetic').digest('hex'),previous:null}));
+    writeFileSync(path.join(f.root,'runtime','active-slot.txt'),'../../stale');
+    const spawned=[];
+    const controller=createServiceController({platformRoot:f.root,configPath:f.configPath},{platform:'win32',
+      createProcessJob:()=>({addPid:()=>{},close:()=>{}}),spawnProcess:(command,args)=>{
+        spawned.push({command,args});const child=new EventEmitter();child.pid=8701;child.exitCode=null;child.signalCode=null;return child;
+      }});
+    assert.equal((await controller.action('devspace','start')).ok,true);
+    assert.equal(spawned[0].command,path.join(runtime,'node','node.exe'));assert.equal(spawned[0].args[0],path.join(pkg,'dist','cli.js'));
+    writeFileSync(selection,'{broken');
+    const blocked=createServiceController({platformRoot:f.root,configPath:f.configPath},{platform:'win32',spawnProcess:()=>{throw new Error('must not launch');}});
+    assert.equal(blocked.available('devspace'),false);await assert.rejects(blocked.action('devspace','start'));
+  }finally{f.clean();}
 });

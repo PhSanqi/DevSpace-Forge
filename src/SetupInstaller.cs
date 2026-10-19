@@ -151,100 +151,360 @@ namespace DevSpaceControlPlatform
 
         public static void EnsureOfflinePayload(string platformRoot)
         {
-            ApplyOfflinePayload(platformRoot, platformRoot, false);
+            ApplyOfflinePayload(platformRoot, platformRoot);
         }
 
-        private static void ApplyOfflinePayload(string bundleRoot, string targetRoot, bool force)
+        private static void ApplyOfflinePayload(string bundleRoot, string targetRoot)
         {
             var sourceRoot = Path.GetFullPath(bundleRoot);
             var root = Path.GetFullPath(targetRoot);
-            if (force)
+            try
             {
-                if (!HasOfflinePayload(sourceRoot))
-                    throw new FileNotFoundException("更新包缺少离线 Runtime payload。", OfflinePayloadPath(sourceRoot));
-                ApplyOfflinePayloadUpgrade(sourceRoot, root);
+                ValidateBundle(root);
                 return;
             }
-
-            if (!force)
-            {
-                try
-                {
-                    ValidateBundle(root);
-                    return;
-                }
-                catch
-                {
-                    if (!HasOfflinePayload(sourceRoot)) throw;
-                }
-            }
-            try
-            {
-                var runtime = Path.Combine(root, "runtime");
-                if (Directory.Exists(runtime)) Directory.Delete(runtime, true);
-                var cloudflared = Path.Combine(root, "cloudflared.exe");
-                if (File.Exists(cloudflared)) File.Delete(cloudflared);
-            }
-            catch (Exception exception)
-            {
-                throw new IOException("无法替换旧 Runtime。请先退出正在运行的 DevSpace Control，再重新运行 Setup。", exception);
-            }
-            ExtractOfflinePayload(sourceRoot, root);
-            ValidateBundle(root);
+            catch { if (!HasOfflinePayload(sourceRoot)) throw; }
+            var gate = AcquireRuntimeUpdateGate(root, sourceRoot);
+            try { ApplyOfflinePayloadUpgrade(sourceRoot, root, delegate { }, 0); }
+            finally { Directory.Delete(gate); }
         }
 
-        private static void ApplyOfflinePayloadUpgrade(string sourceRoot, string targetRoot)
+        private static string FileSha256(string file)
+        {
+            using (var sha = SHA256.Create())
+            using (var stream = File.OpenRead(file))
+                return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+        }
+
+        private static Dictionary<string, string> RuntimeFileHashes(string directory)
+        {
+            var result = new Dictionary<string, string>();
+            var files = Directory.GetFiles(directory, "*", SearchOption.AllDirectories);
+            Array.Sort(files, StringComparer.Ordinal);
+            foreach (var file in files)
+            {
+                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("Runtime payload contains a reparse point.");
+                var relative = file.Substring(directory.Length + 1).Replace('\\', '/');
+                if (relative == "READY" || relative == "slot-manifest.json") continue;
+                result.Add(relative, FileSha256(file) + ":0");
+            }
+            return result;
+        }
+
+        private static void AtomicRuntimePointer(string file, string value)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            var temporary = file + ".tmp-" + Guid.NewGuid().ToString("N");
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                var bytes = Encoding.ASCII.GetBytes(value);
+                stream.Write(bytes, 0, bytes.Length);
+                stream.Flush(true);
+            }
+            if (File.Exists(file)) File.Replace(temporary, file, null);
+            else File.Move(temporary, file);
+        }
+
+        private static void ValidateRuntimeLauncher(string node, string cli, string version, string workingDirectory)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = node, Arguments = Quote(cli) + " --version", WorkingDirectory = workingDirectory,
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true
+            };
+            using (var process = Process.Start(psi))
+            {
+                if (process == null) throw new InvalidOperationException("Staged Runtime validation process was not started.");
+                if (!process.WaitForExit(15000))
+                {
+                    if (!process.HasExited) process.Kill();
+                    if (!process.WaitForExit(5000) || !process.HasExited)
+                        throw new InvalidOperationException("Staged validation process exit is unconfirmed; PID=" + process.Id);
+                    throw new InvalidOperationException("Staged Runtime launcher dry-run timed out; live files were preserved.");
+                }
+                if (process.ExitCode != 0 || !process.StandardOutput.ReadToEnd().Contains(version))
+                    throw new InvalidDataException("Staged Runtime launcher dry-run failed.");
+            }
+        }
+
+        private static string StageOfflinePayload(string sourceRoot, string targetRoot, string evidence)
+        {
+            var stage = Path.Combine(evidence, "payload");
+            Directory.CreateDirectory(stage);
+            ExtractOfflinePayload(sourceRoot, stage);
+            var originalSlot = RuntimeResolver.ActiveRuntimeSlot(stage);
+            if (string.IsNullOrWhiteSpace(originalSlot))
+                throw new InvalidDataException("Update payload must contain a prepared immutable Runtime slot.");
+            var stagedSlot = Path.Combine(stage, "runtime", "slots", originalSlot);
+            var node = Path.Combine(stagedSlot, "node", "node.exe");
+            if (!File.Exists(node) || !File.Exists(Path.Combine(stage, "cloudflared.exe")))
+                throw new InvalidDataException("Update payload must contain its own Node.js and cloudflared.");
+            var version = ValidateBundle(stage);
+            var package = Path.Combine(stagedSlot, "devspace", "node_modules", "@waishnav", "devspace");
+            var cli = Path.Combine(package, "dist", "cli.js");
+            var server = Path.Combine(package, "dist", "server.js");
+            if (!File.Exists(cli) || !File.Exists(server))
+                throw new InvalidDataException("Runtime payload is missing CLI/server files.");
+            ValidateRuntimeLauncher(node, cli, version, stage);
+            var files = RuntimeFileHashes(stagedSlot);
+            var serverHash = FileSha256(server);
+            var provenance = Path.Combine(package, "runtime-provenance.json");
+            if (File.Exists(provenance))
+            {
+                var record = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(provenance));
+                object expected;
+                if (!record.TryGetValue("server_sha256", out expected) || Convert.ToString(expected) != serverHash)
+                    throw new InvalidDataException("Staged Runtime provenance hash mismatch.");
+            }
+            var id = "slot-" + Guid.NewGuid().ToString("N");
+            var slots = Path.Combine(targetRoot, "runtime", "slots");
+            Directory.CreateDirectory(slots);
+            var destination = Path.Combine(slots, id);
+            Directory.Move(stagedSlot, destination); // Unique destination; no existing slot is overwritten.
+            foreach (var entry in files)
+                if (FileSha256(Path.Combine(destination, entry.Key.Replace('/', Path.DirectorySeparatorChar))) + ":0" != entry.Value)
+                    throw new InvalidDataException("Staged Runtime file hash changed during publication.");
+            File.WriteAllText(Path.Combine(destination, "slot-manifest.json"), new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(new
+            {
+                files = files, version = version, server_sha256 = serverHash
+            }), new UTF8Encoding(false));
+            File.WriteAllText(Path.Combine(evidence, "target-slot.txt"), id, Encoding.ASCII);
+            return stage;
+        }
+
+        private static Dictionary<string, bool> BackupUpdateFiles(string sourceRoot, string targetRoot, string backup)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var name in new[] { "DevSpaceControlPlatform.exe", "Setup.exe", "README.md", "README.zh-CN.md", "LICENSE", "control-provenance.json", "settings.json", "cloudflared.exe", @"runtime\active-slot.txt", @"state\devspace-config\config.jsonc", @"state\devspace-config\auth.json" })
+                names.Add(name);
+            foreach (var directory in new[] { "ops", "desktop", "payload" })
+            {
+                var source = Path.Combine(sourceRoot, directory);
+                if (!Directory.Exists(source)) continue;
+                foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+                    names.Add(file.Substring(sourceRoot.Length + 1));
+            }
+            var existing = new Dictionary<string, bool>();
+            foreach (var name in names)
+            {
+                var file = Path.Combine(targetRoot, name);
+                existing.Add(name, File.Exists(file));
+                if (!File.Exists(file)) continue;
+                var copy = Path.Combine(backup, name);
+                Directory.CreateDirectory(Path.GetDirectoryName(copy));
+                File.Copy(file, copy, false);
+            }
+            File.WriteAllText(Path.Combine(backup, "files.json"), new JavaScriptSerializer().Serialize(existing));
+            return existing;
+        }
+
+        private static void ApplyOfflinePayloadUpgrade(string sourceRoot, string targetRoot, Action afterPayload, int consolePort)
         {
             Directory.CreateDirectory(targetRoot);
-            var runtime = Path.Combine(targetRoot, "runtime");
-            var activePointer = Path.Combine(runtime, "active-slot.txt");
-            var previousActiveSlot = File.Exists(activePointer)
-                ? File.ReadAllText(activePointer, Encoding.ASCII)
-                : null;
-            var cloudflared = Path.Combine(targetRoot, "cloudflared.exe");
-            var cloudflaredBackup = cloudflared + ".update-backup";
-
-            if (File.Exists(cloudflared))
-                File.Copy(cloudflared, cloudflaredBackup, true);
-            else if (File.Exists(cloudflaredBackup))
-                File.Delete(cloudflaredBackup);
-
+            var evidence = Path.Combine(targetRoot, "state", "runtime-updates", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(evidence);
+            var stage = StageOfflinePayload(sourceRoot, targetRoot, evidence);
+            var backup = Path.Combine(evidence, "backup");
+            Directory.CreateDirectory(backup);
+            var files = BackupUpdateFiles(sourceRoot, targetRoot, backup);
+            var previous = RuntimeResolver.ReadSelection(targetRoot);
+            if (previous == null)
+            {
+                var priorSlot = RuntimeResolver.ActiveRuntimeSlot(targetRoot);
+                var flatRuntime = Path.Combine(targetRoot, "runtime");
+                if (string.IsNullOrEmpty(priorSlot) && File.Exists(Path.Combine(flatRuntime, "devspace", "node_modules", "@waishnav", "devspace", "package.json")))
+                {
+                    var legacyNode = RuntimeResolver.ResolveNodePath(targetRoot);
+                    if (!Path.GetFullPath(legacyNode).StartsWith(flatRuntime + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("Legacy Runtime uses an external Node.js; no files were selected or stopped.");
+                    priorSlot = "slot-" + Guid.NewGuid().ToString("N");
+                    var baseline = Path.Combine(flatRuntime, "slots", priorSlot);
+                    if (Directory.Exists(baseline)) throw new IOException("Baseline slot already exists.");
+                    Directory.CreateDirectory(baseline);
+                    var components = new Dictionary<string, string> { { "node", Path.GetDirectoryName(legacyNode) }, { "devspace", Path.Combine(flatRuntime, "devspace") } };
+                    foreach (var tool in new[] { "serena", "uv" })
+                        if (Directory.Exists(Path.Combine(flatRuntime, tool))) components.Add(tool, Path.Combine(flatRuntime, tool));
+                    foreach (var component in components)
+                    {
+                        var before = RuntimeFileHashes(component.Value);
+                        var destination = Path.Combine(baseline, component.Key);
+                        CopyDirectoryContents(component.Value, destination);
+                        var copied = RuntimeFileHashes(destination);
+                        if (before.Count != copied.Count) throw new InvalidDataException("Legacy baseline file set changed during copy.");
+                        foreach (var file in before)
+                            if (!copied.ContainsKey(file.Key) || copied[file.Key] != file.Value) throw new InvalidDataException("Legacy baseline hash changed during copy.");
+                    }
+                    var package = Path.Combine(baseline, "devspace", "node_modules", "@waishnav", "devspace");
+                    var version = DevSpaceVersion.FromPackageJson(Path.Combine(package, "package.json")).Raw;
+                    var hash = FileSha256(Path.Combine(package, "dist", "server.js"));
+                    ValidateRuntimeLauncher(Path.Combine(baseline, "node", "node.exe"), Path.Combine(package, "dist", "cli.js"), version, baseline);
+                    File.WriteAllText(Path.Combine(baseline, "slot-manifest.json"), new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(new
+                    {
+                        files = RuntimeFileHashes(baseline), version = version, server_sha256 = hash
+                    }), new UTF8Encoding(false));
+                    File.WriteAllText(Path.Combine(baseline, "READY"), "ready\n");
+                }
+                if (!string.IsNullOrEmpty(priorSlot))
+                    previous = new Dictionary<string, object>
+                    {
+                        { "schema_version", 1 }, { "slot", priorSlot }, { "previous", null },
+                        { "server_sha256", FileSha256(Path.Combine(RuntimeResolver.ResolveDevSpacePackageRoot(targetRoot), "dist", "server.js")) }
+                    };
+            }
+            if (previous != null) ValidateBundle(targetRoot);
+            File.WriteAllText(Path.Combine(evidence, "selection-before.json"), new JavaScriptSerializer().Serialize(previous));
+            var id = File.ReadAllText(Path.Combine(evidence, "target-slot.txt"), Encoding.ASCII);
+            var next = new Dictionary<string, object>
+            {
+                { "schema_version", 1 }, { "slot", id },
+                { "server_sha256", FileSha256(Path.Combine(targetRoot, "runtime", "slots", id, "devspace", "node_modules", "@waishnav", "devspace", "dist", "server.js")) },
+                { "previous", previous == null ? null : new Dictionary<string, object> { { "slot", previous["slot"] }, { "server_sha256", previous["server_sha256"] } } }
+            };
+            var productsChanged = false;
             try
             {
-                ExtractOfflinePayload(sourceRoot, targetRoot);
+                WriteRuntimeSelection(targetRoot, next);
+                StopManagedRuntimeProcesses(targetRoot);
+                productsChanged = true;
+                File.Copy(Path.Combine(stage, "cloudflared.exe"), Path.Combine(targetRoot, "cloudflared.exe"), true);
                 ValidateBundle(targetRoot);
-                if (File.Exists(cloudflaredBackup)) File.Delete(cloudflaredBackup);
+                afterPayload();
+                if (consolePort > 0) StartAndAcceptRuntime(targetRoot, consolePort, evidence);
+                File.WriteAllText(Path.Combine(evidence, "completed"), consolePort > 0 ? "New Runtime process identity and local health accepted under gate." : "Offline payload selected.");
             }
-            catch
+            catch (Exception original)
             {
+                var failures = new List<Exception>();
+                var stopped = false;
+                try { StopManagedRuntimeProcesses(targetRoot); stopped = true; }
+                catch (Exception recovery) { failures.Add(recovery); }
                 try
                 {
-                    Directory.CreateDirectory(runtime);
-                    if (previousActiveSlot == null)
-                    {
-                        if (File.Exists(activePointer)) File.Delete(activePointer);
-                    }
+                    if (previous != null) WriteRuntimeSelection(targetRoot, previous);
                     else
                     {
-                        File.WriteAllText(activePointer, previousActiveSlot, Encoding.ASCII);
+                        var selection = RuntimeResolver.SelectionPath(targetRoot);
+                        if (File.Exists(selection)) File.Move(selection, Path.Combine(evidence, "failed-selection.json"));
+                        var mirror = Path.Combine(targetRoot, "runtime", "active-slot.txt");
+                        if (File.Exists(mirror)) File.Move(mirror, Path.Combine(evidence, "failed-active-slot.txt"));
                     }
-                    if (File.Exists(cloudflaredBackup))
-                        File.Copy(cloudflaredBackup, cloudflared, true);
                 }
-                catch
+                catch (Exception recovery) { failures.Add(recovery); }
+                if (stopped && productsChanged)
                 {
+                    foreach (var entry in files)
+                    {
+                        if (entry.Key == @"runtime\active-slot.txt") continue; // Mirror was restored after JSON above.
+                        try
+                        {
+                            var file = Path.Combine(targetRoot, entry.Key);
+                            if (entry.Value) File.Copy(Path.Combine(backup, entry.Key), file, true);
+                            else if (File.Exists(file)) File.Delete(file);
+                        }
+                        catch (Exception recovery) { failures.Add(recovery); }
+                    }
                 }
-                throw;
+                if (stopped && failures.Count == 0 && consolePort > 0 && previous != null)
+                {
+                    try { StartAndAcceptRuntime(targetRoot, consolePort, evidence); }
+                    catch (Exception recovery) { failures.Add(recovery); }
+                }
+                try { File.WriteAllText(Path.Combine(evidence, "recovery-status.txt"), failures.Count == 0 ? "Previous selection/files/process restored and accepted." : "Recovery incomplete; all backups retained."); }
+                catch (Exception recovery) { failures.Add(recovery); }
+                failures.Insert(0, original);
+                throw new AggregateException("Runtime update failed. Preserved recovery evidence: " + evidence, failures);
             }
-            finally
+        }
+
+        private static void WriteRuntimeSelection(string root, Dictionary<string, object> selection)
+        {
+            AtomicRuntimePointer(RuntimeResolver.SelectionPath(root), new JavaScriptSerializer().Serialize(selection));
+            // Old desktop launchers and previous binaries still read this mirror.
+            AtomicRuntimePointer(Path.Combine(root, "runtime", "active-slot.txt"), Convert.ToString(selection["slot"]) + "\n");
+        }
+
+        private static void StartAndAcceptRuntime(string root, int consolePort, string evidence)
+        {
+            var selection = RuntimeResolver.ReadSelection(root);
+            if (selection == null) throw new InvalidDataException("Runtime selection is missing before start.");
+            var package = RuntimeResolver.ResolveDevSpacePackageRoot(root);
+            var node = RuntimeResolver.ResolveNodePath(root);
+            var version = DevSpaceVersion.FromPackageJson(Path.Combine(package, "package.json")).Raw;
+            var settings = PlatformSettingsStore.Load(Path.Combine(root, "settings.json"), root);
+            var instance = "group";
+            if (!string.IsNullOrWhiteSpace(settings.FixedHostname))
             {
-                try
+                var segments = new Uri(PublicEndpoint.BaseUrl(settings.FixedHostname)).AbsolutePath.Trim('/').Split('/');
+                if (segments.Length > 0 && !string.IsNullOrEmpty(segments[segments.Length - 1])) instance = segments[segments.Length - 1].ToLowerInvariant();
+            }
+            if (!Regex.IsMatch(instance, "^[a-z0-9][a-z0-9._-]*$")) throw new InvalidDataException("Invalid Control instance path.");
+            var started = DateTime.UtcNow;
+            var config = Path.Combine(root, "state", "devspace-config", "config.jsonc");
+            var arguments = Quote(Path.Combine(root, "ops", "runtime-console.mjs")) + " --platform-root " + Quote(root) +
+                " --config " + Quote(config) + " --instance " + Quote(instance) + " --serve " + consolePort;
+            var auth = Path.Combine(Path.GetDirectoryName(config), "auth.json");
+            if (File.Exists(auth)) arguments += " --credential-file " + Quote(auth) + " --allow-owner-copy true";
+            using (var console = Process.Start(new ProcessStartInfo
+            {
+                FileName = node, Arguments = arguments, WorkingDirectory = root,
+                UseShellExecute = false, CreateNoWindow = true
+            }))
+            {
+                if (console == null) throw new InvalidOperationException("Updated Control Console could not be started.");
+                File.WriteAllText(Path.Combine(evidence, "console-start-" + console.Id + ".json"), new JavaScriptSerializer().Serialize(new
                 {
-                    if (File.Exists(cloudflaredBackup)) File.Delete(cloudflaredBackup);
-                }
-                catch
+                    console_pid = console.Id, slot = selection["slot"], started_at = started.ToString("o")
+                }));
+                var deadline = DateTime.UtcNow.AddSeconds(45);
+                while (DateTime.UtcNow < deadline)
                 {
+                    if (console.HasExited) throw new InvalidOperationException("Updated Control Console exited before Runtime acceptance.");
+                    Dictionary<string, object> body = null;
+                    try
+                    {
+                        var request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + consolePort + "/api/status");
+                        request.Proxy = null; request.AllowAutoRedirect = false; request.Timeout = 10000; request.ReadWriteTimeout = 10000;
+                        using (var response = request.GetResponse())
+                        using (var reader = new StreamReader(response.GetResponseStream()))
+                            body = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(reader.ReadToEnd());
+                    }
+                    catch (WebException) { Thread.Sleep(250); continue; }
+                    if (body == null || !body.ContainsKey("schema_version") || Convert.ToInt32(body["schema_version"]) != 2 ||
+                        !body.ContainsKey("instance") || Convert.ToString(body["instance"]) != instance)
+                        throw new InvalidDataException("Unexpected Control Console identity during Runtime acceptance.");
+                    var runtime = body != null && body.ContainsKey("runtime") ? body["runtime"] as Dictionary<string, object> : null;
+                    var actual = runtime != null && runtime.ContainsKey("actual") ? runtime["actual"] as Dictionary<string, object> : null;
+                    if (actual == null || !actual.ContainsKey("pid") || actual["pid"] == null ||
+                        !actual.ContainsKey("package_root") || actual["package_root"] == null ||
+                        !actual.ContainsKey("server_sha256") || actual["server_sha256"] == null ||
+                        !actual.ContainsKey("version") || actual["version"] == null) { Thread.Sleep(250); continue; }
+                    if (!string.Equals(Convert.ToString(actual["package_root"]), package, StringComparison.OrdinalIgnoreCase) ||
+                        Convert.ToString(actual["server_sha256"]) != Convert.ToString(selection["server_sha256"]) ||
+                        Convert.ToString(actual["version"]) != version || Convert.ToString(runtime["active_slot"]) != Convert.ToString(selection["slot"]))
+                        throw new InvalidDataException("New Runtime process slot/hash/version identity mismatch.");
+                    var mcp = body.ContainsKey("mcp") ? body["mcp"] as Dictionary<string, object> : null;
+                    var health = mcp != null && mcp.ContainsKey("local_health") ? mcp["local_health"] as Dictionary<string, object> : null;
+                    using (var process = Process.GetProcessById(Convert.ToInt32(actual["pid"])))
+                    {
+                        if (process.HasExited || process.MainModule == null ||
+                            !string.Equals(Path.GetFullPath(process.MainModule.FileName), Path.GetFullPath(node), StringComparison.OrdinalIgnoreCase) ||
+                            process.StartTime.ToUniversalTime() < started.AddSeconds(-1))
+                            throw new InvalidOperationException("New Runtime PID/executable/start identity could not be accepted.");
+                        if (health != null && health.ContainsKey("ok") && Convert.ToBoolean(health["ok"]))
+                        {
+                            File.WriteAllText(Path.Combine(evidence, "accepted-" + process.Id + ".json"), new JavaScriptSerializer().Serialize(new
+                            {
+                                pid = process.Id, executable = process.MainModule.FileName, started_at = process.StartTime.ToUniversalTime().ToString("o"),
+                                slot = selection["slot"], server_sha256 = selection["server_sha256"], version = version
+                            }));
+                            return;
+                        }
+                    }
+                    Thread.Sleep(250);
                 }
+                throw new InvalidOperationException("New Runtime local health acceptance timed out.");
             }
         }
 
@@ -745,6 +1005,16 @@ namespace DevSpaceControlPlatform
             string platformRoot,
             bool applySystemIntegration)
         {
+            return UpdateExisting(bundleRoot, platformRoot, applySystemIntegration, 17678);
+        }
+
+        internal static SetupInstallResult UpdateExisting(
+            string bundleRoot,
+            string platformRoot,
+            bool applySystemIntegration,
+            int consolePort)
+        {
+            ValidatePort(consolePort);
             var root = Path.GetFullPath(platformRoot);
             var sourceRoot = Path.GetFullPath(bundleRoot);
             var settingsPath = Path.Combine(root, "settings.json");
@@ -766,20 +1036,16 @@ namespace DevSpaceControlPlatform
             var restartGate = AcquireRuntimeUpdateGate(root, sourceRoot);
             try
             {
-                StopManagedRuntimeProcesses(root);
-                ApplyOfflinePayload(sourceRoot, root, true);
-                CopyProductFiles(sourceRoot, root);
-                var versionText = ValidateBundle(root);
-
-                // Preserve an explicitly selected protocol across upgrades. The
-                // settings loader already normalizes missing legacy values to auto,
-                // while a user-selected http2/quic value may reflect a verified
-                // network requirement that an update must not silently discard.
-                PlatformSettingsStore.Save(settingsPath, settings);
-                if (applySystemIntegration) ApplyWindowsAutoStart(root, settings.AutoStart);
-
-                var result = FinalizeConfiguration(root, settings, versionText, true);
-                if (applySystemIntegration) RememberInstallationRoot(root);
+                SetupInstallResult result = null;
+                ApplyOfflinePayloadUpgrade(sourceRoot, root, delegate
+                {
+                    CopyProductFiles(sourceRoot, root);
+                    var versionText = ValidateBundle(root);
+                    PlatformSettingsStore.Save(settingsPath, settings);
+                    if (applySystemIntegration) ApplyWindowsAutoStart(root, settings.AutoStart);
+                    result = FinalizeConfiguration(root, settings, versionText, true);
+                    if (applySystemIntegration) RememberInstallationRoot(root);
+                }, consolePort);
                 return result;
             }
             finally
@@ -790,32 +1056,9 @@ namespace DevSpaceControlPlatform
             }
         }
 
-        private static string ManagedRuntimeStateDirectory(string platformRoot)
-        {
-            var fallback = Path.GetFullPath(Path.Combine(platformRoot, "state", "devspace-state"));
-            var config = Path.Combine(platformRoot, "state", "devspace-config", "config.jsonc");
-            if (!File.Exists(config)) return fallback;
-            var raw = File.ReadAllText(config, Encoding.UTF8);
-            // A generated config has a JSON string value; preserve JSONC
-            // comments without attempting to reinterpret arbitrary JavaScript.
-            var matches = Regex.Matches(raw, @"""stateDir""\s*:\s*(""(?:\\.|[^""\\])*"")");
-            if (matches.Count == 0)
-            {
-                if (raw.Contains("\"stateDir\""))
-                    throw new InvalidDataException("Unable to verify the managed Runtime state directory.");
-                return fallback;
-            }
-            if (matches.Count != 1)
-                throw new InvalidDataException("Ambiguous managed Runtime state directory.");
-            var candidate = new JavaScriptSerializer().Deserialize<string>(matches[0].Groups[1].Value);
-            if (string.IsNullOrWhiteSpace(candidate) || !Path.IsPathRooted(candidate))
-                throw new InvalidDataException("The managed Runtime state directory must be absolute.");
-            return Path.GetFullPath(candidate);
-        }
-
         internal static string AcquireRuntimeUpdateGate(string platformRoot, string bundleRoot)
         {
-            var stateDir = ManagedRuntimeStateDirectory(platformRoot);
+            var stateDir = RuntimeResolver.StateDirectory(platformRoot);
             Directory.CreateDirectory(stateDir);
             var proposed = Path.Combine(stateDir, ".runtime-update-gate-" + Guid.NewGuid().ToString("N"));
             var gate = Path.Combine(stateDir, ".runtime-switch-gate");
@@ -939,36 +1182,51 @@ namespace DevSpaceControlPlatform
                 CopyDirectoryContents(directory, Path.Combine(targetDirectory, Path.GetFileName(directory)));
         }
 
-        private static void StopManagedRuntimeProcesses(string platformRoot)
+        internal static void StopManagedRuntimeProcesses(string platformRoot)
         {
             var root = Path.GetFullPath(platformRoot).TrimEnd(Path.DirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
-            foreach (var processName in new[] { "DevSpaceControlPlatform", "DevSpaceForgeDesktop", "node", "cloudflared" })
+            for (var pass = 0; pass < 2; pass++)
             {
-                foreach (var process in Process.GetProcessesByName(processName))
+                foreach (var processName in new[] { "DevSpaceControlPlatform", "DevSpaceForgeDesktop", "node", "cloudflared" })
                 {
-                    try
+                    foreach (var process in Process.GetProcessesByName(processName))
                     {
-                        var module = process.MainModule;
-                        var executable = module == null ? string.Empty : module.FileName;
-                        if (string.IsNullOrWhiteSpace(executable)) continue;
-                        var fullPath = Path.GetFullPath(executable);
-                        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
-                        if (process.Id == Process.GetCurrentProcess().Id) continue;
+                        var executableIdentity = "unavailable";
+                        var startIdentity = "unavailable";
                         try
                         {
+                            if (process.Id == Process.GetCurrentProcess().Id) continue;
+                            if (process.HasExited) continue;
+                            var module = process.MainModule;
+                            var executable = module == null ? string.Empty : module.FileName;
+                            if (string.IsNullOrWhiteSpace(executable))
+                                throw new InvalidOperationException("Process executable identity is unavailable.");
+                            var fullPath = Path.GetFullPath(executable);
+                            executableIdentity = fullPath;
+                            if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
+                            var identity = process.StartTime.ToUniversalTime();
+                            startIdentity = identity.ToString("o");
+                            if (pass == 1) throw new InvalidOperationException("A managed process remained after the confirmed-stop sweep.");
                             if (process.CloseMainWindow() && process.WaitForExit(2500)) continue;
+                            if (process.HasExited) continue;
+                            if (process.StartTime.ToUniversalTime() != identity)
+                                throw new InvalidOperationException("Process identity changed before stop.");
+                            if (!process.HasExited) process.Kill();
+                            if (!process.WaitForExit(5000) || !process.HasExited)
+                                throw new InvalidOperationException("Process exit could not be confirmed within 5000ms.");
                         }
-                        catch { }
-                        process.Kill();
-                        process.WaitForExit(5000);
-                    }
-                    catch
-                    {
-                    }
-                    finally
-                    {
-                        process.Dispose();
+                        catch (Exception error)
+                        {
+                            throw new InvalidOperationException(
+                                "Managed process stop is unconfirmed (name=" + processName + ", PID=" + process.Id +
+                                ", start=" + startIdentity + ", executable=" + executableIdentity +
+                                "). Update aborted; inspect this process before retrying.", error);
+                        }
+                        finally
+                        {
+                            process.Dispose();
+                        }
                     }
                 }
             }

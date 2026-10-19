@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
+import { readRuntimeSelection } from './runtime-rollback.mjs';
+import { createHash } from 'node:crypto';
 
 const clip=(value,n=250)=>String(value||'').slice(0,n);
 const run=(command,args,timeout=15000)=>{
@@ -101,12 +103,16 @@ export function createServiceController(options,{platform=process.platform,spawn
   }
   function runtime(){
     const root=path.join(options.platformRoot,'runtime');
-    let slot='';try{slot=readFileSync(path.join(root,'active-slot.txt'),'utf8').trim();}catch{}
+    const selection=readRuntimeSelection(options);
+    let slot=selection?.slot||'';
+    const pointer=path.join(root,'active-slot.txt');
+    if(!selection&&existsSync(pointer))slot=readFileSync(pointer,'utf8').trim();
     if(slot&&(!/^[A-Za-z0-9._-]+$/.test(slot)||slot==='.'||slot==='..'))throw new Error('Invalid active Runtime slot.');
     const dir=slot?path.join(root,'slots',slot):root;
-    const node=[path.join(dir,'node','node.exe'),path.join(dir,'node','bin','node.exe')].find(existsSync);
-    const pkg=[path.join(dir,'devspace','node_modules','@waishnav','devspace'),path.join(dir,'node_modules','@waishnav','devspace')].find(p=>existsSync(path.join(p,'dist','cli.js')));
+    const node=(selection?[path.join(dir,'node','node.exe')]:[path.join(dir,'node','node.exe'),path.join(dir,'node','bin','node.exe')]).find(existsSync);
+    const pkg=(selection?[path.join(dir,'devspace','node_modules','@waishnav','devspace')]:[path.join(dir,'devspace','node_modules','@waishnav','devspace'),path.join(dir,'node_modules','@waishnav','devspace')]).find(p=>existsSync(path.join(p,'dist','cli.js')));
     if(!node||!pkg)throw new Error('Bundled Runtime Node or DevSpace CLI is missing.');
+    if(selection&&(!existsSync(path.join(dir,'READY'))||!existsSync(path.join(pkg,'package.json'))||createHash('sha256').update(readFileSync(path.join(pkg,'dist','server.js'))).digest('hex')!==selection.server_sha256))throw new Error('Selected Runtime is incomplete or its hash changed; legacy mirror was not used.');
     return {node,cli:path.join(pkg,'dist','cli.js'),pkg,dir};
   }
   function available(name){

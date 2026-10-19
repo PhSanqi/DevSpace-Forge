@@ -11,7 +11,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { switchRuntime, localRuntimeProbe } from './runtime-rollback.mjs';
+import { switchRuntime, localRuntimeProbe, readRuntimeSelection, slotPackage, validateRuntimeSlot } from './runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
 import { createServiceController } from './control-service-controller.mjs';
 import {
@@ -23,7 +23,7 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const validUnit = /^[A-Za-z0-9_.@-]+\.service$/;
-const validSlot = /^[A-Za-z0-9._-]+$/;
+const validSlot = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const parse = (text) => { try { return JSON.parse(text); } catch { return null; } };
 const readJson = (file) => { try { return parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
 const fileHash = (file) => { try { return createHash('sha256').update(readFileSync(file)).digest('hex'); } catch { return null; } };
@@ -104,6 +104,9 @@ function packageRootFromCli(cli) {
 function directRuntimeId(root,packageRoot) {
   if(!packageRoot)return '';
   const absoluteRoot=path.resolve(root);
+  const slots=path.join(absoluteRoot,'runtime','slots');
+  const parts=path.relative(slots,path.resolve(packageRoot)).split(path.sep);
+  if(parts.length===5&&validSlot.test(parts[0])&&parts.slice(1).join('/')==='devspace/node_modules/@waishnav/devspace')return parts[0];
   const runtimeRoot=path.dirname(path.dirname(path.dirname(path.resolve(packageRoot))));
   if(path.dirname(runtimeRoot)!==absoluteRoot)return '';
   const id=path.basename(runtimeRoot);
@@ -187,13 +190,14 @@ function manifest(file,expectedHash,uiRoot='') {
   return result;
 }
 export function runtimeInfo(options) {
-  const active=readPointer(options.platformRoot,'active-slot.txt');
-  const previous=readPointer(options.platformRoot,'previous-slot.txt');
-  const declared=options.explicitRuntimePackage || candidatePackages(options.platformRoot,active).find((p)=>existsSync(path.join(p,'package.json'))) || '';
+  const selected=readRuntimeSelection(options);
+  const active=selected?.slot||readPointer(options.platformRoot,'active-slot.txt');
+  const previous=selected?selected.previous?.slot||'':readPointer(options.platformRoot,'previous-slot.txt');
+  const declared=selected?slotPackage(options.platformRoot,selected.slot):options.explicitRuntimePackage || candidatePackages(options.platformRoot,active).find((p)=>existsSync(path.join(p,'package.json'))) || '';
   const processInfo=options.processOverride||runningPackage(options.serviceUnit,options.pid);
   const actual=processInfo.packageRoot;
   const actualHash=actual?fileHash(path.join(actual,'dist','server.js')):null;
-  const declaredHash=declared?fileHash(path.join(declared,'dist','server.js')):null;
+  const declaredHash=selected?.server_sha256||(declared?fileHash(path.join(declared,'dist','server.js')):null);
   const pointerMismatch=!!actual&&!!declared&&path.resolve(actual)!==path.resolve(declared);
   const actualRuntimeId=directRuntimeId(options.platformRoot,actual);
   const configuredRuntimeId=directRuntimeId(options.platformRoot,declared);
@@ -208,7 +212,7 @@ export function runtimeInfo(options) {
   const control=manifest(controlManifest,controlHash,controlRoot);
   return {
     active_slot:active||null,previous_slot:previous||null,
-    runtime_topology:active?'slot-pointer':actualRuntimeId?'direct-launcher':'unresolved',
+    runtime_topology:selected?'runtime-selection':active?'slot-pointer':actualRuntimeId?'direct-launcher':'unresolved',
     actual_runtime_id:actualRuntimeId||null,configured_runtime_id:configuredRuntimeId||null,
     version:declaredVersion||null,package_root:declared||null,server_sha256:declaredHash,
     configured:{package_root:declared||null,version:declaredVersion||null,server_sha256:declaredHash},
@@ -218,9 +222,8 @@ export function runtimeInfo(options) {
   };
 }
 function deploymentInfo(options,rt) {
-  let rollback=[];
-  try {rollback=readdirSync(options.platformRoot,{withFileTypes:true}).filter((d)=>d.isDirectory()&&/^runtime-local\d+$/i.test(d.name)&&d.name!==rt.active_slot).map((d)=>d.name).sort();}catch{}
-  if(rt.previous_slot&&!rollback.includes(rt.previous_slot))rollback.unshift(rt.previous_slot);
+  const targets=rollbackTargets(options,rt);
+  const rollback=targets.filter(target=>!target.current).map(target=>target.id);
   const backupRoot=path.join(options.platformRoot,'state','backup');
   let backups=[];
   try {backups=readdirSync(backupRoot,{withFileTypes:true}).filter((x)=>x.isDirectory()).map((x)=>x.name).sort().reverse().slice(0,20);}catch{}
@@ -229,7 +232,7 @@ function deploymentInfo(options,rt) {
     runtime_topology:rt.runtime_topology,actual_runtime_id:rt.actual_runtime_id,configured_runtime_id:rt.configured_runtime_id,
     runtime_root:rt.actual.package_root ? path.dirname(path.dirname(path.dirname(rt.actual.package_root))) : null,
     configured_runtime_root:rt.package_root ? path.dirname(path.dirname(path.dirname(rt.package_root))) : null,
-    rollback_candidates:rollback,rollback_targets:rollbackTargets(options,rt),
+    rollback_candidates:rollback,rollback_targets:targets,
     backup_root_present:existsSync(backupRoot),recent_backups:backups
   };
 }
@@ -251,6 +254,16 @@ export function rollbackTargets(options,rt=runtimeInfo(options)) {
         if(typeof version!=='string'||!hash)continue;
         entries.push({id:entry.name,version,server_sha256:hash,package_root:pkg,current:rt.actual?.package_root===pkg,verified:true});
       }catch{}
+    }
+  }catch{}
+  try{
+    const slots=path.join(root,'runtime','slots');
+    for(const entry of readdirSync(slots,{withFileTypes:true})){
+      if(!entry.isDirectory())continue;
+      try{
+        const target=validateRuntimeSlot(options,entry.name,{dryRun:()=>{}});
+        entries.push({...target,current:rt.actual?.package_root===target.package_root});
+      }catch{} // Incomplete or altered slots are never selectable.
     }
   }catch{}
   return entries.sort((a,b)=>a.id.localeCompare(b.id));

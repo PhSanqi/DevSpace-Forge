@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_ARGS=("$@")
 
 # Quote one ExecStart argument using systemd unit-file rules. Both specifiers
 # (`%`) and variable expansion (`$`) are doubled so systemd keeps them literal.
@@ -100,26 +101,6 @@ if (( TOKEN_SOURCES > 1 )); then
 fi
 if (( TUNNEL_TOKEN_ARGV == 1 )); then
   echo 'warning: --tunnel-token exposes the token in process listings; use --tunnel-token-file or --tunnel-token-stdin.' >&2
-fi
-if [[ -n "$TUNNEL_TOKEN_FILE_ARG" ]]; then
-  if [[ ! -r "$TUNNEL_TOKEN_FILE_ARG" ]]; then
-    echo "Tunnel token file is not readable: $TUNNEL_TOKEN_FILE_ARG" >&2
-    exit 1
-  fi
-  TUNNEL_TOKEN="$(<"$TUNNEL_TOKEN_FILE_ARG")"
-fi
-if [[ "$TUNNEL_TOKEN_STDIN" -eq 1 ]]; then
-  if [[ -t 0 ]]; then
-    printf 'Cloudflare Remote Tunnel token: ' >&2
-    IFS= read -r -s TUNNEL_TOKEN || true
-    printf '\n' >&2
-  else
-    IFS= read -r TUNNEL_TOKEN || true
-  fi
-  if [[ -z "$TUNNEL_TOKEN" ]]; then
-    echo 'Tunnel token from standard input is empty.' >&2
-    exit 1
-  fi
 fi
 
 INSTANCE_SUFFIX=""
@@ -263,6 +244,33 @@ if [[ "$UPGRADE_EXISTING" -eq 0 && ! -d "$ALLOWED_ROOT" ]]; then
 fi
 if [[ "$UPGRADE_EXISTING" -eq 0 ]]; then ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd)"; fi
 
+# The parent holds the existing cross-process gate through installation and acceptance.
+if [[ "${DSF_INSTALL_GUARD_PID:-}" != "$PPID" ]]; then
+  exec "$BUNDLED_NODE" "$ROOT/ops/runtime-rollback.mjs" --install-guard "$INSTALL_ROOT" "$EXISTING_CONFIG" "$DEVSPACE_SERVICE" "$ROOT/setup-linux.sh" "${ORIGINAL_ARGS[@]}"
+fi
+
+if [[ -n "$TUNNEL_TOKEN_FILE_ARG" ]]; then
+  if [[ ! -r "$TUNNEL_TOKEN_FILE_ARG" ]]; then
+    echo "Tunnel token file is not readable: $TUNNEL_TOKEN_FILE_ARG" >&2
+    exit 1
+  fi
+  TUNNEL_TOKEN="$(<"$TUNNEL_TOKEN_FILE_ARG")"
+fi
+if [[ "$TUNNEL_TOKEN_STDIN" -eq 1 ]]; then
+  if [[ -t 0 ]]; then
+    printf 'Cloudflare Remote Tunnel token: ' >&2
+    IFS= read -r -s TUNNEL_TOKEN || true
+    printf '\n' >&2
+  else
+    IFS= read -r TUNNEL_TOKEN || true
+  fi
+  if [[ -z "$TUNNEL_TOKEN" ]]; then
+    echo 'Tunnel token from standard input is empty.' >&2
+    exit 1
+  fi
+fi
+
+
 mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_DIR" "$WORKTREE_ROOT" "$INSTALL_ROOT/bin"
 install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$ROOT/ops/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
@@ -284,16 +292,14 @@ fi
 cat > "$INSTALL_ROOT/runtime-console.env" <<EOF
 DEVSPACE_SERVICE=$DEVSPACE_SERVICE
 TUNNEL_SERVICE=$CLOUDFLARED_SERVICE
+DEVSPACE_CONFIG_PATH=$(printf '%q' "$EXISTING_CONFIG")
 EOF
 chmod 0644 "$INSTALL_ROOT/runtime-console.env"
-rm -rf "$INSTALL_ROOT/runtime/node" "$INSTALL_ROOT/runtime/devspace"
-cp -a "$ROOT/runtime/node" "$INSTALL_ROOT/runtime/node"
-cp -a "$ROOT/runtime/devspace" "$INSTALL_ROOT/runtime/devspace"
+SLOT_ID="$("$BUNDLED_NODE" "$ROOT/ops/runtime-rollback.mjs" --stage "$INSTALL_ROOT" "$EXISTING_CONFIG" "$ROOT/runtime")"
+NODE="$INSTALL_ROOT/runtime/slots/$SLOT_ID/node/bin/node"
 cp -f "$BUNDLED_CLOUDFLARED" "$INSTALL_ROOT/cloudflared"
-chmod 0755 "$INSTALL_ROOT/cloudflared" "$INSTALL_ROOT/runtime/node/bin/node"
+chmod 0755 "$INSTALL_ROOT/cloudflared"
 
-NODE="$INSTALL_ROOT/runtime/node/bin/node"
-DEVSPACE_PACKAGE="$INSTALL_ROOT/runtime/devspace/node_modules/@waishnav/devspace"
 CLOUDFLARED="$INSTALL_ROOT/cloudflared"
 
 PUBLIC_URL="$($NODE - "$PUBLIC_URL" <<'NODE'
@@ -395,17 +401,20 @@ if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
   fi
 fi
 
-cat > "$INSTALL_ROOT/bin/run-devspace" <<EOF
+cat > "$INSTALL_ROOT/bin/run-devspace.pending-$SLOT_ID" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export DEVSPACE_CONFIG_DIR="\$("$NODE" "$INSTALL_ROOT/bin/prepare-effective-config.mjs" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --auth "$DEVSPACE_CONFIG_DIR/auth.json" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --output-dir "$QUICK_CONFIG_DIR")"
-exec "$NODE" "$DEVSPACE_PACKAGE/dist/cli.js" serve
+selection="\$("$NODE" "$INSTALL_ROOT/bin/runtime-rollback.mjs" --resolve "$INSTALL_ROOT" "$DEVSPACE_CONFIG_DIR/config.jsonc")"
+mapfile -t selected <<< "\$selection"
+if [[ "\${1:-}" == "--dry-run" ]]; then printf '%s\n' "\${selected[@]}"; exit 0; fi
+export DEVSPACE_CONFIG_DIR="\$("\${selected[0]}" "$INSTALL_ROOT/bin/prepare-effective-config.mjs" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --auth "$DEVSPACE_CONFIG_DIR/auth.json" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --output-dir "$QUICK_CONFIG_DIR")"
+exec "\${selected[0]}" "\${selected[1]}" serve
 EOF
-chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
+chmod 0755 "$INSTALL_ROOT/bin/run-devspace.pending-$SLOT_ID"
 cat > "$INSTALL_ROOT/bin/run-runtime-console" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --credential-file "$DEVSPACE_CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT" $CONSOLE_TUNNEL_METRICS_ARGS
+exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --credential-file "$DEVSPACE_CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --serve "$CONSOLE_PORT" $CONSOLE_TUNNEL_METRICS_ARGS
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 
@@ -432,6 +441,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+KillMode=process
 ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-devspace")
 Restart=on-failure
 RestartSec=3
@@ -724,7 +734,8 @@ wait_for_endpoint() {
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if [[ "$START_SERVICES" -eq 1 ]]; then
-    systemctl --user enable --now "$DEVSPACE_SERVICE"
+    systemctl --user enable "$DEVSPACE_SERVICE"
+    "$NODE" "$INSTALL_ROOT/bin/runtime-rollback.mjs" --activate "$INSTALL_ROOT" "$EXISTING_CONFIG" "$SLOT_ID" "$DEVSPACE_SERVICE" 1
     systemctl --user enable --now "$CONSOLE_SERVICE"
     if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_TOKEN_FILE" ]]; then
       systemctl --user enable --now "$CLOUDFLARED_SERVICE"
@@ -765,9 +776,12 @@ if command -v systemctl >/dev/null 2>&1; then
       echo 'Reusing an existing Cloudflare Tunnel; public-route verification is deferred until its Published Application is added.'
     fi
     echo 'Connectivity verification passed.'
+  else
+    "$NODE" "$INSTALL_ROOT/bin/runtime-rollback.mjs" --activate "$INSTALL_ROOT" "$EXISTING_CONFIG" "$SLOT_ID" "$DEVSPACE_SERVICE" 0
   fi
 else
-  echo 'systemctl was not found; services were installed but not started.' >&2
+  echo 'systemctl is required to confirm Runtime stop/identity; selection was not changed.' >&2
+  exit 1
 fi
 
 echo

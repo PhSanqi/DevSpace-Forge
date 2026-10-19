@@ -749,95 +749,21 @@ test('rollback API requires current process, exact inventory ID, hash, token and
     }
   }finally{await new Promise(resolve=>server.close(resolve));f.clean();}
 });
-test('selected runtime switch validates identity and restores launcher on failed health',async()=>{
-  const f=fixture();
-  try{
-    const bin=path.join(f.root,'bin');mkdirSync(bin,{recursive:true});
-    const wrapper=path.join(bin,'run-devspace');
-    const consoleWrapper=path.join(bin,'run-runtime-console');
-    const original='#!/bin/sh\nexec node '+path.join(f.actual,'dist','cli.js')+' serve\n';
-    const consoleOriginal='#!/bin/sh\nexec node runtime-console.mjs --runtime-package "'+f.actual+'" --serve 17678\n';
-    writeFileSync(wrapper,original,{mode:0o700});
-    writeFileSync(consoleWrapper,consoleOriginal,{mode:0o700});
-    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
-    const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
-    const options={platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual};
-    const params={options,live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux'};
-    const {DatabaseSync}=await import('node:sqlite');
-    options.stateDir=path.join(f.root,'active-jobs-state');
-    mkdirSync(path.join(options.stateDir,'jobs'),{recursive:true});
-    let jobsDb=new DatabaseSync(path.join(options.stateDir,'jobs','jobs.sqlite'));
-    jobsDb.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
-    jobsDb.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_running','running');
-    jobsDb.close();
-    const inUse=await switchRuntime({...params,restart:()=>assert.fail('Runtime restart must not run while job is active'),probe:async()=>true});
-    assert.equal(inUse.status,409);
-    assert.equal(inUse.reason_code,'active_jobs');
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    jobsDb=new DatabaseSync(path.join(options.stateDir,'jobs','jobs.sqlite'));
-    jobsDb.prepare("UPDATE durable_jobs SET status='succeeded' WHERE id='job_running'").run();
-    jobsDb.close();
-    assert.equal((await switchRuntime({...params,expectedHash:'0'.repeat(64)})).status,409);
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    let restarts=0;
-    const failed=await switchRuntime({
-      ...params,restart:()=>{restarts++;},
-      probe:async(candidate)=>candidate.package_root===f.actual,
-      probeAttempts:2,probeIntervalMs:1
-    });
-    assert.equal(failed.status,500);
-    assert.equal(failed.restored,true);
-    assert.equal(failed.reason_code,'target_not_healthy');
-    assert.equal(restarts,2);
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    assert.equal(options.explicitRuntimePackage,f.actual);
-    let timeoutRestarts=0;
-    const timedOut=await switchRuntime({
-      ...params,
-      restart:()=>{if(++timeoutRestarts===1)throw new Error('The service restart confirmation timed out.');},
-      probe:async()=>true,probeAttempts:1,probeIntervalMs:1
-    });
-    assert.equal(timedOut.status,500);
-    assert.equal(timedOut.reason_code,'restart_timeout');
-    assert.equal(timedOut.restored,true);
-    assert.equal(timeoutRestarts,2);
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    assert.equal(options.explicitRuntimePackage,f.actual);
-    const ok=await switchRuntime({...params,restart:()=>{},probe:async()=>true,probeAttempts:2,probeIntervalMs:1});
-    assert.equal(ok.status,200);
-    assert.match(readFileSync(wrapper,'utf8'),/runtime-local13[\\/]/);
-    assert.match(readFileSync(consoleWrapper,'utf8'),/runtime-local13[\\/]/);
-    assert.doesNotMatch(readFileSync(consoleWrapper,'utf8'),/runtime-local13-candidate[\\/]/);
-    assert.equal(options.explicitRuntimePackage,target.package_root);
-    assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-devspace.bak'),'utf8'),original);
-    assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-runtime-console.bak'),'utf8'),consoleOriginal);
-  }finally{f.clean();}
-});
-test('runtime switch supports quoted launchers under space paths and rejects ambiguous launchers',async()=>{
+test('legacy launcher switching fails closed until the installer migrates persisted selection',async()=>{
   const f=fixture('devspace console with spaces-');
   try{
     const bin=path.join(f.root,'bin');mkdirSync(bin,{recursive:true});
     const wrapper=path.join(bin,'run-devspace');
-    const currentCli=path.join(f.actual,'dist','cli.js');
-    const original='#!/bin/sh\nexec "node" "'+currentCli+'" serve\n';
+    const original='#!/bin/sh\nexec "node" "'+path.join(f.actual,'dist','cli.js')+'" serve\n';
     writeFileSync(wrapper,original,{mode:0o700});
-    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.actual,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
-    const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
-    const params={options:{platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual},live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux',restart:()=>{},probe:async()=>true,probeAttempts:1,probeIntervalMs:1};
-    const ok=await switchRuntime(params);
-    assert.equal(ok.status,200);
-    assert.match(readFileSync(wrapper,'utf8'),/runtime-local13[\\/]/);
-
-    const ambiguous=original+'# duplicate '+currentCli+'\n';
-    writeFileSync(wrapper,ambiguous,{mode:0o700});
-    const rejected=await switchRuntime(params);
-    assert.equal(rejected.status,409);
-    assert.match(rejected.error,/launcher does not match/i);
-    assert.equal(readFileSync(wrapper,'utf8'),ambiguous);
+    let restarted=false;
+    const result=await switchRuntime({options:{platformRoot:f.root,serviceUnit:'test-runtime.service'},
+      target:{id:'legacy'},expectedHash:'0'.repeat(64),observedPid:123,
+      restart:()=>{restarted=true;},readLive:()=>({pid:123,package_root:f.actual}),probe:async()=>true,platform:'linux'});
+    assert.equal(result.status,409);
+    assert.match(result.error,/selection is missing.*installer/i);
+    assert.equal(restarted,false);
+    assert.equal(readFileSync(wrapper,'utf8'),original);
   }finally{f.clean();}
 });
 test('managed config save preserves unrelated config and creates a restorable history snapshot',()=>{
