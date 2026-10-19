@@ -364,23 +364,33 @@ namespace DevSpaceControlPlatform
                 { "previous", previous == null ? null : new Dictionary<string, object> { { "slot", previous["slot"] }, { "server_sha256", previous["server_sha256"] } } }
             };
             var productsChanged = false;
+            var step = "write runtime selection";
             try
             {
                 WriteRuntimeSelection(targetRoot, next);
+                step = "confirm managed Runtime stop";
                 WriteSkippedProcessEvidence(evidence, "stop-skipped.json", StopManagedRuntimeProcesses(targetRoot));
                 productsChanged = true;
+                step = "replace cloudflared";
                 File.Copy(Path.Combine(stage, "cloudflared.exe"), Path.Combine(targetRoot, "cloudflared.exe"), true);
+                step = "validate selected Runtime";
                 ValidateBundle(targetRoot);
+                step = "apply product files and configuration";
                 afterPayload();
+                step = "start and accept updated Runtime";
                 if (consolePort > 0) StartAndAcceptRuntime(targetRoot, consolePort, evidence);
+                step = "write completion evidence";
                 File.WriteAllText(Path.Combine(evidence, "completed"), consolePort > 0 ? "New Runtime process identity and local health accepted under gate." : "Offline payload selected.");
             }
             catch (Exception original)
             {
+                // Keep one label per failure so the surfaced message names the
+                // step, exception type and message of every inner failure.
                 var failures = new List<Exception>();
+                var steps = new List<string>();
                 var stopped = false;
                 try { WriteSkippedProcessEvidence(evidence, "recovery-stop-skipped.json", StopManagedRuntimeProcesses(targetRoot)); stopped = true; }
-                catch (Exception recovery) { failures.Add(recovery); }
+                catch (Exception recovery) { failures.Add(recovery); steps.Add("recovery: confirm managed Runtime stop"); }
                 try
                 {
                     if (previous != null) WriteRuntimeSelection(targetRoot, previous);
@@ -392,7 +402,7 @@ namespace DevSpaceControlPlatform
                         if (File.Exists(mirror)) File.Move(mirror, Path.Combine(evidence, "failed-active-slot.txt"));
                     }
                 }
-                catch (Exception recovery) { failures.Add(recovery); }
+                catch (Exception recovery) { failures.Add(recovery); steps.Add("recovery: restore Runtime selection"); }
                 if (stopped && productsChanged)
                 {
                     foreach (var entry in files)
@@ -404,7 +414,7 @@ namespace DevSpaceControlPlatform
                             if (entry.Value) File.Copy(Path.Combine(backup, entry.Key), file, true);
                             else if (File.Exists(file)) File.Delete(file);
                         }
-                        catch (Exception recovery) { failures.Add(recovery); }
+                        catch (Exception recovery) { failures.Add(recovery); steps.Add("recovery: restore file " + entry.Key); }
                     }
                 }
                 // Once the old Runtime was confirmed stopped, it must be
@@ -415,7 +425,7 @@ namespace DevSpaceControlPlatform
                 if ((stopped || productsChanged) && consolePort > 0 && previous != null)
                 {
                     try { StartAndAcceptRuntime(targetRoot, consolePort, evidence); restarted = true; }
-                    catch (Exception recovery) { failures.Add(recovery); }
+                    catch (Exception recovery) { failures.Add(recovery); steps.Add("recovery: restart previous Runtime"); }
                 }
                 try
                 {
@@ -423,10 +433,30 @@ namespace DevSpaceControlPlatform
                         ? "Previous selection/files/process restored and accepted."
                         : (restarted ? "Recovery incomplete; previous Runtime restarted; all backups retained." : "Recovery incomplete; all backups retained."));
                 }
-                catch (Exception recovery) { failures.Add(recovery); }
+                catch (Exception recovery) { failures.Add(recovery); steps.Add("recovery: write recovery status"); }
                 failures.Insert(0, original);
-                throw new AggregateException("Runtime update failed. Preserved recovery evidence: " + evidence, failures);
+                steps.Insert(0, step);
+                throw new AggregateException(
+                    "Runtime update failed at step '" + step + "'. " + DescribeUpdateFailures(failures, steps) +
+                    " Preserved recovery evidence: " + evidence, failures);
             }
+        }
+
+        // The installer's CI/forensic surface is often the exception text alone:
+        // name every aggregated inner failure by step, type and message.
+        private static string DescribeUpdateFailures(List<Exception> failures, List<string> steps)
+        {
+            var described = new List<string>();
+            for (var index = 0; index < failures.Count; index++)
+            {
+                var failure = failures[index];
+                var step = index < steps.Count && !string.IsNullOrEmpty(steps[index]) ? steps[index] : "unknown step";
+                var message = failure == null ? string.Empty : failure.Message;
+                if (string.IsNullOrEmpty(message) && failure != null && failure.InnerException != null)
+                    message = failure.InnerException.Message;
+                described.Add(step + " -> " + (failure == null ? "Exception" : failure.GetType().Name) + ": " + message);
+            }
+            return "Failures: " + string.Join(" | ", described.ToArray()) + ".";
         }
 
         private static void WriteRuntimeSelection(string root, Dictionary<string, object> selection)

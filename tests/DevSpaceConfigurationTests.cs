@@ -323,7 +323,7 @@ internal static class DevSpaceConfigurationTests
 const fs=require('fs'),path=require('path');
 const version=require('../package.json').version;
 if(process.argv.includes('--version')){console.log(version);process.exit(0);}
-const config=JSON.parse(fs.readFileSync(path.join(process.env.DEVSPACE_CONFIG_DIR,'config.jsonc'),'utf8'));
+const config=JSON.parse(fs.readFileSync(path.join(process.env.DEVSPACE_CONFIG_DIR,'config.jsonc'),'utf8').replace(/^\uFEFF/,''));
 fs.writeFileSync(path.join(config.storage.stateDir,'fixture-start-'+version+'.json'),JSON.stringify({gate:fs.existsSync(path.join(config.storage.stateDir,'.runtime-switch-gate'))}));
 require('http').createServer((_q,r)=>{r.setHeader('content-type','application/json');r.end(JSON.stringify({ok:true}));}).listen(config.server.port,'127.0.0.1');
 ", new UTF8Encoding(false));
@@ -355,7 +355,7 @@ require('http').createServer((_q,r)=>{r.setHeader('content-type','application/js
         return @"
 import fs from 'node:fs';import path from 'node:path';import http from 'node:http';import {createHash} from 'node:crypto';import {spawn} from 'node:child_process';
 const args=process.argv.slice(2),option=n=>args[args.indexOf(n)+1];
-const root=option('--platform-root'),configPath=option('--config'),config=JSON.parse(fs.readFileSync(configPath,'utf8'));
+const root=option('--platform-root'),configPath=option('--config'),config=JSON.parse(fs.readFileSync(configPath,'utf8').replace(/^\uFEFF/,''));
 const selection=JSON.parse(fs.readFileSync(path.join(config.storage.stateDir,'runtime-selection.json'),'utf8'));
 const dir=path.join(root,'runtime','slots',selection.slot),pkg=path.join(dir,'devspace','node_modules','@waishnav','devspace');
 const node=path.join(dir,'node','node.exe'),version=JSON.parse(fs.readFileSync(path.join(pkg,'package.json'),'utf8')).version;
@@ -720,7 +720,10 @@ http.createServer(async(_q,r)=>{
             server = new { host = "127.0.0.1", port = runtimePort },
             storage = new { stateDir = stateDirectory }
         });
-        File.WriteAllText(managedConfigPath, managedConfig, Encoding.UTF8);
+        // The managed config is consumed by Node (JSON.parse), which does not
+        // skip a UTF-8 BOM; write it the way the product writes generated
+        // configs. / 托管配置由 Node 读取，JSON.parse 不容忍 BOM，按产品方式写出。
+        File.WriteAllText(managedConfigPath, managedConfig, new UTF8Encoding(false));
 
         var oldSlot = Path.Combine(install, "runtime", "slots", "old-slot");
         WriteRuntimeFixture(install, "old-slot", "1.1.0-beta.4.local.12");
@@ -1462,7 +1465,9 @@ http.createServer(async(_q,r)=>{
         catch (Exception exception)
         {
             failures++;
-            Console.Error.WriteLine("FAIL " + name + ": " + exception.Message);
+            // Print the full chain: aggregated inner failures carry the step
+            // that failed and the original exception type/message.
+            Console.Error.WriteLine("FAIL " + name + ": " + exception);
         }
     }
 

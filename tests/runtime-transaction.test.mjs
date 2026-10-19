@@ -238,7 +238,11 @@ test('Windows source stages a new slot, confirms stops and retains product/cloud
   assert.match(source,/processStartIdentity/);assert.match(source,/ReclaimDeadRuntimeUpdateGate/);
   assert.match(source,/gate \+ "\.tmp-"/);
   assert.match(source,/if \(entry\.Key == @"runtime\\active-slot\.txt"\) continue/);
-  assert.match(source,/catch \(Exception recovery\) \{ failures\.Add\(recovery\); \}/);
+  assert.match(source,/catch \(Exception recovery\) \{ failures\.Add\(recovery\); steps\.Add\("recovery: /);
+  assert.match(source,/step = "apply product files and configuration"/);
+  assert.match(source,/step = "start and accept updated Runtime"/);
+  assert.match(source,/Runtime update failed at step/);
+  assert.match(source,/DescribeUpdateFailures\(failures, steps\)/);
   assert.match(source,/throw new AggregateException/);assert.doesNotMatch(source,/Delete\(cloudflaredBackup\)/);
   assert.doesNotMatch(source,/Directory\.Delete\(runtime, true\)/);
 });
