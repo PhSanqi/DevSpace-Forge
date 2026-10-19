@@ -13,8 +13,15 @@ const unavailable=()=>({ok:false,status:409,reason_code:'job_state_unavailable',
 function resolveStateDir(options) {
   let stateDir=options.stateDir;
   if(!stateDir&&options.configPath&&existsSync(options.configPath)){
-    const config=JSON.parse(readFileSync(options.configPath,'utf8').replace(/^\uFEFF/,''));
-    stateDir=config?.storage?.stateDir;
+    const raw=readFileSync(options.configPath,'utf8').replace(/^\uFEFF/,'');
+    try{stateDir=JSON.parse(raw)?.storage?.stateDir;}
+    catch {
+      // config.jsonc may carry comments/trailing commas; the state directory
+      // is still a single absolute JSON string and must not be guessed.
+      const matches=[...raw.matchAll(/"stateDir"\s*:\s*("(?:\\.|[^"\\])*")/g)];
+      if(matches.length!==1)return null;
+      stateDir=JSON.parse(matches[0][1]);
+    }
     if(typeof stateDir!=='string'||!stateDir.trim())return null;
   }
   if(!stateDir)stateDir=path.join(options.platformRoot||process.cwd(),'state','devspace-state');
@@ -43,27 +50,75 @@ export async function runtimeRestartPreflight(options) {
   }catch{return unavailable();}
 }
 
-// Keep publication/release in sync with runtime-src/src/runtime-switch-gate.ts.
-function ownerIdentity() {
+// Keep publication/release/recovery in sync with
+// runtime-src/src/runtime-switch-gate.ts and src/SetupInstaller.cs.
+function processStartIdentity(pid) {
   try {
     if(process.platform==='linux') {
-      const stat=readFileSync(`/proc/${process.pid}/stat`,'utf8');
-      const start=stat.slice(stat.lastIndexOf(')')+2).split(' ')[19];
-      return start?`linux:${start}`:null;
+      const stat=readFileSync(`/proc/${pid}/stat`,'utf8');
+      const fields=stat.slice(stat.lastIndexOf(')')+2).split(' ');
+      if(fields[0]==='Z'||fields[0]==='X')return null;
+      return fields[19]?`linux:${fields[19]}`:null;
     }
     if(process.platform==='win32') {
       const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
-        `$ErrorActionPreference='Stop'; (Get-Process -Id ${process.pid}).StartTime.ToUniversalTime().Ticks.ToString()`],
+        `$ErrorActionPreference='Stop'; (Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks.ToString()`],
         {encoding:'utf8',windowsHide:true,timeout:5000});
       const ticks=result.stdout?.trim();
       return result.status===0&&/^\d+$/.test(ticks)?`windows:${ticks}`:null;
     }
     if(process.platform==='darwin') {
-      const result=spawnSync('ps',['-p',String(process.pid),'-o','lstart='],{encoding:'utf8',timeout:2000});
+      const result=spawnSync('ps',['-p',String(pid),'-o','lstart='],{encoding:'utf8',timeout:2000});
       return result.status===0&&result.stdout?.trim()?`ps:${result.stdout.trim()}`:null;
     }
   }catch{}
   return null;
+}
+
+// A PID alone is not ownership; a recycled PID has a different start identity.
+function ownedProcessState(pid,identity) {
+  if(!Number.isSafeInteger(pid)||pid<1)return 'unknown';
+  const current=processStartIdentity(pid);
+  if(current&&identity)return current===identity?'active':'inactive';
+  try {
+    process.kill(pid,0);
+    if(process.platform==='linux') {
+      const stat=readFileSync(`/proc/${pid}/stat`,'utf8');
+      if(/^[ZX] /.test(stat.slice(stat.lastIndexOf(')')+2)))return 'inactive';
+    }
+  }catch(error) { if(error.code==='ESRCH')return 'inactive'; }
+  return 'unknown';
+}
+
+function readGateOwner(lock) {
+  const owner=JSON.parse(readFileSync(path.join(lock,'owner.json'),'utf8'));
+  if(!Number.isSafeInteger(owner.pid)||owner.pid<1||!Number.isFinite(owner.createdAt)||
+    !(owner.processStartIdentity===null||typeof owner.processStartIdentity==='string')||
+    !(owner.nonce===undefined||typeof owner.nonce==='string'))throw new Error('Invalid switch gate owner');
+  return owner;
+}
+
+// Same protocol as runtime-src recoverSwitchGate: move the gate aside, verify
+// the moved owner is still the one that was judged dead, then discard it.
+function reclaimDeadGate(lock) {
+  let owner;
+  try { owner=readGateOwner(lock); } catch { return false; }
+  if(ownedProcessState(owner.pid,owner.processStartIdentity)!=='inactive')return false;
+  const stale=`${lock}.stale-${randomUUID()}`;
+  try {
+    renameSync(lock,stale);
+    const moved=readGateOwner(stale);
+    if(moved.nonce!==owner.nonce||moved.pid!==owner.pid||moved.createdAt!==owner.createdAt||
+      moved.processStartIdentity!==owner.processStartIdentity) {
+      try { if(!existsSync(lock))renameSync(stale,lock); } catch {}
+      return false;
+    }
+    rmSync(stale,{recursive:true,force:true});
+    return true;
+  }catch {
+    try { if(!existsSync(lock))renameSync(stale,lock); } catch {}
+    return false;
+  }
 }
 
 export async function withRuntimeRestartGuard(options,action) {
@@ -79,10 +134,10 @@ export async function withRuntimeRestartGuard(options,action) {
     mkdirSync(temp,{mode:0o700});
     const fd=openSync(path.join(temp,'owner.json'),'wx',0o600);
     try {
-      writeFileSync(fd,JSON.stringify({pid:process.pid,processStartIdentity:ownerIdentity(),createdAt:Date.now(),nonce}));
+      writeFileSync(fd,JSON.stringify({pid:process.pid,processStartIdentity:processStartIdentity(process.pid),createdAt:Date.now(),nonce}));
       fsyncSync(fd);
     }finally{closeSync(fd);}
-    if(existsSync(lock))throw new Error('Gate already held');
+    if(existsSync(lock)&&!reclaimDeadGate(lock))throw new Error('Gate already held');
     renameSync(temp,lock);
     if(JSON.parse(readFileSync(path.join(lock,'owner.json'),'utf8')).nonce!==nonce)throw new Error('Gate owner changed');
   }catch {

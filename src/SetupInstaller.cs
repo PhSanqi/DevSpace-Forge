@@ -366,7 +366,7 @@ namespace DevSpaceControlPlatform
             try
             {
                 WriteRuntimeSelection(targetRoot, next);
-                StopManagedRuntimeProcesses(targetRoot);
+                WriteSkippedProcessEvidence(evidence, "stop-skipped.json", StopManagedRuntimeProcesses(targetRoot));
                 productsChanged = true;
                 File.Copy(Path.Combine(stage, "cloudflared.exe"), Path.Combine(targetRoot, "cloudflared.exe"), true);
                 ValidateBundle(targetRoot);
@@ -378,7 +378,7 @@ namespace DevSpaceControlPlatform
             {
                 var failures = new List<Exception>();
                 var stopped = false;
-                try { StopManagedRuntimeProcesses(targetRoot); stopped = true; }
+                try { WriteSkippedProcessEvidence(evidence, "recovery-stop-skipped.json", StopManagedRuntimeProcesses(targetRoot)); stopped = true; }
                 catch (Exception recovery) { failures.Add(recovery); }
                 try
                 {
@@ -406,12 +406,22 @@ namespace DevSpaceControlPlatform
                         catch (Exception recovery) { failures.Add(recovery); }
                     }
                 }
-                if (stopped && failures.Count == 0 && consolePort > 0 && previous != null)
+                // Once the old Runtime was confirmed stopped, it must be
+                // started again even when unrelated product-file restores
+                // failed: the Runtime lives in the intact immutable slot, and
+                // the failure is reported separately below.
+                var restarted = false;
+                if ((stopped || productsChanged) && consolePort > 0 && previous != null)
                 {
-                    try { StartAndAcceptRuntime(targetRoot, consolePort, evidence); }
+                    try { StartAndAcceptRuntime(targetRoot, consolePort, evidence); restarted = true; }
                     catch (Exception recovery) { failures.Add(recovery); }
                 }
-                try { File.WriteAllText(Path.Combine(evidence, "recovery-status.txt"), failures.Count == 0 ? "Previous selection/files/process restored and accepted." : "Recovery incomplete; all backups retained."); }
+                try
+                {
+                    File.WriteAllText(Path.Combine(evidence, "recovery-status.txt"), failures.Count == 0
+                        ? "Previous selection/files/process restored and accepted."
+                        : (restarted ? "Recovery incomplete; previous Runtime restarted; all backups retained." : "Recovery incomplete; all backups retained."));
+                }
                 catch (Exception recovery) { failures.Add(recovery); }
                 failures.Insert(0, original);
                 throw new AggregateException("Runtime update failed. Preserved recovery evidence: " + evidence, failures);
@@ -1033,7 +1043,8 @@ namespace DevSpaceControlPlatform
             // The native updater is not behind the Node Console's guard.
             // Hold the same atomic directory while checking jobs and replacing
             // the runtime, before the first process is stopped.
-            var restartGate = AcquireRuntimeUpdateGate(root, sourceRoot);
+            string gateNonce;
+            var restartGate = AcquireRuntimeUpdateGate(root, sourceRoot, out gateNonce);
             try
             {
                 SetupInstallResult result = null;
@@ -1051,28 +1062,25 @@ namespace DevSpaceControlPlatform
             finally
             {
                 // Only the updater that acquired this gate removes it. Never
-                // auto-clear a pre-existing gate, even if its owner is gone.
-                Directory.Delete(restartGate);
+                // auto-clear a gate whose owner cannot be proven to be us.
+                ReleaseRuntimeUpdateGate(restartGate, gateNonce);
             }
         }
 
-        internal static string AcquireRuntimeUpdateGate(string platformRoot, string bundleRoot)
+        internal static string AcquireRuntimeUpdateGate(string platformRoot, string bundleRoot, out string nonce)
         {
             var stateDir = RuntimeResolver.StateDirectory(platformRoot);
             Directory.CreateDirectory(stateDir);
-            var proposed = Path.Combine(stateDir, ".runtime-update-gate-" + Guid.NewGuid().ToString("N"));
             var gate = Path.Combine(stateDir, ".runtime-switch-gate");
-            Directory.CreateDirectory(proposed);
-            try
+            nonce = Guid.NewGuid().ToString("N");
+            if (!PublishRuntimeUpdateGate(gate, nonce))
             {
-                // Move within one parent is atomic, unlike CreateDirectory
-                // which succeeds even if the target already exists on Windows.
-                Directory.Move(proposed, gate);
-            }
-            catch
-            {
-                Directory.Delete(proposed);
-                throw new InvalidOperationException("Runtime switch gate is held or unavailable; update was not started.");
+                ReleaseRuntimeUpdateGate(gate, nonce); // Never leave a half-published gate of ours.
+                if (!ReclaimDeadRuntimeUpdateGate(gate) || !PublishRuntimeUpdateGate(gate, nonce))
+                {
+                    ReleaseRuntimeUpdateGate(gate, nonce);
+                    throw new InvalidOperationException("Runtime switch gate is held or unavailable; update was not started.");
+                }
             }
             try
             {
@@ -1107,8 +1115,197 @@ namespace DevSpaceControlPlatform
             }
             catch
             {
-                Directory.Delete(gate);
+                ReleaseRuntimeUpdateGate(gate, nonce);
                 throw;
+            }
+        }
+
+        // Crash-safe publication: a populated temporary directory is renamed
+        // into place, so a crash can never leave a gate without its owner.
+        // Keep this protocol in sync with ops/runtime-jobs-guard.mjs and
+        // runtime-src/src/runtime-switch-gate.ts.
+        private static bool PublishRuntimeUpdateGate(string gate, string nonce)
+        {
+            var proposed = gate + ".tmp-" + Process.GetCurrentProcess().Id + "-" + nonce;
+            try
+            {
+                Directory.CreateDirectory(proposed);
+                var owner = new Dictionary<string, object>
+                {
+                    { "pid", Process.GetCurrentProcess().Id },
+                    { "processStartIdentity", CurrentProcessStartIdentity() },
+                    { "createdAt", (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds },
+                    { "nonce", nonce }
+                };
+                var bytes = new UTF8Encoding(false).GetBytes(new JavaScriptSerializer().Serialize(owner));
+                using (var stream = new FileStream(Path.Combine(proposed, "owner.json"),
+                    FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+                if (Directory.Exists(gate)) return false;
+                Directory.Move(proposed, gate);
+                return string.Equals(Convert.ToString(ReadRuntimeGateOwner(gate)["nonce"]), nonce,
+                    StringComparison.Ordinal);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                try { if (Directory.Exists(proposed)) Directory.Delete(proposed, true); } catch (Exception) { }
+            }
+        }
+
+        private static Dictionary<string, object> ReadRuntimeGateOwner(string gate)
+        {
+            Dictionary<string, object> owner;
+            try
+            {
+                owner = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                    File.ReadAllText(Path.Combine(gate, "owner.json"), Encoding.UTF8));
+            }
+            catch (Exception error)
+            {
+                throw new InvalidDataException("Runtime switch gate owner is unreadable.", error);
+            }
+            object pid, createdAt, identity, ownerNonce;
+            if (owner == null || !owner.TryGetValue("pid", out pid) ||
+                !owner.TryGetValue("createdAt", out createdAt) ||
+                !owner.TryGetValue("processStartIdentity", out identity) ||
+                !owner.TryGetValue("nonce", out ownerNonce) ||
+                Convert.ToInt64(pid) < 1 || Convert.ToInt64(createdAt) <= 0 ||
+                string.IsNullOrEmpty(Convert.ToString(ownerNonce)) ||
+                (identity != null && !(identity is string)))
+                throw new InvalidDataException("Invalid Runtime switch gate owner.");
+            return owner;
+        }
+
+        private static bool ReclaimDeadRuntimeUpdateGate(string gate)
+        {
+            Dictionary<string, object> owner;
+            try { owner = ReadRuntimeGateOwner(gate); } catch (Exception) { return false; }
+            if (!string.Equals(GateOwnerProcessState(owner), "inactive", StringComparison.Ordinal)) return false;
+            var stale = gate + ".stale-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                Directory.Move(gate, stale);
+                if (!SameGateOwner(owner, ReadRuntimeGateOwner(stale)))
+                {
+                    try { if (!Directory.Exists(gate)) Directory.Move(stale, gate); } catch (Exception) { }
+                    return false;
+                }
+                Directory.Delete(stale, true);
+                return true;
+            }
+            catch (Exception)
+            {
+                try { if (!Directory.Exists(gate)) Directory.Move(stale, gate); } catch (Exception) { }
+                return false;
+            }
+        }
+
+        private static bool SameGateOwner(Dictionary<string, object> left, Dictionary<string, object> right)
+        {
+            foreach (var key in new[] { "pid", "createdAt", "processStartIdentity", "nonce" })
+            {
+                object leftValue, rightValue;
+                left.TryGetValue(key, out leftValue);
+                right.TryGetValue(key, out rightValue);
+                if (!string.Equals(Convert.ToString(leftValue), Convert.ToString(rightValue), StringComparison.Ordinal))
+                    return false;
+            }
+            return true;
+        }
+
+        private static string GateOwnerProcessState(Dictionary<string, object> owner)
+        {
+            var pid = Convert.ToInt32(owner["pid"]);
+            var expected = owner["processStartIdentity"] == null
+                ? null
+                : Convert.ToString(owner["processStartIdentity"]);
+            Process process;
+            try { process = Process.GetProcessById(pid); }
+            catch (ArgumentException) { return "inactive"; }
+            catch (InvalidOperationException) { return "inactive"; }
+            using (process)
+            {
+                try
+                {
+                    if (process.HasExited) return "inactive";
+                    if (string.IsNullOrEmpty(expected)) return "unknown";
+                    var actual = ProcessStartIdentity(process);
+                    if (actual == null) return "unknown";
+                    return string.Equals(actual, expected, StringComparison.Ordinal) ? "active" : "inactive";
+                }
+                catch (Exception) { return "unknown"; }
+            }
+        }
+
+        private static string CurrentProcessStartIdentity()
+        {
+            using (var process = Process.GetCurrentProcess()) return ProcessStartIdentity(process);
+        }
+
+        // Same identity format as the Node guard: Windows .NET ticks, or the
+        // Linux /proc start field, prefixed with the platform.
+        private static string ProcessStartIdentity(Process process)
+        {
+            try
+            {
+                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                    return "windows:" + process.StartTime.ToUniversalTime().Ticks;
+                if (Environment.OSVersion.Platform == PlatformID.Unix)
+                {
+                    var stat = File.ReadAllText("/proc/" + process.Id + "/stat");
+                    var fields = stat.Substring(stat.LastIndexOf(')') + 2).Split(' ');
+                    return fields.Length > 19 && !string.IsNullOrEmpty(fields[19])
+                        ? "linux:" + fields[19]
+                        : null;
+                }
+            }
+            catch (Exception)
+            {
+            }
+            return null;
+        }
+
+        private static void ReleaseRuntimeUpdateGate(string gate, string nonce)
+        {
+            for (var attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    if (!string.Equals(Convert.ToString(ReadRuntimeGateOwner(gate)["nonce"]), nonce,
+                        StringComparison.Ordinal)) return;
+                }
+                catch (Exception) { return; } // An uncertain owner must remain blocking.
+                var released = gate + ".released-" + Guid.NewGuid().ToString("N");
+                try
+                {
+                    Directory.Move(gate, released);
+                }
+                catch (Exception)
+                {
+                    if (attempt < 4)
+                    {
+                        Thread.Sleep(20 * (attempt + 1));
+                        continue;
+                    }
+                    try
+                    {
+                        if (!string.Equals(Convert.ToString(ReadRuntimeGateOwner(gate)["nonce"]), nonce,
+                            StringComparison.Ordinal)) return;
+                        File.Delete(Path.Combine(gate, "owner.json"));
+                        Directory.Delete(gate);
+                    }
+                    catch (Exception) { }
+                    return;
+                }
+                try { Directory.Delete(released, true); } catch (Exception) { }
+                return;
             }
         }
 
@@ -1182,10 +1379,11 @@ namespace DevSpaceControlPlatform
                 CopyDirectoryContents(directory, Path.Combine(targetDirectory, Path.GetFileName(directory)));
         }
 
-        internal static void StopManagedRuntimeProcesses(string platformRoot)
+        internal static List<string> StopManagedRuntimeProcesses(string platformRoot)
         {
             var root = Path.GetFullPath(platformRoot).TrimEnd(Path.DirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
+            var skipped = new List<string>();
             for (var pass = 0; pass < 2; pass++)
             {
                 foreach (var processName in new[] { "DevSpaceControlPlatform", "DevSpaceForgeDesktop", "node", "cloudflared" })
@@ -1194,17 +1392,38 @@ namespace DevSpaceControlPlatform
                     {
                         var executableIdentity = "unavailable";
                         var startIdentity = "unavailable";
+                        var pid = 0;
+                        var owned = false;
                         try
                         {
-                            if (process.Id == Process.GetCurrentProcess().Id) continue;
+                            pid = process.Id;
+                            if (pid == Process.GetCurrentProcess().Id) continue;
                             if (process.HasExited) continue;
-                            var module = process.MainModule;
-                            var executable = module == null ? string.Empty : module.FileName;
+                            string executable;
+                            try
+                            {
+                                var module = process.MainModule;
+                                executable = module == null ? string.Empty : module.FileName;
+                            }
+                            catch (Exception unreadable)
+                            {
+                                // Another user's or a protected same-named process
+                                // is not ours; it must not abort the sweep.
+                                skipped.Add("name=" + processName + ", PID=" + pid +
+                                    ": executable identity is unavailable; ownership not proven (" +
+                                    unreadable.Message + ").");
+                                continue;
+                            }
                             if (string.IsNullOrWhiteSpace(executable))
-                                throw new InvalidOperationException("Process executable identity is unavailable.");
+                            {
+                                skipped.Add("name=" + processName + ", PID=" + pid +
+                                    ": empty executable identity; ownership not proven.");
+                                continue;
+                            }
                             var fullPath = Path.GetFullPath(executable);
                             executableIdentity = fullPath;
                             if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
+                            owned = true; // From here a failure aborts: this process is ours.
                             var identity = process.StartTime.ToUniversalTime();
                             startIdentity = identity.ToString("o");
                             if (pass == 1) throw new InvalidOperationException("A managed process remained after the confirmed-stop sweep.");
@@ -1218,8 +1437,17 @@ namespace DevSpaceControlPlatform
                         }
                         catch (Exception error)
                         {
+                            if (!owned)
+                            {
+                                // Even the process state was unreadable; it is
+                                // not proven ours, so skip it instead of aborting.
+                                skipped.Add("name=" + processName + ", PID=" + pid +
+                                    ": process state is unreadable; ownership not proven (" +
+                                    error.Message + ").");
+                                continue;
+                            }
                             throw new InvalidOperationException(
-                                "Managed process stop is unconfirmed (name=" + processName + ", PID=" + process.Id +
+                                "Managed process stop is unconfirmed (name=" + processName + ", PID=" + pid +
                                 ", start=" + startIdentity + ", executable=" + executableIdentity +
                                 "). Update aborted; inspect this process before retrying.", error);
                         }
@@ -1229,6 +1457,21 @@ namespace DevSpaceControlPlatform
                         }
                     }
                 }
+            }
+            return skipped;
+        }
+
+        private static void WriteSkippedProcessEvidence(string evidence, string fileName, List<string> skipped)
+        {
+            if (skipped.Count == 0) return;
+            try
+            {
+                File.WriteAllText(Path.Combine(evidence, fileName),
+                    new JavaScriptSerializer().Serialize(skipped), new UTF8Encoding(false));
+            }
+            catch (Exception)
+            {
+                // Diagnostics must not change the stop or recovery outcome.
             }
         }
 

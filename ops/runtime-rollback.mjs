@@ -3,8 +3,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, copyFileSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
-import { withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
+import { runtimeRestartPreflight, withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
 
 const sha256=file=>createHash('sha256').update(readFileSync(file)).digest('hex');
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -87,7 +88,11 @@ function fileSet(root,topNames=null) {
 const sameFiles=(a,b)=>Object.keys(a).length===Object.keys(b).length&&Object.keys(a).every(key=>Object.hasOwn(b,key)&&a[key]===b[key]);
 export function validateRuntimeSlot(options,id,{dryRun=launcherDryRun}={}) {
   const root=slotRoot(options.platformRoot,id),pkg=slotPackage(options.platformRoot,id);
-  if(realpathSync(root)!==root||!statSync(root).isDirectory())throw new Error('Runtime slot is not a real directory.');
+  // A symlinked install root is legitimate; only the slot entry itself must
+  // not be a link, and its real path must stay inside the real slots dir.
+  if(lstatSync(root).isSymbolicLink()||!statSync(root).isDirectory())throw new Error('Runtime slot is not a real directory.');
+  if(realpathSync(root)!==path.join(realpathSync(path.dirname(root)),path.basename(root)))
+    throw new Error('Runtime slot must not escape its managed slots directory.');
   for(const file of [slotNode(options.platformRoot,id),path.join(pkg,'package.json'),path.join(pkg,'dist','cli.js'),path.join(pkg,'dist','server.js'),path.join(root,'READY')])
     if(!lstatSync(file).isFile())throw new Error('Runtime slot file set is incomplete.');
   const manifest=JSON.parse(readFileSync(path.join(root,'slot-manifest.json'),'utf8'));
@@ -166,6 +171,12 @@ export async function switchRuntime({options,target,expectedHash,observedPid,pro
   dryRun=launcherDryRun,platform=process.platform,probeAttempts=40,probeIntervalMs=500,guardHeld=false,offline=false,legacyPackage='',allowStopped=false}) {
   if(platform==='win32')return {ok:false,status:409,error:'Windows runtime switching is not configured.'};
   const action=async()=>{
+    // The installer can hold the gate for minutes; a job recorded during that
+    // time must still block the switch before any process is stopped.
+    if(guardHeld) {
+      const state=await runtimeRestartPreflight({...options,stateDir:runtimeStateDirectory(options)});
+      if(!state.ok)return state;
+    }
     let previous,verified,live;
     try {
       previous=readRuntimeSelection(options);
@@ -217,14 +228,36 @@ export async function switchRuntime({options,target,expectedHash,observedPid,pro
   return guardHeld?action():withRuntimeRestartGuard({...options,stateDir:runtimeStateDirectory(options)},action);
 }
 
-export async function localRuntimeProbe(options,target) {
+// config.jsonc is JSONC. Strict JSON stays the fast path; comments/trailing
+// commas use the same bundled jsonc-parser the installer already relies on.
+function readRuntimeConfig(file,packageRoot) {
+  const raw=readFileSync(file,'utf8').replace(/^\uFEFF/,'');
+  try { return JSON.parse(raw); }
+  catch (jsonError) {
+    let value,parseError;
+    try {
+      const load=createRequire(path.join(packageRoot,'package.json'));
+      const errors=[];
+      value=load('jsonc-parser').parse(raw,errors,{allowTrailingComma:true,disallowComments:false});
+      if(errors.length)parseError=new Error('JSONC parse error at offset '+errors[0].offset);
+    }catch(error) { parseError=error; }
+    if(parseError)throw new Error('Unable to parse '+file+': '+parseError.message);
+    return value;
+  }
+}
+
+export async function localRuntimeProbe(options,target,{readLive=()=>processForService(options.serviceUnit)}={}) {
+  let live;
+  try { live=readLive(); } catch { return false; }
+  if(!live||live.package_root!==target.package_root)return false;
+  if(target.server_sha256&&sha256(path.join(target.package_root,'dist','server.js'))!==target.server_sha256)return false;
+  // A parse failure is configuration evidence, not "unhealthy"; let it reach
+  // the caller instead of retrying a probe that can never succeed.
+  const config=readRuntimeConfig(options.configPath,target.package_root);
+  const port=config?.server?.port;
+  if(!Number.isSafeInteger(port))return false;
   try {
-    const live=processForService(options.serviceUnit);
-    if(!live||live.package_root!==target.package_root)return false;
-    if(target.server_sha256&&sha256(path.join(target.package_root,'dist','server.js'))!==target.server_sha256)return false;
-    const config=JSON.parse(readFileSync(options.configPath,'utf8'));
-    const port=config?.server?.port,base=new URL(config.server.publicBaseUrl||'http://localhost');
-    if(!Number.isSafeInteger(port))return false;
+    const base=new URL(config.server.publicBaseUrl||'http://localhost');
     const url='http://127.0.0.1:'+port+base.pathname.replace(/\/+$/,'')+'/healthz';
     const ac=new AbortController(),timeout=setTimeout(()=>ac.abort(),2000);
     try {const response=await fetch(url,{signal:ac.signal,redirect:'manual'});return response.status===200&&(await response.json()).ok===true;}
@@ -278,10 +311,18 @@ async function main(args) {
       try {
         const after=readRuntimeSelection(options);
         const changed=JSON.stringify(after)!==JSON.stringify(before)||
-          (priorLauncher&&existsSync(launcher)&&!readFileSync(launcher).equals(priorLauncher));
+          (priorLauncher?existsSync(launcher)&&!readFileSync(launcher).equals(priorLauncher):existsSync(launcher));
         if(changed) {
           if(before)writeRuntimeSelection(options,before);
-          else if(existsSync(selectionPath(options)))renameSync(selectionPath(options),path.join(evidence,'failed-selection.json'));
+          else {
+            // Fresh install: nothing existed before, so remove the selections
+            // and launcher the failed child installed instead of leaving them
+            // pointing at a Runtime that is no longer running.
+            if(existsSync(selectionPath(options)))renameSync(selectionPath(options),path.join(evidence,'failed-selection.json'));
+            const mirror=path.join(root,'runtime','active-slot.txt');
+            if(existsSync(mirror))renameSync(mirror,path.join(evidence,'failed-active-slot.txt'));
+            if(existsSync(launcher))renameSync(launcher,path.join(evidence,'failed-run-devspace'));
+          }
           if(priorLauncher) {
             const temp=launcher+'.restore-'+randomUUID();
             writeFileSync(temp,priorLauncher,{mode:0o755,flag:'wx'});renameSync(temp,launcher);

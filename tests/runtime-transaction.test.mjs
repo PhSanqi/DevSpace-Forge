@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { stageRuntimeSlot, validateRuntimeSlot, selectionPath, readRuntimeSelection, writeRuntimeSelection, slotPackage, switchRuntime, stopUserService } from '../ops/runtime-rollback.mjs';
+import { localRuntimeProbe, stageRuntimeSlot, validateRuntimeSlot, selectionPath, readRuntimeSelection, writeRuntimeSelection, slotPackage, switchRuntime, stopUserService } from '../ops/runtime-rollback.mjs';
 import { runtimeInfo, rollbackTargets } from '../ops/runtime-console.mjs';
 
 const shellArg=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
@@ -126,6 +127,87 @@ test('offline selection refuses a live Runtime',linux,async()=>{
     assert.deepEqual(readRuntimeSelection(f.options),f.previous);
   }finally{f.clean();}
 });
+test('a gate left by a dead owner is reclaimed before a switch',linux,async()=>{
+  const f=fixture();try{
+    const gate=path.join(f.options.stateDir,'.runtime-switch-gate');mkdirSync(gate,{recursive:true});
+    writeFileSync(path.join(gate,'owner.json'),JSON.stringify({pid:2147483647,processStartIdentity:'linux:1',createdAt:Date.now(),nonce:'dead'}));
+    assert.equal((await switchRuntime(f.params)).ok,true);
+    assert.equal(existsSync(gate),false);
+  }finally{f.clean();}
+});
+test('a live gate owner still blocks a switch',linux,async()=>{
+  const f=fixture();try{
+    const gate=path.join(f.options.stateDir,'.runtime-switch-gate');mkdirSync(gate,{recursive:true});
+    writeFileSync(path.join(gate,'owner.json'),JSON.stringify({pid:process.pid,processStartIdentity:null,createdAt:Date.now(),nonce:'live'}));
+    const result=await switchRuntime(f.params);
+    assert.equal(result.reason_code,'runtime_switch_in_progress');
+    assert.equal(existsSync(gate),true);assert.equal(f.calls.length,0);
+  }finally{f.clean();}
+});
+test('guard-held switch re-reads durable jobs before stopping',linux,async()=>{
+  const f=fixture();try{
+    mkdirSync(path.join(f.options.stateDir,'jobs'),{recursive:true});
+    const {DatabaseSync}=await import('node:sqlite');
+    const db=new DatabaseSync(path.join(f.options.stateDir,'jobs','jobs.sqlite'));
+    db.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_running','running');db.close();
+    const result=await switchRuntime({...f.params,guardHeld:true});
+    assert.equal(result.status,409);assert.equal(result.reason_code,'active_jobs');
+    assert.equal(f.calls.length,0);assert.deepEqual(readRuntimeSelection(f.options),f.previous);
+  }finally{f.clean();}
+});
+test('validateRuntimeSlot accepts a symlinked install root but rejects a symlinked slot',linux,()=>{
+  const f=fixture();try{
+    const linked=path.join(f.root,'linked-install');symlinkSync(f.root,linked,'dir');
+    assert.equal(validateRuntimeSlot({...f.options,platformRoot:linked},f.old.id).id,f.old.id);
+    const slots=path.join(f.root,'runtime','slots');
+    rmSync(path.join(slots,f.next.id),{recursive:true,force:true});
+    symlinkSync(path.join(slots,f.old.id),path.join(slots,f.next.id),'dir');
+    assert.throws(()=>validateRuntimeSlot(f.options,f.next.id),/real directory/);
+  }finally{f.clean();}
+});
+test('localRuntimeProbe parses JSONC config and surfaces parse failures as errors',linux,async(t)=>{
+  const f=fixture(),repo=fileURLToPath(new URL('..',import.meta.url));
+  const parser=path.join(repo,'runtime-src','node_modules','jsonc-parser');
+  if(!existsSync(parser)){f.clean();t.skip('runtime-src dependencies are not installed');return;}
+  cpSync(parser,path.join(path.dirname(path.dirname(f.old.package_root)),'jsonc-parser'),{recursive:true});
+  const server=http.createServer((request,response)=>{response.writeHead(200,{'content-type':'application/json'});response.end('{"ok":true}');});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const port=server.address().port,config=path.join(f.root,'probe.jsonc');
+    writeFileSync(config,'// JSONC comments and trailing commas\n{\n "server": {"port": '+port+', "publicBaseUrl": "http://localhost"},\n "storage": {"stateDir": '+JSON.stringify(f.options.stateDir)+'},\n}\n');
+    const target={package_root:f.old.package_root};
+    const probeOptions={...f.options,configPath:config,serviceUnit:'probe.service'};
+    const readLive=()=>({pid:process.pid,package_root:f.old.package_root});
+    assert.equal(await localRuntimeProbe(probeOptions,target,{readLive}),true);
+    writeFileSync(config,'{ // broken\n "server": {"port": ');
+    await assert.rejects(localRuntimeProbe(probeOptions,target,{readLive}),/Unable to parse|JSONC/);
+  }finally{await new Promise(resolve=>server.close(resolve));f.clean();}
+});
+test('fresh-install guard failure removes the pending selection, mirror and launcher',linux,()=>{
+  const f=fixture();try{
+    rmSync(selectionPath(f.options),{force:true});
+    const config=path.join(f.root,'config.jsonc');writeFileSync(config,JSON.stringify({storage:{stateDir:f.options.stateDir}}));
+    const bin=path.join(f.root,'fake-bin');mkdirSync(bin);
+    writeFileSync(path.join(bin,'systemctl'),'#!/bin/sh\ncase " $* " in *" show "*) echo 0;; esac\nexit 0\n',{mode:0o755});
+    const script=path.join(f.root,'fresh-fail.sh');
+    const next={schema_version:1,slot:f.next.id,server_sha256:f.next.server_sha256,previous:null};
+    const candidate=path.join(f.root,'candidate.json');writeFileSync(candidate,JSON.stringify(next));
+    const launcher=path.join(f.root,'bin','run-devspace'),mirror=path.join(f.root,'runtime','active-slot.txt');
+    rmSync(launcher,{force:true});
+    writeFileSync(script,'#!/bin/sh\ncp "$1" "$2"\nprintf "new launcher\\n" > "$3"\nprintf "slot\\n" > "$4"\nexit 9\n');
+    const helper=fileURLToPath(new URL('../ops/runtime-rollback.mjs',import.meta.url));
+    const result=spawnSync(process.execPath,[helper,'--install-guard',f.root,config,'fixture.service',script,candidate,selectionPath(f.options),launcher,mirror],{
+      encoding:'utf8',env:{...process.env,PATH:bin+path.delimiter+process.env.PATH}
+    });
+    assert.equal(result.status,1);assert.match(result.stderr,/Installer failed/);
+    assert.equal(existsSync(selectionPath(f.options)),false);assert.equal(existsSync(mirror),false);assert.equal(existsSync(launcher),false);
+    const rollback=path.join(f.options.stateDir,'runtime-rollback');
+    const evidence=readdirSync(rollback).find(x=>x.startsWith('install-'));
+    for(const name of ['failed-selection.json','failed-active-slot.txt','failed-run-devspace'])
+      assert.ok(existsSync(path.join(rollback,evidence,name)),name);
+  }finally{f.clean();}
+});
 test('installer crash/failed child releases only its own gate and preserves selection',linux,()=>{
   const f=fixture();try{
     const script=path.join(f.root,'failed-installer.sh');
@@ -142,14 +224,19 @@ test('installer crash/failed child releases only its own gate and preserves sele
 });
 test('Windows source stages a new slot, confirms stops and retains product/cloudflared backups on failure',()=>{
   const source=readFileSync(new URL('../src/SetupInstaller.cs',import.meta.url),'utf8');
-  const stop=source.slice(source.indexOf('internal static void StopManagedRuntimeProcesses'),source.indexOf('private static string ExecutableFromCommand'));
+  const stop=source.slice(source.indexOf('internal static List<string> StopManagedRuntimeProcesses'),source.indexOf('private static string ExecutableFromCommand'));
   assert.match(stop,/StartTime\.ToUniversalTime/);assert.match(stop,/!process\.WaitForExit\(5000\) \|\| !process\.HasExited/);
-  assert.match(stop,/stop is unconfirmed/);assert.doesNotMatch(stop,/catch\s*\{/);
+  assert.match(stop,/stop is unconfirmed/);
+  assert.match(stop,/ownership not proven/, 'unreadable same-named processes are skipped instead of aborting');
+  assert.match(stop,/if \(!owned\)/);
   assert.match(source,/ExtractOfflinePayload\(sourceRoot, stage\)/);assert.match(source,/Directory\.Move\(stagedSlot, destination\)/);
   assert.match(source,/Staged Runtime launcher dry-run failed/);assert.match(source,/Staged Runtime provenance hash mismatch/);
   assert.match(source,/File\.Replace\(temporary, file, null\)/);
   assert.match(source,/afterPayload\(\)/);assert.match(source,/BackupUpdateFiles\(sourceRoot, targetRoot, backup\)/);
   assert.match(source,/if \(stopped && productsChanged\)/);
+  assert.match(source,/\(stopped \|\| productsChanged\) && consolePort > 0 && previous != null/);
+  assert.match(source,/processStartIdentity/);assert.match(source,/ReclaimDeadRuntimeUpdateGate/);
+  assert.match(source,/gate \+ "\.tmp-"/);
   assert.match(source,/if \(entry\.Key == @"runtime\\active-slot\.txt"\) continue/);
   assert.match(source,/catch \(Exception recovery\) \{ failures\.Add\(recovery\); \}/);
   assert.match(source,/throw new AggregateException/);assert.doesNotMatch(source,/Delete\(cloudflaredBackup\)/);
@@ -287,7 +374,7 @@ test('Windows native and PowerShell readers prefer JSON and updater accepts/rest
   const write=setup.slice(setup.indexOf('private static void WriteRuntimeSelection'),setup.indexOf('private static void StartAndAcceptRuntime'));
   assert.ok(write.indexOf('RuntimeResolver.SelectionPath')<write.indexOf('"active-slot.txt"'));
   assert.match(setup,/if \(consolePort > 0\) StartAndAcceptRuntime\(targetRoot, consolePort, evidence\)/);
-  assert.match(setup,/if \(stopped && failures.Count == 0 && consolePort > 0 && previous != null\)/);
+  assert.match(setup,/if \(\(stopped \|\| productsChanged\) && consolePort > 0 && previous != null\)/);
   assert.match(setup,/New Runtime process slot\/hash\/version identity mismatch/);
   assert.match(setup,/process\.StartTime\.ToUniversalTime\(\) < started\.AddSeconds\(-1\)/);
   assert.match(setup,/Process\.GetProcessById/);assert.match(setup,/process\.MainModule\.FileName/);

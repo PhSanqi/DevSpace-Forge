@@ -824,6 +824,10 @@ http.createServer(async(_q,r)=>{
                     .Where(directory => File.Exists(Path.Combine(directory, "recovery-status.txt")) && File.ReadAllText(Path.Combine(directory, "recovery-status.txt")).Contains("Recovery incomplete"))
                     .First();
                 AssertTrue(File.Exists(Path.Combine(incomplete, "backup", "cloudflared.exe")), "failed restore retains cloudflared backup");
+                AssertTrue(File.ReadAllText(Path.Combine(incomplete, "recovery-status.txt")).Contains("previous Runtime restarted"),
+                    "a confirmed stop always restarts the previous Runtime despite product-file restore errors");
+                AssertTrue(Directory.GetFiles(incomplete, "console-start-*.json").Length > 0,
+                    "previous Console start is recorded even when product-file recovery was incomplete");
             }
             finally { File.SetAttributes(readme, FileAttributes.Normal); }
 
@@ -839,6 +843,23 @@ http.createServer(async(_q,r)=>{
             AssertEqual(selectedSlot, File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
                 "blocked native update leaves active Runtime pointer unchanged");
             Directory.Delete(gate);
+
+            // A gate whose owner is provably dead is reclaimed, while the
+            // ownerless gate above stays blocking because ownership is unknown.
+            Directory.CreateDirectory(gate);
+            File.WriteAllText(Path.Combine(gate, "owner.json"), new JavaScriptSerializer().Serialize(new Dictionary<string, object>
+            {
+                { "pid", int.MaxValue },
+                { "processStartIdentity", "windows:1" },
+                { "createdAt", 1L },
+                { "nonce", "dead-owner-nonce" }
+            }));
+            string reclaimedNonce;
+            var reclaimed = SetupInstaller.AcquireRuntimeUpdateGate(install, bundle, out reclaimedNonce);
+            AssertTrue(Directory.Exists(reclaimed), "stale gate with a dead owner is reclaimed");
+            AssertTrue(File.Exists(Path.Combine(reclaimed, "owner.json")), "reclaimed gate is published with its owner");
+            SetupInstaller.ReleaseRuntimeUpdateGate(reclaimed, reclaimedNonce);
+            AssertTrue(!Directory.Exists(gate), "reclaimed gate is released only by its new owner");
 
             // An existing but unreadable durable-job database also fails closed
             // rather than treating it as an empty database and killing the job.
