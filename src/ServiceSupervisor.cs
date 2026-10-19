@@ -357,7 +357,8 @@ namespace DevSpaceControlPlatform
 
         public bool StopAll()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try
             {
                 // Block before stopping Tunnel: a refusal must leave both
@@ -365,12 +366,13 @@ namespace DevSpaceControlPlatform
                 StopDevSpaceCore();
                 return StopCloudflare();
             }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         public bool RestartAll()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try
             {
                 StopDevSpaceCore();
@@ -382,7 +384,7 @@ namespace DevSpaceControlPlatform
                 StartAll();
                 return true;
             }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         public void StartDevSpace()
@@ -448,9 +450,10 @@ namespace DevSpaceControlPlatform
 
         public void StopDevSpace()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try { StopDevSpaceCore(); }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         private void StopDevSpaceCore()
@@ -492,13 +495,14 @@ namespace DevSpaceControlPlatform
 
         public void RestartDevSpace()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try
             {
                 StopDevSpaceCore();
                 StartDevSpace();
             }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         public void StartCloudflare()

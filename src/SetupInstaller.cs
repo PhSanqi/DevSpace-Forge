@@ -164,9 +164,10 @@ namespace DevSpaceControlPlatform
                 return;
             }
             catch { if (!HasOfflinePayload(sourceRoot)) throw; }
-            var gate = AcquireRuntimeUpdateGate(root, sourceRoot);
+            string gateNonce;
+            var gate = AcquireRuntimeUpdateGate(root, sourceRoot, out gateNonce);
             try { ApplyOfflinePayloadUpgrade(sourceRoot, root, delegate { }, 0); }
-            finally { Directory.Delete(gate); }
+            finally { ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         private static string FileSha256(string file)
@@ -1272,7 +1273,7 @@ namespace DevSpaceControlPlatform
             return null;
         }
 
-        private static void ReleaseRuntimeUpdateGate(string gate, string nonce)
+        internal static void ReleaseRuntimeUpdateGate(string gate, string nonce)
         {
             for (var attempt = 0; attempt < 5; attempt++)
             {
