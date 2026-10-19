@@ -9,9 +9,15 @@ import { SqliteWorkspaceStore } from "../workspace-store.js";
 import { WorkflowSessionManager } from "../workflow-sessions.js";
 import { DatabaseHandleClosedError, databasePath, openDatabase, type DatabaseHandle } from "./client.js";
 
-function tempRoot(t: test.TestContext): string {
+// Roots are removed after the whole file: per-test after hooks run in
+// registration order, so a root registered first would be deleted while the
+// test's handles are still open (EBUSY on Windows).
+const roots: string[] = [];
+test.after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+
+function tempRoot(_t: test.TestContext): string {
   const root = mkdtempSync(join(tmpdir(), "devspace-db-client-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  roots.push(root);
   return root;
 }
 
