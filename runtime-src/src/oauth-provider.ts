@@ -10,7 +10,11 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
+import {
+  SqliteOAuthClientsStore,
+  SqliteOAuthStore,
+  type PersistedAuthorizationCodeRecord,
+} from "./oauth-store.js";
 
 export interface OAuthConfig {
   ownerToken: string;
@@ -21,13 +25,11 @@ export interface OAuthConfig {
   allowedRedirectHosts: string[];
 }
 
-interface AuthorizationCodeRecord {
-  clientId: string;
-  params: AuthorizationParams;
-  expiresAtMs: number;
-}
+const CODE_TTL_SECONDS = 5 * 60;
 
-const CODE_TTL_MS = 5 * 60 * 1000;
+export type OAuthRejectionPhase = "client" | "authorize" | "authorization_code" | "refresh";
+
+export type OAuthRejectionHandler = (phase: OAuthRejectionPhase, reason: string) => void;
 
 function randomToken(): string {
   return randomBytes(32).toString("base64url");
@@ -115,7 +117,6 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
   private readonly loginFailures = new Map<string, { count: number; until: number }>();
   private globalFailures = { count: 0, until: 0 };
-  private readonly codes = new Map<string, AuthorizationCodeRecord>();
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
   private readonly allowedResourceUrls: Set<string>;
@@ -124,13 +125,18 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     private readonly config: OAuthConfig,
     resourceServerUrl: URL,
     stateDir: string,
+    private readonly onRejected?: OAuthRejectionHandler,
   ) {
     this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
     this.allowedResourceUrls = new Set(
       config.allowedResourceUrls.map((url) => resourceUrlFromServerUrl(url).href),
     );
     this.oauthStore = new SqliteOAuthStore(stateDir);
-    this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
+    this.clientsStore = new SqliteOAuthClientsStore(
+      this.oauthStore,
+      config.allowedRedirectHosts,
+      () => this.reject("client", "unknown_client"),
+    );
   }
 
   async authorize(
@@ -139,9 +145,11 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     res: Response,
   ): Promise<void> {
     if (!params.resource || !this.isResourceAllowed(params.resource)) {
+      this.reject("authorize", "resource_missing_or_not_allowed");
       throw new InvalidRequestError("Invalid or missing OAuth resource");
     }
     if (!requestedScopesAllowed(params.scopes ?? [], this.config.scopes)) {
+      this.reject("authorize", "unsupported_scope");
       throw new InvalidRequestError("Requested scope is not supported");
     }
 
@@ -165,6 +173,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const blocked = (previous?.until ?? 0) > now || this.globalFailures.until > now;
     const accepted = safeEquals(providedToken, this.config.ownerToken);
     if (blocked || !accepted) {
+      this.reject("authorize", "owner_token_mismatch");
       if (!blocked) {
         // Expire quiet clients and bound memory even when source addresses vary.
         for (const [ip, failure] of this.loginFailures) {
@@ -191,10 +200,13 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
 
     this.loginFailures.delete(clientIp);
     const code = `code-${randomUUID()}`;
-    this.codes.set(code, {
+    this.oauthStore.saveAuthorizationCode(hashToken(code), {
       clientId: client.client_id,
-      params,
-      expiresAtMs: Date.now() + CODE_TTL_MS,
+      redirectUri: params.redirectUri,
+      codeChallenge: params.codeChallenge,
+      scopes: params.scopes ?? this.config.scopes,
+      resource: params.resource?.href,
+      expiresAt: Math.floor(Date.now() / 1000) + CODE_TTL_SECONDS,
     });
 
     const redirectUrl = new URL(params.redirectUri);
@@ -208,7 +220,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     authorizationCode: string,
   ): Promise<string> {
     const record = this.validCodeRecord(client, authorizationCode);
-    return record.params.codeChallenge;
+    return record.codeChallenge;
   }
 
   async exchangeAuthorizationCode(
@@ -219,15 +231,26 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     resource?: URL,
   ): Promise<OAuthTokens> {
     const record = this.validCodeRecord(client, authorizationCode);
-    if (redirectUri && redirectUri !== record.params.redirectUri) {
+    if (redirectUri && redirectUri !== record.redirectUri) {
+      this.reject("authorization_code", "redirect_uri_mismatch");
       throw new InvalidGrantError("redirect_uri does not match the authorization request");
     }
-    if (resource && (!record.params.resource || !sameResource(resource, record.params.resource))) {
+    const savedResource = record.resource ? new URL(record.resource) : undefined;
+    if (
+      !savedResource
+      || !this.isResourceAllowed(savedResource)
+      || (resource && !sameResource(resource, savedResource))
+    ) {
+      this.reject("authorization_code", "resource_mismatch");
       throw new InvalidGrantError("Invalid resource");
     }
 
-    this.codes.delete(authorizationCode);
-    return this.issueTokens(client.client_id, record.params.scopes ?? this.config.scopes, record.params.resource);
+    const consumed = this.oauthStore.consumeAuthorizationCode(hashToken(authorizationCode));
+    if (!consumed || consumed.clientId !== client.client_id) {
+      this.reject("authorization_code", "code_already_used_or_expired");
+      throw new InvalidGrantError("Invalid authorization code");
+    }
+    return this.issueTokens(client.client_id, consumed.scopes, savedResource);
   }
 
   async exchangeRefreshToken(
@@ -238,19 +261,27 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const refreshTokenHash = hashToken(refreshToken);
     const record = this.oauthStore.getRefreshToken(refreshTokenHash);
-    if (!record || record.clientId !== client.client_id || record.expiresAt < Math.floor(Date.now() / 1000)) {
+    if (!record || record.expiresAt < Math.floor(Date.now() / 1000)) {
+      this.reject("refresh", "token_missing_or_expired");
+      throw new InvalidGrantError("Invalid refresh token");
+    }
+    if (record.clientId !== client.client_id) {
+      this.reject("refresh", "client_mismatch");
       throw new InvalidGrantError("Invalid refresh token");
     }
     const recordedResource = record.resource ? new URL(record.resource) : undefined;
     if (!recordedResource || !this.isResourceAllowed(recordedResource)) {
+      this.reject("refresh", "resource_no_longer_allowed");
       throw new InvalidGrantError("Invalid resource");
     }
     if (resource && !sameResource(resource, recordedResource)) {
+      this.reject("refresh", "resource_mismatch");
       throw new InvalidGrantError("Invalid resource");
     }
 
     const requestedScopes = scopes ?? record.scopes;
     if (!requestedScopes.every((scope) => record.scopes.includes(scope))) {
+      this.reject("refresh", "scope_escalation");
       throw new AccessDeniedError("Refresh token cannot grant requested scopes");
     }
 
@@ -297,12 +328,23 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private validCodeRecord(
     client: OAuthClientInformationFull,
     authorizationCode: string,
-  ): AuthorizationCodeRecord {
-    const record = this.codes.get(authorizationCode);
-    if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
+  ): PersistedAuthorizationCodeRecord {
+    const record = this.oauthStore.getAuthorizationCode(hashToken(authorizationCode));
+    if (!record || record.clientId !== client.client_id) {
+      // The SDK calls challengeForAuthorizationCode before exchange, so a
+      // consumed code is indistinguishable from one that never existed here.
+      this.reject("authorization_code", "code_already_used_or_expired");
+      throw new InvalidGrantError("Invalid authorization code");
+    }
+    if (record.expiresAt < Math.floor(Date.now() / 1000)) {
+      this.reject("authorization_code", "code_missing_or_expired");
       throw new InvalidGrantError("Invalid authorization code");
     }
     return record;
+  }
+
+  private reject(phase: OAuthRejectionPhase, reason: string): void {
+    this.onRejected?.(phase, reason);
   }
 
   private issueTokens(
@@ -337,6 +379,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       consumedRefreshTokenHash,
     );
     if (!saved) {
+      this.reject("refresh", "rotation_race_or_replay");
       throw new InvalidGrantError("Invalid refresh token");
     }
 

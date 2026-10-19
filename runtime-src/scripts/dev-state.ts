@@ -46,8 +46,25 @@ export async function seedDevState({ reset = false }: { reset?: boolean } = {}):
     await mkdir(stagingConfigDir, { recursive: true });
     await mkdir(stagingStateDir, { recursive: true });
 
+    // A QA fork must not impersonate production's OAuth issuer with a copy of
+    // its rotating refresh tokens. Give it its own loopback origin instead.
+    const qaPort = source.config.server.port <= 64_535
+      ? source.config.server.port + 1000
+      : source.config.server.port - 1000;
     const localConfig: DevspaceConfig = {
       ...source.config,
+      server: {
+        ...source.config.server,
+        host: "127.0.0.1",
+        port: qaPort,
+        publicBaseUrl: `http://127.0.0.1:${qaPort}`,
+        allowedHosts: [],
+        trustProxy: false,
+      },
+      oauth: {
+        ...source.config.oauth,
+        allowedResourceUrls: [],
+      },
       storage: {
         ...source.config.storage,
         stateDir: devStateDir,
@@ -73,7 +90,9 @@ export async function seedDevState({ reset = false }: { reset?: boolean } = {}):
     }
 
     if (existsSync(sourceDatabasePath)) {
-      await backupDatabase(sourceDatabasePath, databasePath(stagingStateDir));
+      const forkedDatabasePath = databasePath(stagingStateDir);
+      await backupDatabase(sourceDatabasePath, forkedDatabasePath);
+      clearForkedOAuthState(forkedDatabasePath);
     }
 
     await promoteStagedState(stagingRoot, reset);
@@ -138,6 +157,33 @@ async function backupDatabase(sourcePath: string, destinationPath: string): Prom
     await chmod(destinationPath, 0o600);
   } finally {
     source.close();
+  }
+}
+
+/**
+ * Removes cloned OAuth credentials from the QA backup only. The production
+ * database is opened read-only by backupDatabase and is never modified.
+ */
+function clearForkedOAuthState(path: string): void {
+  const database = new Database(path);
+  try {
+    database.pragma("foreign_keys = ON");
+    const clear = database.transaction(() => {
+      for (const table of [
+        "oauth_access_tokens",
+        "oauth_refresh_tokens",
+        "oauth_authorization_codes",
+        "oauth_clients",
+      ]) {
+        const exists = database
+          .prepare("select 1 from sqlite_master where type = 'table' and name = ?")
+          .get(table);
+        if (exists) database.prepare(`delete from ${table}`).run();
+      }
+    });
+    clear.immediate();
+  } finally {
+    database.close();
   }
 }
 

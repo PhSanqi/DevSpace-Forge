@@ -278,3 +278,36 @@ Historical `show_changes` cards use the `review_ref` in their structured result
 to recover the exact Git-backed review when a host reloads the app without its
 original result metadata. `open_workspace` can rebuild its card directly from
 its structured result.
+
+## ChatGPT Says Authorization Is Invalid or Expired
+
+Do not reconnect repeatedly or delete the state database as a first response.
+Run a read-only inventory on the actual service host:
+
+```bash
+devspace doctor --auth
+```
+
+This prints the resolved state directory and **counts only** of registered
+clients, unexpired access tokens, unexpired refresh tokens, and pending
+authorization codes. It does not print passwords, raw tokens, token hashes, or
+client IDs. Compare the reported config and state directories with the ones the
+running service uses before drawing conclusions.
+
+Authorization codes are persisted in SQLite, so a runtime restart between
+`/authorize` and `/token` (for example an A-to-B slot switch) no longer loses
+the code. A code can still be used only once and still expires after five
+minutes.
+
+Inspect the server's structured logs for `oauth_rejected` and `http_request`
+events. The `oauth_rejected.phase` (`client`, `authorize`,
+`authorization_code`, `refresh`) and `oauth_rejected.reason` values distinguish
+unknown clients, owner-password failures, expired or replayed codes, refresh
+token rotation/replay, and resource-URL mismatches without exposing
+credentials. If an authorization attempt never reaches the server, inspect the
+MCP client or the tunnel rather than resetting DevSpace's database.
+
+Development/QA state is intentionally isolated from production and uses a
+distinct loopback OAuth URL after `dev:seed` or `dev:reset`. A QA database fork
+must never take over the public production OAuth origin, because each fork
+would rotate its refresh tokens independently.

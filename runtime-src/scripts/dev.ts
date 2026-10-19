@@ -1,5 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { parse } from "jsonc-parser";
 import spawn from "cross-spawn";
 
 const checkoutRoot = resolve(process.cwd());
@@ -8,6 +10,11 @@ const hasConfig = existsSync(join(configDir, "config.jsonc")) || existsSync(join
 
 if (!hasConfig) {
   console.error("Development state is not initialized. Run `pnpm dev:seed` first.");
+  process.exitCode = 1;
+} else if (forkUsesProductionOAuthIdentity(configDir)) {
+  console.error("Refusing to run a QA OAuth database fork at the production public URL.");
+  console.error("A copied refresh token rotates independently and breaks ChatGPT authorization.");
+  console.error("Run `pnpm dev:reset` to generate a local-only QA endpoint, leaving production tokens unchanged.");
   process.exitCode = 1;
 } else {
   const child = spawn("tsx", ["watch", "--clear-screen=false", "src/cli.ts", "serve"], {
@@ -30,4 +37,52 @@ if (!hasConfig) {
     }
     process.exitCode = code ?? 1;
   });
+}
+
+function forkUsesProductionOAuthIdentity(localConfigDir: string): boolean {
+  const productionConfigDir = resolve(
+    process.env.DEVSPACE_CONFIG_DIR ?? join(homedir(), ".devspace"),
+  );
+  const qaConfigPath = resolveConfigPath(localConfigDir);
+  const productionConfigPath = resolveConfigPath(productionConfigDir);
+  if (!qaConfigPath || !productionConfigPath) return false;
+
+  const qa = parse(readFileSync(qaConfigPath, "utf8")) as Record<string, unknown>;
+  const production = parse(readFileSync(productionConfigPath, "utf8")) as Record<string, unknown>;
+  const qaUrl = mcpUrl(qa);
+  const productionUrl = mcpUrl(production);
+  const qaState = (qa.storage as { stateDir?: string } | undefined)?.stateDir;
+  const productionState = (production.storage as { stateDir?: string } | undefined)?.stateDir;
+  return Boolean(
+    qaUrl
+    && productionUrl
+    && qaUrl === productionUrl
+    && qaState
+    && productionState
+    && resolve(qaState) !== resolve(productionState),
+  );
+}
+
+function resolveConfigPath(configDir: string): string | undefined {
+  for (const name of ["config.jsonc", "config.json"]) {
+    const path = join(configDir, name);
+    if (existsSync(path)) return path;
+  }
+  return undefined;
+}
+
+function mcpUrl(config: Record<string, unknown>): string | undefined {
+  const server = (config.server ?? {}) as {
+    publicBaseUrl?: string | null;
+    host?: string;
+    port?: number;
+  };
+  const host = server.host ?? "127.0.0.1";
+  const port = server.port ?? 7676;
+  const origin = server.publicBaseUrl ?? `http://${host}:${port}`;
+  try {
+    return new URL("/mcp", origin).href;
+  } catch {
+    return undefined;
+  }
 }

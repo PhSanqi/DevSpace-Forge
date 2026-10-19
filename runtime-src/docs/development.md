@@ -18,7 +18,15 @@ pnpm dev
 checkout. It copies the current config, auth file, DevSpace-local skills and
 agent profiles, and makes a SQLite backup of the configured state database. The
 copied config is rewritten so `storage.stateDir` points at the checkout-local
-state directory.
+state directory. It also gets an isolated loopback origin (the source port plus
+1000, or minus 1000 near the top of the range) with its own `publicBaseUrl`, and
+no extra resource aliases.
+
+OAuth clients, authorization codes, access tokens, and refresh tokens are
+removed from the **QA backup only**. The production database and credentials are
+not modified. `dev` refuses to launch a fork whose MCP URL still equals the
+production MCP URL while its state directory differs; run `dev:reset` to
+regenerate an isolated fork.
 
 `pnpm dev` only uses that local QA configuration. If the checkout has not been
 seeded, it stops with an instruction to run `pnpm dev:seed` instead of silently
@@ -30,19 +38,18 @@ and `dev:reset` so both commands fork the same installation.
 
 ## Testing with ChatGPT
 
-Stop the installed DevSpace server before starting the source checkout so both
-processes do not compete for the configured port. You can keep the same tunnel
-and public URL running.
+The source checkout now uses a separate loopback origin, so the installed
+production server and its tunnel can keep running. To test with ChatGPT, give
+the QA instance its **own** HTTPS tunnel URL and a **separate** ChatGPT MCP
+connection. Do not point the existing production connector at a QA database
+copy.
 
-Because the QA database is forked from your normal state, it starts with the
-same registered OAuth clients and current access and refresh tokens. This
-usually lets ChatGPT continue through a server restart without setting up a new
-connection.
+The QA database starts without cloned OAuth clients, codes, or tokens: ChatGPT
+must authorize the QA instance once. Refresh tokens rotate independently on
+each fork, so a QA fork must never share or reuse the production issuer.
 
-The fork is a snapshot, not shared state. OAuth refresh tokens rotate when they
-are used, so a long-lived QA fork can diverge from the normal installation or
-from another worktree's older fork. Do not rely on separate QA databases to
-remain permanently interchangeable without re-authentication.
+Old `.devspace-dev` directories seeded before this isolation existed can still
+contain production OAuth state and URLs. Run `pnpm dev:reset` to replace them.
 
 ## Switching between worktrees
 

@@ -1501,7 +1501,12 @@ export function createServer(
   const healthRoute = `${publicBasePath}/healthz` || "/healthz";
   const mcpUrl = publicEndpointUrl(config.publicBaseUrl, "/mcp");
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthProvider = new SingleUserOAuthProvider(
+    config.oauth,
+    mcpUrl,
+    config.stateDir,
+    (phase, reason) => logEvent(config.logging, "warn", "oauth_rejected", { phase, reason }),
+  );
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],

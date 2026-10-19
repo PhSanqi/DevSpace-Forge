@@ -184,6 +184,31 @@ function migrateOAuthState(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Additive, rollback-safe table: ensured on open but NOT recorded in the
+ * versioned history. Runtime slots share one state directory and an older
+ * build refuses unknown migration versions, so a recorded version here would
+ * stop an A→B→A rollback. Older builds simply ignore this table.
+ */
+export function ensureOAuthAuthorizationCodesTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists oauth_authorization_codes (
+      code_hash text primary key,
+      client_id text not null,
+      redirect_uri text not null,
+      code_challenge text not null,
+      scopes_json text not null,
+      resource text,
+      created_at integer not null,
+      expires_at integer not null,
+      foreign key (client_id) references oauth_clients(client_id) on delete cascade
+    );
+
+    create index if not exists oauth_authorization_codes_expires_at_idx
+      on oauth_authorization_codes(expires_at);
+  `);
+}
+
 function migrateLocalAgentSessions(sqlite: Database.Database): void {
   sqlite.exec(`
     create table if not exists local_agent_sessions (

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Response } from "express";
+import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { databasePath, openDatabase } from "./db/client.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
@@ -26,6 +28,9 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
+  testAuthorizationCodeLifecycle(join(root, "authorization-codes"));
+  testAuthorizationCodeTableIsRollbackSafe(join(root, "rollback-safe"));
+  await testAuthorizationCodeSurvivesRestart(join(root, "authorization-code-restart"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
   await testRefreshResourcePolicy(join(root, "refresh-policy"));
 } finally {
@@ -192,6 +197,124 @@ function testTransactionalTokenRotation(stateDir: string): void {
   }
 }
 
+function testAuthorizationCodeLifecycle(stateDir: string): void {
+  const store = new SqliteOAuthStore(stateDir);
+  try {
+    const client = new SqliteOAuthClientsStore(store, oauthConfig.allowedRedirectHosts).registerClient({
+      redirect_uris: [redirectUri],
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const rawCode = "code-raw-secret-value";
+    store.saveAuthorizationCode(hashToken(rawCode), {
+      clientId: client.client_id,
+      redirectUri,
+      codeChallenge: "lifecycle-challenge",
+      scopes: ["devspace"],
+      resource: mcpUrl.href,
+      expiresAt: now + 300,
+    });
+
+    // Only the hash is stored; the raw code is not a lookup key.
+    assert.equal(store.getAuthorizationCode(rawCode), undefined);
+    const stored = store.getAuthorizationCode(hashToken(rawCode));
+    assert.equal(stored?.clientId, client.client_id);
+    assert.equal(stored?.redirectUri, redirectUri);
+    assert.equal(stored?.codeChallenge, "lifecycle-challenge");
+    assert.deepEqual(stored?.scopes, ["devspace"]);
+    assert.equal(stored?.resource, mcpUrl.href);
+
+    // Single use: the second consume returns nothing.
+    assert.ok(store.consumeAuthorizationCode(hashToken(rawCode)));
+    assert.equal(store.consumeAuthorizationCode(hashToken(rawCode)), undefined);
+
+    // Expired codes cannot be consumed and are purged on the next save.
+    const expiredCode = "code-expired";
+    store.saveAuthorizationCode(hashToken(expiredCode), {
+      clientId: client.client_id,
+      redirectUri,
+      codeChallenge: "expired-challenge",
+      scopes: ["devspace"],
+      expiresAt: now - 1,
+    });
+    assert.equal(store.consumeAuthorizationCode(hashToken(expiredCode)), undefined);
+    store.saveAuthorizationCode(hashToken("code-live-after-expired"), {
+      clientId: client.client_id,
+      redirectUri,
+      codeChallenge: "live-challenge",
+      scopes: ["devspace"],
+      expiresAt: now + 300,
+    });
+    assert.equal(store.getAuthorizationCode(hashToken(expiredCode)), undefined);
+    assert.ok(store.getAuthorizationCode(hashToken("code-live-after-expired")));
+  } finally {
+    store.close();
+  }
+
+  // Startup purges codes that expired while the process was stopped.
+  const restartStore = new SqliteOAuthStore(stateDir);
+  const client = new SqliteOAuthClientsStore(restartStore, oauthConfig.allowedRedirectHosts)
+    .registerClient({ redirect_uris: [redirectUri] });
+  restartStore.saveAuthorizationCode("expired-at-startup", {
+    clientId: client.client_id,
+    redirectUri,
+    codeChallenge: "startup-challenge",
+    scopes: ["devspace"],
+    expiresAt: Math.floor(Date.now() / 1000) - 1,
+  });
+  restartStore.close();
+  const purgedStore = new SqliteOAuthStore(stateDir);
+  try {
+    assert.equal(purgedStore.getAuthorizationCode("expired-at-startup"), undefined);
+  } finally {
+    purgedStore.close();
+  }
+}
+
+async function testAuthorizationCodeSurvivesRestart(stateDir: string): Promise<void> {
+  const first = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const client = await first.clientsStore.registerClient?.({
+    redirect_uris: [redirectUri],
+  });
+  assert.ok(client);
+
+  const code = await authorizeAndGetCode(first, client, {
+    redirectUri,
+    codeChallenge: "restart-pkce-challenge",
+    scopes: ["devspace"],
+    state: "test-state",
+    resource: mcpUrl,
+  });
+  first.close();
+
+  const second = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  try {
+    assert.ok(second.clientsStore.getClient(client.client_id));
+    assert.equal(await second.challengeForAuthorizationCode(client, code), "restart-pkce-challenge");
+    await assert.rejects(
+      second.exchangeAuthorizationCode(client, code, undefined, redirectUri, tunnelUrl),
+      InvalidGrantError,
+    );
+    const tokens = await second.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl);
+    assert.equal((await second.verifyAccessToken(tokens.access_token)).resource?.href, mcpUrl.href);
+    await assert.rejects(
+      second.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl),
+      InvalidGrantError,
+    );
+  } finally {
+    second.close();
+  }
+
+  const database = openDatabase(stateDir);
+  try {
+    assert.equal(
+      database.sqlite.prepare("select count(*) from oauth_authorization_codes").pluck().get(),
+      0,
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function testProviderRestartRotationAndRevocation(stateDir: string): Promise<void> {
   const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
   assert.equal(firstProvider.isResourceAllowed(mcpUrl), true);
@@ -205,16 +328,11 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
   });
   assert.ok(client);
 
-  const code = "code-test-123";
-  firstProvider["codes"].set(code, {
-    clientId: client.client_id,
-    params: {
-      redirectUri,
-      codeChallenge: "challenge",
-      scopes: ["devspace"],
-      resource: tunnelUrl,
-    },
-    expiresAtMs: Date.now() + 60_000,
+  const code = await authorizeAndGetCode(firstProvider, client, {
+    redirectUri,
+    codeChallenge: "challenge",
+    scopes: ["devspace"],
+    resource: tunnelUrl,
   });
   await assert.rejects(
     firstProvider.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl),
@@ -306,6 +424,44 @@ async function testRefreshResourcePolicy(stateDir: string): Promise<void> {
   }
 }
 
+async function authorizeAndGetCode(
+  provider: SingleUserOAuthProvider,
+  client: OAuthClientInformationFull,
+  params: Parameters<SingleUserOAuthProvider["authorize"]>[1],
+): Promise<string> {
+  let location = "";
+  const response = {
+    req: { method: "POST", body: { owner_token: oauthConfig.ownerToken }, ip: "127.0.0.1" },
+    redirect: (_status: number, url: string) => {
+      location = url;
+    },
+  } as unknown as Response;
+  await provider.authorize(client, params, response);
+  const code = new URL(location).searchParams.get("code");
+  assert.ok(code);
+  return code;
+}
+
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("base64url");
+}
+
+// Runtime slots share one state dir and older builds reject unknown migration
+// versions, so the auth-code table must exist without a new version row.
+function testAuthorizationCodeTableIsRollbackSafe(stateDir: string): void {
+  const store = new SqliteOAuthStore(stateDir);
+  store.close();
+  const database = openDatabase(stateDir);
+  try {
+    const maxVersion = database.sqlite
+      .prepare("select max(version) as version from devspace_schema_migrations")
+      .get() as { version: number };
+    assert.equal(maxVersion.version, 9, "no versioned migration may be added for the auth-code table");
+    const table = database.sqlite
+      .prepare("select name from sqlite_master where type = 'table' and name = 'oauth_authorization_codes'")
+      .get();
+    assert.ok(table, "auth-code table is ensured on store open");
+  } finally {
+    database.close();
+  }
 }
