@@ -97,6 +97,67 @@ jobs:
             -RuntimePackagePath $runtimePackage `
             -Force
 
+  # Builds the same Windows product ZIP as the tag release, but only as a
+  # short-lived Actions artifact, so unreleased PR heads can be tested on a
+  # real machine (native Setup update A -> B -> A) without publishing.
+  windows-package:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: runtime-src/pnpm-lock.yaml
+      - name: Cache verified video sidecar archive
+        uses: actions/cache@v4
+        with:
+          path: dist/.offline-cache/video
+          key: video-sidecar-${{ runner.os }}-n8.1.3-16-ge0a878dd70-20261009
+      - name: Install, build and pack canonical Runtime
+        working-directory: runtime-src
+        shell: powershell
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force ..\dist\runtime-package | Out-Null
+          pnpm pack --pack-destination ..\dist\runtime-package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare Windows runtime payload
+        shell: powershell
+        run: |
+          $runtimePackage = (Get-ChildItem dist\runtime-package\*.tgz | Select-Object -First 1).FullName
+          if ([string]::IsNullOrWhiteSpace($runtimePackage)) { throw 'Canonical runtime package was not produced.' }
+          .\prepare-offline-windows-runtime.ps1 -OutputRoot dist\offline-windows-runtime -RuntimePackagePath $runtimePackage -Force
+          $slot = (Get-Content -Raw dist\offline-windows-runtime\runtime\active-slot.txt).Trim()
+          $package = "dist\offline-windows-runtime\runtime\slots\$slot\devspace\node_modules\@waishnav\devspace"
+          & node .\ops\write-provenance.mjs --source-root runtime-src --server-file "$package\dist\server.js" --package-file runtime-src\package.json --output "$package\runtime-provenance.json" --artifact-id "runtime-ci-${{ github.event.pull_request.head.sha }}" --strict
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime provenance generation failed.' }
+          New-Item -ItemType Directory -Force dist\runtime-payload | Out-Null
+          tar.exe -cf dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local15.tar -C dist\offline-windows-runtime runtime cloudflared.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to create Windows runtime payload.' }
+      - name: Build Windows product package
+        shell: powershell
+        run: |
+          .\package-release-windows-payload.ps1 -Version '0.6.15-ci.${{ github.run_number }}' -RuntimePayloadPath dist\runtime-payload\DevSpaceControlRuntime-windows-beta4-local15.tar
+      - name: Upload Windows package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package-pr${{ github.event.pull_request.number }}-${{ github.run_number }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            dist/DevSpace-Forge-v0.6.15-ci.${{ github.run_number }}-win-x64.zip
+            dist/DevSpace-Forge-v0.6.15-ci.${{ github.run_number }}-win-x64.zip.sha256.txt
+
   control:
     runs-on: ubuntu-latest
     timeout-minutes: 15
