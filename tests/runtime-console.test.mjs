@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createConsoleServer, parseOptions, resolveRunningPackage, restoreWindowsManagedServices, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
-import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
+import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, stageRuntimeSlot, switchRuntime } from '../ops/runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from '../ops/runtime-jobs-guard.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
 import { gatewayRoute, resolveInstance, withGatewaySecurityHeaders } from '../ops/cloudflare-gateway-worker.mjs';
@@ -30,8 +30,23 @@ const fixture=(prefix='devspace-console-')=>{
     writeFileSync(path.join(dir,'dist','server.js'),'actual server build');
     writeFileSync(path.join(dir,'dist','cli.js'),'cli');
   }
-  return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
+  const slot=stageFixtureSlot(root);
+  return {root,declared,actual,slot,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+// A real runtime/slots/<id> layout is the only valid rollback target. The
+// launcher dry-run is stubbed so the fixture needs no executables.
+function stageFixtureSlot(root,{version='1.1.0-beta.4.slot.1'}={}){
+  const source=path.join(root,'runtime-staging-source');
+  mkdirSync(path.join(source,'node','bin'),{recursive:true});
+  writeFileSync(path.join(source,'node','bin','node'),'node placeholder',{mode:0o755});
+  writeFileSync(path.join(source,'node','node.exe'),'node placeholder',{mode:0o755});
+  const pkg=path.join(source,'devspace','node_modules','@waishnav','devspace');
+  mkdirSync(path.join(pkg,'dist'),{recursive:true});
+  writeFileSync(path.join(pkg,'package.json'),JSON.stringify({version}));
+  writeFileSync(path.join(pkg,'dist','cli.js'),'slot cli');
+  writeFileSync(path.join(pkg,'dist','server.js'),'slot server build');
+  return stageRuntimeSlot({platformRoot:root},source,{dryRun:()=>{}});
+}
 const testLifecycleController=()=>({
   available:()=>true,autostartAvailable:true,
   state:()=>({status:'active',enabled:'enabled',pid:123}),
@@ -290,7 +305,7 @@ test('Console refuses Runtime-affecting actions while durable jobs run, not Tunn
     response=await post('/api/management/service',{target:'devspace',action:'restart'});
     assert.equal(response.status,409);
     assert.equal((await response.json()).reason_code,'active_jobs');
-    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>!x.current);
+    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>x.selectable&&!x.current);
     response=await post('/api/actions/rollback-runtime',{target_id:target.id,expected_sha256:target.server_sha256,observed_pid:123});
     assert.equal(response.status,409);
     const rollbackBlocked=await response.json();
@@ -705,17 +720,27 @@ test('operator password requires explicit enablement, same origin and per-proces
     assert.equal(accepted.headers.get('cache-control'),'no-store');
   }finally{await new Promise(resolve=>server.close(resolve));}
 });
-test('runtime rollback target inventory includes actual candidate and excludes damaged packages',()=>{
+test('runtime rollback target inventory lists legacy directories as non-selectable inventory',async()=>{
   const f=fixture();
   try{
-    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
+    const opts={platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
+    const rt=runtimeInfo(opts);
     const candidates=rollbackTargets({platformRoot:f.root},rt);
-    assert.deepEqual(candidates.map(x=>x.id),['runtime-local13','runtime-local13-candidate']);
-    assert.equal(candidates[0].verified,true);
-    assert.equal(candidates[0].current,false);
-    assert.equal(candidates[1].current,true);
+    assert.deepEqual(candidates.map(x=>x.id),['runtime-local13','runtime-local13-candidate',f.slot.id]);
+    for(const legacy of candidates.filter(x=>x.id.startsWith('runtime-local'))){
+      assert.deepEqual({legacy:legacy.legacy,selectable:legacy.selectable,verified:legacy.verified},{legacy:true,selectable:false,verified:false});
+    }
+    assert.equal(candidates.find(x=>x.id==='runtime-local13').current,false);
+    assert.equal(candidates.find(x=>x.id==='runtime-local13-candidate').current,true);
+    const slot=candidates.find(x=>x.id===f.slot.id);
+    assert.equal(slot.legacy,false);
+    assert.equal(slot.selectable,true);
+    assert.equal(slot.verified,true);
+    assert.equal(slot.current,false);
+    const state=await snapshot({...opts,instance:'server',configPath:path.join(f.root,'missing-config.jsonc'),tunnelUnit:'',tunnelMetrics:'',stateDir:'',runtimeManifest:'',controlManifest:''},testLifecycleController());
+    assert.deepEqual(state.deployment.rollback_candidates,[f.slot.id]);
     mkdirSync(path.join(f.root,'runtime-local9'),{recursive:true});
-    assert.equal(rollbackTargets({platformRoot:f.root},rt).length,2);
+    assert.deepEqual(rollbackTargets({platformRoot:f.root},rt).map(x=>x.id),['runtime-local13','runtime-local13-candidate',f.slot.id]);
   }finally{f.clean();}
 });
 test('rollback API requires current process, exact inventory ID, hash, token and origin',async()=>{
@@ -727,7 +752,7 @@ test('rollback API requires current process, exact inventory ID, hash, token and
   const url='http://127.0.0.1:'+server.address().port;
   try{
     const token=(await (await fetch(url+'/api/action-token')).json()).token;
-    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>!x.current);
+    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>x.selectable&&!x.current);
     const body=JSON.stringify({target_id:target.id,expected_sha256:target.server_sha256,observed_pid:123});
     const post=(payload,headers={})=>fetch(url+'/api/actions/rollback-runtime',{method:'POST',headers:{origin:url,'x-devspace-console-token':token,'content-type':'application/json',...headers},body:payload});
     assert.equal((await post(body,{'x-devspace-console-token':'incorrect'})).status,403);
@@ -735,6 +760,13 @@ test('rollback API requires current process, exact inventory ID, hash, token and
     assert.equal((await post(JSON.stringify({...JSON.parse(body),target_id:'../../anything'}))).status,409);
     assert.equal((await post(JSON.stringify({...JSON.parse(body),expected_sha256:'0'.repeat(64)}))).status,409);
     assert.equal((await post(JSON.stringify({...JSON.parse(body),observed_pid:124}))).status,409);
+    const legacy=rollbackTargets(opts,runtimeInfo(opts)).find(x=>x.legacy&&!x.current);
+    assert.ok(legacy,'the fixture keeps a non-current legacy directory as inventory');
+    const legacyResponse=await post(JSON.stringify({target_id:legacy.id,expected_sha256:legacy.server_sha256,observed_pid:123}));
+    const legacyResult=await legacyResponse.json();
+    assert.equal(legacyResponse.status,409);
+    if(process.platform!=='win32')
+      assert.deepEqual(legacyResult,{ok:false,error:'Legacy runtime directories cannot be selected for rollback; only verified runtime slots can.'});
     assert.equal(calls.length,0);
     const good=await post(body);
     if(process.platform==='win32'){

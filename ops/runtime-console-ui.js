@@ -34,7 +34,7 @@
     rollbackConfirmTitle:'Switch the live runtime?',rollbackConfirmText:'This will restart the MCP service, temporarily interrupt active connections, and preserve the current launcher for recovery. Tunnel and credentials will not be changed.',
     rollbackType:'Type the selected target ID to confirm:',rollbackPassed:'Target verified and active. Recheck the connector after the restart.',
     rollbackFailed:'Runtime switch was not completed.',rollbackBusy:'The service operation is running. Do not close the page.',
-    rollbackSha:'Build SHA-256',rollbackStatus:'Selection status',notCurrent:'Available rollback target',
+    rollbackSha:'Build SHA-256',rollbackStatus:'Selection status',notCurrent:'Available rollback target',legacyRuntime:'legacy, not selectable',
     selectTargetFirst:'Choose a verified runtime above to inspect it before rollback.',
     access:'Connection & access',accessDesc:'Copy the endpoint and retrieve the owner credential through an explicit local-only action.',
   });
@@ -53,7 +53,7 @@
     rollbackConfirmTitle:'确认切换正在运行的版本？',rollbackConfirmText:'这将重启 MCP 服务并短暂中断连接；会保留现有启动脚本以便失败恢复，不会修改 Tunnel 或密钥。',
     rollbackType:'输入所选版本 ID 以确认：',rollbackPassed:'目标版本已通过运行与健康校验，请重新检查连接。',
     rollbackFailed:'运行版本切换未完成。',rollbackBusy:'服务正在切换，请不要关闭页面。',
-    rollbackSha:'构建 SHA-256',rollbackStatus:'选择状态',notCurrent:'可选回滚版本',
+    rollbackSha:'构建 SHA-256',rollbackStatus:'选择状态',notCurrent:'可选回滚版本',legacyRuntime:'旧版目录，不可选',
     selectTargetFirst:'请先在上方选择一个已校验的运行版本，再查看并执行回滚。',
     access:'连接与密钥',
   });
@@ -414,7 +414,7 @@
     const eligible=targets.filter(x=>x.verified&&!x.current);
     if(!eligible.some(x=>x.id===selectedRollbackId))selectedRollbackId='';
     const chosen=eligible.find(x=>x.id===selectedRollbackId);
-    const options='<option value="">'+h(t('selectTarget'))+'</option>'+targets.map(x=>'<option value="'+h(x.id)+'" '+(x.current||!x.verified?'disabled ':'')+(chosen?.id===x.id?'selected':'')+'>'+h(x.id+' / '+x.version+(x.current?' / '+t('currentRuntime'):'')+(!x.verified?' / '+t('unknown'):''))+'</option>').join('');
+    const options='<option value="">'+h(t('selectTarget'))+'</option>'+targets.map(x=>'<option value="'+h(x.id)+'" '+(x.current||x.legacy||!x.verified?'disabled ':'')+(chosen?.id===x.id?'selected':'')+'>'+h(x.id+' / '+x.version+(x.current?' / '+t('currentRuntime'):'')+(x.legacy?' / '+t('legacyRuntime'):!x.verified?' / '+t('unknown'):''))+'</option>').join('');
     const selector=targets.length?'<label for="rollback-target" class="mini-label">'+h(t('selectTarget'))+'</label><select id="rollback-target" class="filter-input rollback-select">'+options+'</select>':empty(t('rollbackNotAvailable'));
     const preview=chosen?'<div class="rollback-preview">'+row(t('version'),chosen.version)+row(t('packageRoot'),chosen.package_root,true)+row(t('rollbackSha'),chosen.server_sha256,true)+row(t('rollbackStatus'),t('notCurrent'))+'</div>':note(eligible.length?t('selectTargetFirst'):t('rollbackNotAvailable'),eligible.length?'':'warning');
     const recovery='<div class="panel-body">'+row(t('runtimeTopology'),dep.runtime_topology)+row(t('actualRuntimeId'),dep.actual_runtime_id)+row(t('activeSlot'),dep.active_slot)+row(t('configuredRuntimeId'),dep.configured_runtime_id)+row(t('previousSlot'),dep.previous_slot)+selector+preview+'<button class="danger-button rollback-button" data-action="rollback-runtime" '+(!chosen||!actions.rollback_runtime?'disabled':'')+'>'+h(t('runRollback'))+'</button>'+note(t('rollbackConfirmText'),'warning')+'</div>';

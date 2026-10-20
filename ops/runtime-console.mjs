@@ -223,7 +223,7 @@ export function runtimeInfo(options) {
 }
 function deploymentInfo(options,rt) {
   const targets=rollbackTargets(options,rt);
-  const rollback=targets.filter(target=>!target.current).map(target=>target.id);
+  const rollback=targets.filter(target=>target.selectable&&!target.current).map(target=>target.id);
   const backupRoot=path.join(options.platformRoot,'state','backup');
   let backups=[];
   try {backups=readdirSync(backupRoot,{withFileTypes:true}).filter((x)=>x.isDirectory()).map((x)=>x.name).sort().reverse().slice(0,20);}catch{}
@@ -252,7 +252,9 @@ export function rollbackTargets(options,rt=runtimeInfo(options)) {
         const version=readJson(path.join(pkg,'package.json'))?.version;
         const hash=fileHash(source);
         if(typeof version!=='string'||!hash)continue;
-        entries.push({id:entry.name,version,server_sha256:hash,package_root:pkg,current:rt.actual?.package_root===pkg,verified:true});
+        // Legacy directories are inventory only: the switch validates the
+        // runtime/slots/<id> layout, so these can never be rollback targets.
+        entries.push({id:entry.name,version,server_sha256:hash,package_root:pkg,current:rt.actual?.package_root===pkg,verified:false,legacy:true,selectable:false});
       }catch{}
     }
   }catch{}
@@ -262,7 +264,7 @@ export function rollbackTargets(options,rt=runtimeInfo(options)) {
       if(!entry.isDirectory())continue;
       try{
         const target=validateRuntimeSlot(options,entry.name,{dryRun:()=>{}});
-        entries.push({...target,current:rt.actual?.package_root===target.package_root});
+        entries.push({...target,current:rt.actual?.package_root===target.package_root,legacy:false,selectable:true});
       }catch{} // Incomplete or altered slots are never selectable.
     }
   }catch{}
@@ -592,6 +594,8 @@ export function createConsoleServer(options,services={}) {
           const request=parse(body);
           const info=runtimeInfo(options);
           const target=rollbackTargets(options,info).find(x=>x.id===request?.target_id);
+          if(target&&!target.selectable)
+            return json(res,409,{ok:false,error:'Legacy runtime directories cannot be selected for rollback; only verified runtime slots can.'});
           if(!target||target.current||target.server_sha256!==request?.expected_sha256||info.actual.pid!==request?.observed_pid)
             return json(res,409,{ok:false,error:'The selected runtime is no longer valid. Refresh and try again.'});
           const gate=await runtimeRestartPreflight(options);
