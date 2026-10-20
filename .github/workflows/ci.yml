@@ -38,12 +38,16 @@ jobs:
       # The installed-package smoke test runs a cold `npm install` of the packed
       # tarball (~6-7 min on Windows). Caching npm's download cache keeps the
       # real install/resolve path while skipping repeated registry downloads.
+      # Ask npm for its cache dir: Windows runner images relocate it, so a
+      # hard-coded ~/AppData path was never saved there.
+      - name: Resolve npm cache directory
+        id: npm-cache-dir
+        shell: bash
+        run: echo "dir=$(npm config get cache)" >> "$GITHUB_OUTPUT"
       - name: Cache npm download cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.npm
-            ~/AppData/Local/npm-cache
+          path: ${{ steps.npm-cache-dir.outputs.dir }}
           key: npm-cache-${{ runner.os }}-${{ hashFiles('runtime-src/package.json', 'runtime-src/pnpm-lock.yaml') }}
           restore-keys: npm-cache-${{ runner.os }}-
       - name: Install embedded Runtime dependencies
