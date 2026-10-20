@@ -16,6 +16,9 @@ import type { LocalAgentProvider } from "./local-agent-profiles.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_TERMINATE_CLOSE_TIMEOUT_MS = 5_000;
+
+export type LocalAgentRuntimeTermination = "closed" | "shared" | "missing" | "close_failed";
 
 export interface LocalAgentRuntimePoolLogger {
   (level: "info" | "warn" | "error", event: string, fields: Record<string, unknown>): void;
@@ -47,6 +50,8 @@ export interface LocalAgentRuntimePoolOptions {
   now?: () => number;
   logger?: LocalAgentRuntimePoolLogger;
   sessionIdleTimeoutMs?: number;
+  /** Upper bound for `runtime.close()` during terminate; tests inject a short value. */
+  terminateCloseTimeoutMs?: number;
 }
 
 /**
@@ -59,6 +64,7 @@ export class LocalAgentRuntimePool {
   private readonly now: () => number;
   private readonly logger?: LocalAgentRuntimePoolLogger;
   private readonly sessionIdleTimeoutMs: number;
+  private readonly terminateCloseTimeoutMs: number;
   private closing = false;
   private closePromise?: Promise<void>;
 
@@ -66,8 +72,12 @@ export class LocalAgentRuntimePool {
     this.now = options.now ?? Date.now;
     this.logger = options.logger;
     this.sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+    this.terminateCloseTimeoutMs = options.terminateCloseTimeoutMs ?? DEFAULT_TERMINATE_CLOSE_TIMEOUT_MS;
     if (!Number.isFinite(this.sessionIdleTimeoutMs) || this.sessionIdleTimeoutMs < 0) {
       throw new Error("Local agent session idle timeout must be a non-negative finite duration.");
+    }
+    if (!Number.isFinite(this.terminateCloseTimeoutMs) || this.terminateCloseTimeoutMs < 0) {
+      throw new Error("Local agent terminate close timeout must be a non-negative finite duration.");
     }
   }
 
@@ -204,6 +214,32 @@ export class LocalAgentRuntimePool {
       }
       entry.lastUsedAt = this.now();
       if (entry.activeRuns === 0 && !entry.closing) this.scheduleIdleClose(entry);
+    }
+  }
+
+  /**
+   * Close the runtime a hung turn is using so the provider-side run can
+   * reject. A runtime shared with another active turn is left running: one
+   * agent's stop must never kill another agent's work. The entry is removed
+   * before closing, so a later turn creates a fresh runtime instead of racing
+   * the shutdown.
+   */
+  async terminate(
+    driver: LocalAgentDriver,
+    context: LocalAgentRuntimeContext,
+    reason: string,
+  ): Promise<LocalAgentRuntimeTermination> {
+    const key = driver.runtimeKey(context);
+    const entry = this.entries.get(key);
+    if (!entry) return "missing";
+    if (entry.activeRuns > 1) return "shared";
+    if (this.entries.get(key) === entry) this.entries.delete(key);
+    try {
+      await this.closeEntry(entry, reason, this.terminateCloseTimeoutMs);
+      return "closed";
+    } catch {
+      // closeEntry already reported the failure with its runtime key.
+      return "close_failed";
     }
   }
 
@@ -358,7 +394,11 @@ export class LocalAgentRuntimePool {
     await this.closeEntry(entry, reason);
   }
 
-  private async closeEntry(entry: RuntimeEntry, reason: string): Promise<void> {
+  private async closeEntry(
+    entry: RuntimeEntry,
+    reason: string,
+    closeTimeoutMs?: number,
+  ): Promise<void> {
     if (entry.closePromise) return entry.closePromise;
     entry.closing = true;
     this.clearIdleTimer(entry);
@@ -372,18 +412,27 @@ export class LocalAgentRuntimePool {
         return;
       }
       if (!runtime) return;
-      if (reason !== "server_shutdown" && reason !== "runtime_crashed" && reason !== "runtime_not_alive") {
+      if (
+        reason !== "server_shutdown" &&
+        reason !== "turn_stop_timeout" &&
+        reason !== "runtime_crashed" &&
+        reason !== "runtime_not_alive"
+      ) {
         await this.waitForNoActiveRuns(entry);
       }
-      if (reason === "server_shutdown") {
-        // Shutdown is terminal for the provider runtime. Closing it first
-        // aborts stuck turns and avoids waiting forever before process cleanup.
-        // Do not start new individual releases here: that would race an active
-        // turn, and the provider runtime owns their final cleanup. Existing
-        // idle-release work is awaited so provider cleanup never overlaps it.
+      if (reason === "server_shutdown" || reason === "turn_stop_timeout") {
+        // Shutdown and terminate are terminal for the provider runtime. Closing
+        // it first aborts stuck turns and avoids waiting forever before process
+        // cleanup. Do not start new individual releases here: that would race
+        // an active turn, and the provider runtime owns their final cleanup.
+        // Existing idle-release work is awaited so provider cleanup never
+        // overlaps it.
         await this.waitForSessionReleases(entry);
         try {
-          await runtime.close();
+          const close = runtime.close();
+          await (closeTimeoutMs === undefined
+            ? close
+            : withTimeout(close, closeTimeoutMs, `Runtime close exceeded ${closeTimeoutMs} ms.`));
           this.log("info", "harness_runtime_closed", {
             provider: entry.driver.provider,
             runtimeKeyHash: hashRuntimeKey(entry.key),
@@ -396,6 +445,7 @@ export class LocalAgentRuntimePool {
             reason,
             error: errorMessage(error),
           });
+          if (reason === "turn_stop_timeout") throw error;
         }
         entry.sessions.clear();
         return;
@@ -516,4 +566,24 @@ function hashRuntimeKey(key: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function withTimeout(
+  promise: Promise<void>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        // Not unref'd: the bounded close is awaited, so it must keep the
+        // process alive until it settles.
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

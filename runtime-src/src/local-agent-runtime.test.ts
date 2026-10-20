@@ -15,6 +15,8 @@ import type {
   LocalAgentRuntimeContext,
 } from "./local-agent-runtime.js";
 
+const TEST_CAPABILITIES = { turns: { interrupt: false } } as const;
+
 const context: LocalAgentRuntimeContext = {
   agentId: "agt_test",
   provider: "codex",
@@ -93,6 +95,7 @@ const runtime = new FakeRuntime();
 let createCount = 0;
 const driver: LocalAgentDriver = {
   provider: "codex",
+  capabilities: TEST_CAPABILITIES,
   idleTimeoutMs: Number.POSITIVE_INFINITY,
   runtimeKey: () => "shared",
   createRuntime: async () => {
@@ -133,6 +136,7 @@ const sessionPool = new LocalAgentRuntimePool({
 });
 const sessionDriver: LocalAgentDriver = {
   provider: "codex",
+  capabilities: TEST_CAPABILITIES,
   idleTimeoutMs: Number.POSITIVE_INFINITY,
   runtimeKey: () => "session-runtime",
   createRuntime: async () => Result.ok(sessionRuntime),
@@ -161,6 +165,7 @@ const shutdownReleasePool = new LocalAgentRuntimePool({
 });
 const shutdownReleaseDriver: LocalAgentDriver = {
   provider: "codex",
+  capabilities: TEST_CAPABILITIES,
   idleTimeoutMs: Number.POSITIVE_INFINITY,
   runtimeKey: () => "shutdown-release-runtime",
   createRuntime: async () => Result.ok(shutdownReleaseRuntime),
@@ -210,6 +215,7 @@ const cleanupPool = new LocalAgentRuntimePool();
 const cleanupRuntime = new CleanupFailureRuntime();
 const cleanupDriver: LocalAgentDriver = {
   provider: "codex",
+  capabilities: TEST_CAPABILITIES,
   runtimeKey: () => "cleanup-runtime",
   createRuntime: async () => Result.ok(cleanupRuntime),
 };
@@ -226,6 +232,7 @@ if (cleanupFailure.isErr()) assert.equal(cleanupFailure.error.message, "provider
   const recoveryPool = new LocalAgentRuntimePool();
   const recoveryDriver: LocalAgentDriver = {
     provider: "codex",
+    capabilities: TEST_CAPABILITIES,
     runtimeKey: () => "dead-runtime-recovery",
     createRuntime: async () => Result.ok(attempts++ === 0 ? deadRuntime : replacementRuntime),
   };
@@ -250,6 +257,7 @@ if (cleanupFailure.isErr()) assert.equal(cleanupFailure.error.message, "provider
   completedTurnPool = new LocalAgentRuntimePool();
   const completedTurnDriver: LocalAgentDriver = {
     provider: "codex",
+    capabilities: TEST_CAPABILITIES,
     runtimeKey: () => "completed-turn-during-close",
     createRuntime: async () => Result.ok(completedTurnRuntime),
   };
@@ -266,6 +274,7 @@ const raceRuntime = new FakeRuntime();
 const racePool = new LocalAgentRuntimePool();
 const raceDriver: LocalAgentDriver = {
   provider: "codex",
+  capabilities: TEST_CAPABILITIES,
   runtimeKey: () => "creation-race",
   createRuntime: () => creating,
 };
@@ -297,6 +306,7 @@ if (afterClose.isErr()) {
   const creationPool = new LocalAgentRuntimePool();
   const creationDriver: LocalAgentDriver = {
     provider: "codex",
+    capabilities: TEST_CAPABILITIES,
     runtimeKey: () => "creation-failure",
     async createRuntime() {
       createAttempts += 1;
@@ -350,6 +360,7 @@ if (afterClose.isErr()) {
   });
   const releaseDriver: LocalAgentDriver = {
     provider: "codex",
+    capabilities: TEST_CAPABILITIES,
     idleTimeoutMs: Number.POSITIVE_INFINITY,
     runtimeKey: () => "release-failure",
     createRuntime: async () => Result.ok(releaseRuntime),

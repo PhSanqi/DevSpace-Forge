@@ -8,6 +8,7 @@ import {
   captureAgentProviderResult,
   isProgrammerDefect,
 } from "./local-agent-errors.js";
+import { bindLocalAgentAbort, localAgentCancelledError } from "./local-agent-cancellation.js";
 import { terminateProcessTree } from "./process-platform.js";
 import { DEVSPACE_VERSION } from "./version.js";
 import {
@@ -49,6 +50,7 @@ const ACP_COMMANDS: Record<AcpProvider, [string, ...string[]]> = {
 interface AcpConnectionLike {
   agent: {
     request(method: string, params?: unknown): Promise<unknown>;
+    notify(method: string, params?: unknown): Promise<void>;
   };
   close(error?: unknown): void;
   closed: Promise<void>;
@@ -137,11 +139,16 @@ export class AcpRuntime implements LocalAgentRuntime {
             message: `${this.provider} ACP runtime is not running.`,
           });
         }
+        if (input.signal?.aborted) throw localAgentCancelledError(this.provider, "run");
         const sessionId = await this.openSession(input, callbacks);
         if (this.activeSessions.has(sessionId)) {
           throw new TypeError(`${this.provider} ACP session ${sessionId} already has an active turn.`);
         }
+        if (input.signal?.aborted) throw localAgentCancelledError(this.provider, "run");
         this.activeSessions.add(sessionId);
+        const removeAbort = bindLocalAgentAbort(input.signal, () => (
+          this.connection.agent.notify("session/cancel", { sessionId })
+        ));
         const queue = this.queues.get(sessionId) ?? { values: [] };
         this.queues.set(sessionId, queue);
         const promptId = this.provider === "grok" ? this.nextPromptId() : undefined;
@@ -166,9 +173,19 @@ export class AcpRuntime implements LocalAgentRuntime {
             prompt: [{ type: "text", text: input.prompt }],
             ...(promptId ? { _meta: { promptId, requestId: promptId } } : {}),
           });
-          const response = completion
-            ? await Promise.race([standardResponse, completion])
-            : await standardResponse;
+          let response: unknown;
+          try {
+            response = await raceAcpAbort(
+              completion
+                ? Promise.race([standardResponse, completion])
+                : standardResponse,
+              input.signal,
+            );
+          } catch (cause) {
+            if (input.signal?.aborted) throw localAgentCancelledError(this.provider, "run", cause);
+            throw cause;
+          }
+          if (input.signal?.aborted) throw localAgentCancelledError(this.provider, "run");
           if (completion && isGrokPromptCompletion(response)) {
             await yieldToAcpQueue();
           } else if (promptId) {
@@ -193,6 +210,7 @@ export class AcpRuntime implements LocalAgentRuntime {
             items: updates,
           };
         } finally {
+          removeAbort();
           if (promptId) this.grokCompletionRegistry?.remove(sessionId, promptId);
           this.activeSessions.delete(sessionId);
         }
@@ -410,6 +428,7 @@ export class AcpRuntime implements LocalAgentRuntime {
 
 export class AcpLocalAgentDriver implements LocalAgentDriver {
   readonly provider: AcpProvider;
+  readonly capabilities = { turns: { interrupt: true } } as const;
   // Keep ACP warm briefly, then let the generic pool close the process so the
   // daemon can reach its own idle shutdown state.
   readonly idleTimeoutMs = 5 * 60_000;
@@ -814,6 +833,36 @@ function appendTail(current: string, chunk: string, maxBytes: number): string {
   const next = current + chunk;
   if (Buffer.byteLength(next, "utf8") <= maxBytes) return next;
   return Buffer.from(next, "utf8").subarray(-maxBytes).toString("utf8");
+}
+
+/**
+ * Settle promptly once a turn is stopped. The provider request is left in the
+ * connection's request table; handlers are attached here so a late response or
+ * rejection never becomes unhandled.
+ */
+function raceAcpAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

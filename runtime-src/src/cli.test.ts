@@ -118,6 +118,8 @@ try {
         ? [current]
         : request.method === "agent.get"
           ? current
+          : request.method === "agent.stop"
+            ? { ...current, status: "stopped" }
           : request.method === "agent.wait"
             ? [
                 { id: current.id, status: "completed", response: "Review complete." },
@@ -267,6 +269,43 @@ try {
       scope: { workspaceId: "ws_current", workspaceRoot: realpathSync.native(projectRoot) },
       timeoutMs: 0,
     });
+
+    const { stdout: stopOutput } = await execFileAsync(
+      "node",
+      ["--import", "tsx", "src/cli.ts", "agents", "stop", current.id],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...cliConfigEnv,
+          DEVSPACE_WORKSPACE_ID: "ws_current",
+          DEVSPACE_WORKSPACE_ROOT: projectRoot,
+        },
+      },
+    );
+    assert.equal(stopOutput, `<agent id="${current.id}" status="stopped"/>\n`);
+    const stopRequest = daemonRequests.find((request) => request.method === "agent.stop");
+    assert.deepEqual(stopRequest?.params, {
+      id: current.id,
+      scope: { workspaceId: "ws_current", workspaceRoot: realpathSync.native(projectRoot) },
+    });
+
+    const { stdout: stopJsonOutput } = await execFileAsync(
+      "node",
+      ["--import", "tsx", "src/cli.ts", "agents", "stop", current.id, "--json"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...cliConfigEnv,
+          DEVSPACE_WORKSPACE_ID: "ws_current",
+          DEVSPACE_WORKSPACE_ROOT: projectRoot,
+        },
+      },
+    );
+    assert.equal(stopJsonOutput, `${JSON.stringify({ id: current.id, status: "stopped" })}\n`);
 
     let commandFailure: unknown;
     try {

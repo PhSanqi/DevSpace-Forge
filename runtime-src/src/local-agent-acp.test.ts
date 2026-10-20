@@ -47,6 +47,7 @@ const connection = {
       }
       return {};
     },
+    async notify(_method: string, _params?: unknown): Promise<void> {},
   },
   close() {},
   closed: new Promise<void>(() => undefined),
@@ -222,6 +223,7 @@ const overlapConnection = {
       }
       return {};
     },
+    async notify(_method: string, _params?: unknown): Promise<void> {},
   },
   close() {},
   closed: new Promise<void>(() => undefined),
@@ -253,6 +255,57 @@ assert.equal(completedOverlappingTurn.isOk(), true);
 if (completedOverlappingTurn.isErr()) throw completedOverlappingTurn.error;
 assert.equal(completedOverlappingTurn.value.finalResponse, "overlap response");
 await overlapRuntime.close();
+
+const cancelNotifies: Array<{ method: string; params?: unknown }> = [];
+const cancelQueues = new Map<string, { values: unknown[] }>();
+let releaseCancelledPrompt!: () => void;
+const cancelledPrompt = new Promise<void>((resolvePrompt) => { releaseCancelledPrompt = resolvePrompt; });
+let markCancelledPromptEntered!: () => void;
+const cancelledPromptEntered = new Promise<void>((resolveEntered) => { markCancelledPromptEntered = resolveEntered; });
+const cancelConnection = {
+  agent: {
+    async request(method: string): Promise<unknown> {
+      if (method === "session/new") {
+        cancelQueues.set("cancel_session", { values: [] });
+        return { sessionId: "cancel_session" };
+      }
+      if (method === "session/prompt") {
+        markCancelledPromptEntered();
+        await cancelledPrompt;
+        return { stopReason: "cancelled" };
+      }
+      return {};
+    },
+    async notify(method: string, params?: unknown): Promise<void> {
+      cancelNotifies.push({ method, params });
+      releaseCancelledPrompt();
+    },
+  },
+  close() {},
+  closed: new Promise<void>(() => undefined),
+};
+const cancelRuntime = new AcpRuntime({
+  provider: "cursor",
+  command: "cursor-agent",
+  args: ["acp"],
+  env: {},
+  queues: cancelQueues,
+}, cancelConnection);
+const cancelAbort = new AbortController();
+const cancelledTurn = cancelRuntime.run({
+  prompt: "hold",
+  workspaceRoot: "/tmp/project",
+  signal: cancelAbort.signal,
+});
+await cancelledPromptEntered;
+cancelAbort.abort();
+const cancelledRun = await cancelledTurn;
+assert.equal(cancelledRun.isErr(), true);
+if (cancelledRun.isErr()) assert.equal(cancelledRun.error.code, "PROVIDER_CANCELLED");
+assert.deepEqual(cancelNotifies, [
+  { method: "session/cancel", params: { sessionId: "cancel_session" } },
+]);
+await cancelRuntime.close();
 
 const cachedContext = {
   agentId: "agt_acp",
@@ -381,6 +434,7 @@ const grokConnection = {
       }
       return {};
     },
+    async notify(_method: string, _params?: unknown): Promise<void> {},
   },
   close() {},
   closed: new Promise<void>(() => undefined),
@@ -428,6 +482,7 @@ const grokConfigurationConnection = {
       }
       return {};
     },
+    async notify(_method: string, _params?: unknown): Promise<void> {},
   },
   close() {},
   closed: new Promise<void>(() => undefined),
