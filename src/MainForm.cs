@@ -237,17 +237,17 @@ namespace DevSpaceControlPlatform
             var startCf = AddButton(cfGroup, "启动", 22, 88, 88);
             startCf.Click += delegate { RunServiceAction(supervisor.StartCloudflare); };
             var stopCf = AddButton(cfGroup, "停止", 120, 88, 88);
-            stopCf.Click += delegate { RunServiceAction(supervisor.StopCloudflare); };
+            stopCf.Click += delegate { RunConfirmedServiceAction(supervisor.StopCloudflare); };
             var restartCf = AddButton(cfGroup, "重新启动", 218, 88, 108);
-            restartCf.Click += delegate { RunServiceAction(supervisor.RestartCloudflare); };
+            restartCf.Click += delegate { RunConfirmedServiceAction(supervisor.RestartCloudflare); };
 
             var allGroup = CreateCard(page, "快速操作", 18, 314, 900, 104);
             var startAll = AddButton(allGroup, "启动全部", 22, 52, 108);
             startAll.Click += delegate { RunServiceAction(supervisor.StartAll); };
             var stopAll = AddButton(allGroup, "停止全部", 140, 52, 108);
-            stopAll.Click += delegate { RunServiceAction(supervisor.StopAll); };
+            stopAll.Click += delegate { RunConfirmedServiceAction(supervisor.StopAll); };
             var restartAll = AddButton(allGroup, "重新启动全部", 258, 52, 128);
-            restartAll.Click += delegate { RunServiceAction(supervisor.RestartAll); };
+            restartAll.Click += delegate { RunConfirmedServiceAction(supervisor.RestartAll); };
             var openLogs = AddButton(allGroup, "打开日志目录", 396, 52, 124);
             openLogs.Click += delegate { OpenDirectory(Path.Combine(platformRoot, "logs")); };
             var trayNote = new Label
@@ -1038,7 +1038,7 @@ namespace DevSpaceControlPlatform
             }
         }
 
-        private void RunServiceAction(Func<bool> action)
+        private void RunConfirmedServiceAction(Func<bool> action)
         {
             try
             {
