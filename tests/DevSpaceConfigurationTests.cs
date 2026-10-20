@@ -864,6 +864,35 @@ http.createServer(async(_q,r)=>{
             SetupInstaller.ReleaseRuntimeUpdateGate(reclaimed, reclaimedNonce);
             AssertTrue(!Directory.Exists(gate), "reclaimed gate is released only by its new owner");
 
+            // An aged ownerless gate is crash debris from an older publisher
+            // that created the directory before its owner record; the fresh
+            // ownerless gate above still blocks because ownership is unknown.
+            Directory.CreateDirectory(gate);
+            var aged = DateTime.UtcNow - TimeSpan.FromHours(1);
+            Directory.SetLastWriteTimeUtc(gate, aged);
+            Directory.SetCreationTimeUtc(gate, aged);
+            string agedNonce;
+            var agedGate = SetupInstaller.AcquireRuntimeUpdateGate(install, bundle, out agedNonce);
+            AssertTrue(Directory.Exists(agedGate), "aged ownerless gate is reclaimed");
+            AssertTrue(File.Exists(Path.Combine(agedGate, "owner.json")), "aged gate is republished with its owner");
+            SetupInstaller.ReleaseRuntimeUpdateGate(agedGate, agedNonce);
+            AssertTrue(!Directory.Exists(gate), "aged ownerless gate is released only by its new owner");
+
+            // Older owners carried no nonce; a provably dead one is reclaimed
+            // without weakening the exact nonce match needed to release a gate.
+            Directory.CreateDirectory(gate);
+            File.WriteAllText(Path.Combine(gate, "owner.json"), new JavaScriptSerializer().Serialize(new Dictionary<string, object>
+            {
+                { "pid", int.MaxValue },
+                { "processStartIdentity", "windows:1" },
+                { "createdAt", 1L }
+            }));
+            string legacyNonce;
+            var legacyGate = SetupInstaller.AcquireRuntimeUpdateGate(install, bundle, out legacyNonce);
+            AssertTrue(Directory.Exists(legacyGate), "nonce-less gate with a dead owner is reclaimed");
+            SetupInstaller.ReleaseRuntimeUpdateGate(legacyGate, legacyNonce);
+            AssertTrue(!Directory.Exists(gate), "reclaimed nonce-less gate is released only by its new owner");
+
             // An existing but unreadable durable-job database also fails closed
             // rather than treating it as an empty database and killing the job.
             var jobsDir = Path.Combine(install, "state", "devspace-state", "jobs");

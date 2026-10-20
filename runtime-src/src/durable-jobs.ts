@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { acquireSwitchGate, releaseSwitchGate, readSwitchGateOwner, recoverSwitchGate, sweepSwitchGateDebris } from "./runtime-switch-gate.js";
+import { acquireSwitchGate, reclaimLegacyOwnerlessGate, releaseSwitchGate, readSwitchGateOwner, recoverSwitchGate, sweepSwitchGateDebris } from "./runtime-switch-gate.js";
 import { terminateProcessTree, processStartIdentity, ownedProcessState } from "./process-platform.js";
 
 export interface JobRecord {
@@ -362,7 +362,7 @@ export class DurableJobManager {
           for (const row of abandoned) update.run("Launch abandoned before runner claim; starter owner is inactive", now, now, row.id);
         })();
       });
-    } catch { return true; }
+    } catch { return !reclaimLegacyOwnerlessGate(gate); }
   }
 
   public startJob(params: StartJobParams): JobRecord {

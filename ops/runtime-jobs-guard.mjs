@@ -3,7 +3,7 @@
  * The Runtime job manager uses the same atomic directory before launching.
  * True restart independence also requires a separate job cgroup.
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -98,11 +98,56 @@ function readGateOwner(lock) {
   return owner;
 }
 
+// A legacy publisher crashed between mkdir(gate) and owner.json publication.
+// Keep this rule in sync with runtime-src/src/runtime-switch-gate.ts and
+// src/SetupInstaller.cs: a real directory whose sole entry is an absent,
+// empty or unparseable regular owner.json, with every timestamp older than
+// the debris window, is reclaimable. A parseable owner stays blocking.
+function legacyOwnerlessGateTimes(gate) {
+  let info;
+  try { info=lstatSync(gate); } catch { return null; }
+  if(!info.isDirectory()||info.isSymbolicLink())return null;
+  const times=[info.mtimeMs,info.ctimeMs];
+  let entries;
+  try { entries=readdirSync(gate); } catch { return null; }
+  if(entries.length===0)return times;
+  if(entries.length!==1||entries[0]!=='owner.json')return null;
+  let fileInfo;
+  try { fileInfo=lstatSync(path.join(gate,'owner.json')); } catch { return null; }
+  // Legacy owner records are tiny; anything larger is not crash debris.
+  if(!fileInfo.isFile()||fileInfo.isSymbolicLink()||fileInfo.size>4096)return null;
+  times.push(fileInfo.mtimeMs,fileInfo.ctimeMs);
+  let raw;
+  try { raw=readFileSync(path.join(gate,'owner.json'),'utf8'); } catch { return null; }
+  if(raw.length===0)return times;
+  // A BOM-prefixed owner from an older .NET writer is still a parseable owner.
+  try { JSON.parse(raw.replace(/^\uFEFF/,'')); return null; } catch { return times; }
+}
+
+export function reclaimLegacyOwnerlessGate(gate,now=Date.now()) {
+  const times=legacyOwnerlessGateTimes(gate);
+  if(!times||Math.max(...times)>=now-10*60_000)return false;
+  const stale=`${gate}.stale-${randomUUID()}`;
+  try {
+    renameSync(gate,stale);
+    if(legacyOwnerlessGateTimes(stale)) {
+      rmSync(stale,{recursive:true,force:true});
+      console.warn('Reclaimed legacy ownerless runtime switch gate');
+      return true;
+    }
+    try { if(!existsSync(gate))renameSync(stale,gate); } catch {}
+    return false;
+  }catch {
+    try { if(!existsSync(gate))renameSync(stale,gate); } catch {}
+    return false;
+  }
+}
+
 // Same protocol as runtime-src recoverSwitchGate: move the gate aside, verify
 // the moved owner is still the one that was judged dead, then discard it.
 function reclaimDeadGate(lock) {
   let owner;
-  try { owner=readGateOwner(lock); } catch { return false; }
+  try { owner=readGateOwner(lock); } catch { return reclaimLegacyOwnerlessGate(lock); }
   if(ownedProcessState(owner.pid,owner.processStartIdentity)!=='inactive')return false;
   const stale=`${lock}.stale-${randomUUID()}`;
   try {

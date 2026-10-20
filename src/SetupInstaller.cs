@@ -1177,8 +1177,7 @@ namespace DevSpaceControlPlatform
                 }
                 if (Directory.Exists(gate)) return false;
                 Directory.Move(proposed, gate);
-                return string.Equals(Convert.ToString(ReadRuntimeGateOwner(gate)["nonce"]), nonce,
-                    StringComparison.Ordinal);
+                return GateOwnerMatchesNonce(ReadRuntimeGateOwner(gate), nonce);
             }
             catch (Exception)
             {
@@ -1202,22 +1201,33 @@ namespace DevSpaceControlPlatform
             {
                 throw new InvalidDataException("Runtime switch gate owner is unreadable.", error);
             }
-            object pid, createdAt, identity, ownerNonce;
+            object pid, createdAt, identity, ownerNonce = null;
+            // Older owners did not carry a nonce; accept them only as a legacy
+            // owner record, never as proof of our own ownership.
+            var hasNonce = owner != null && owner.TryGetValue("nonce", out ownerNonce);
             if (owner == null || !owner.TryGetValue("pid", out pid) ||
                 !owner.TryGetValue("createdAt", out createdAt) ||
                 !owner.TryGetValue("processStartIdentity", out identity) ||
-                !owner.TryGetValue("nonce", out ownerNonce) ||
                 Convert.ToInt64(pid) < 1 || Convert.ToInt64(createdAt) <= 0 ||
-                string.IsNullOrEmpty(Convert.ToString(ownerNonce)) ||
+                (hasNonce && (!(ownerNonce is string) || string.IsNullOrEmpty((string)ownerNonce))) ||
                 (identity != null && !(identity is string)))
                 throw new InvalidDataException("Invalid Runtime switch gate owner.");
             return owner;
         }
 
+        private static bool GateOwnerMatchesNonce(Dictionary<string, object> owner, string nonce)
+        {
+            object value;
+            if (owner == null || !owner.TryGetValue("nonce", out value)) return false;
+            var current = Convert.ToString(value);
+            return !string.IsNullOrEmpty(current) && string.Equals(current, nonce, StringComparison.Ordinal);
+        }
+
         private static bool ReclaimDeadRuntimeUpdateGate(string gate)
         {
             Dictionary<string, object> owner;
-            try { owner = ReadRuntimeGateOwner(gate); } catch (Exception) { return false; }
+            try { owner = ReadRuntimeGateOwner(gate); }
+            catch (Exception) { return ReclaimLegacyOwnerlessRuntimeUpdateGate(gate); }
             if (!string.Equals(GateOwnerProcessState(owner), "inactive", StringComparison.Ordinal)) return false;
             var stale = gate + ".stale-" + Guid.NewGuid().ToString("N");
             try
@@ -1230,6 +1240,73 @@ namespace DevSpaceControlPlatform
                 }
                 Directory.Delete(stale, true);
                 return true;
+            }
+            catch (Exception)
+            {
+                try { if (!Directory.Exists(gate)) Directory.Move(stale, gate); } catch (Exception) { }
+                return false;
+            }
+        }
+
+        // A legacy publisher crashed between creating the gate directory and
+        // writing owner.json. Reclaim only a real directory whose sole entry
+        // is an absent, empty or unparseable regular owner.json and whose
+        // timestamps are older than the debris window. A parseable owner that
+        // fails validation may be a future format and must keep blocking.
+        // Keep this rule in sync with ops/runtime-jobs-guard.mjs and
+        // runtime-src/src/runtime-switch-gate.ts.
+        private static DateTime? LegacyOwnerlessGateTimestamp(string gate)
+        {
+            try
+            {
+                if (!Directory.Exists(gate)) return null;
+                if ((File.GetAttributes(gate) & FileAttributes.ReparsePoint) != 0) return null;
+                var newest = Directory.GetLastWriteTimeUtc(gate);
+                var created = Directory.GetCreationTimeUtc(gate);
+                if (created > newest) newest = created;
+                var entries = Directory.GetFileSystemEntries(gate);
+                if (entries.Length == 0) return newest;
+                if (entries.Length != 1 || !string.Equals(Path.GetFileName(entries[0]), "owner.json",
+                    StringComparison.Ordinal)) return null;
+                var ownerPath = entries[0];
+                if ((File.GetAttributes(ownerPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                    return null;
+                var modified = File.GetLastWriteTimeUtc(ownerPath);
+                var ownerCreated = File.GetCreationTimeUtc(ownerPath);
+                if (modified > newest) newest = modified;
+                if (ownerCreated > newest) newest = ownerCreated;
+                // Legacy owner records are tiny; anything larger is not crash debris.
+                if (new FileInfo(ownerPath).Length > 4096) return null;
+                var raw = File.ReadAllText(ownerPath, Encoding.UTF8);
+                if (string.IsNullOrWhiteSpace(raw)) return newest;
+                try
+                {
+                    // Lift the depth limit so only a syntax error counts as unparseable.
+                    new JavaScriptSerializer { RecursionLimit = int.MaxValue }.Deserialize<object>(raw);
+                    return null; // Parseable JSON: ownership may just be a future format.
+                }
+                catch (Exception) { return newest; }
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static bool ReclaimLegacyOwnerlessRuntimeUpdateGate(string gate, DateTime? now = null)
+        {
+            var current = now ?? DateTime.UtcNow;
+            var newest = LegacyOwnerlessGateTimestamp(gate);
+            if (!newest.HasValue || newest.Value >= current - TimeSpan.FromMinutes(10)) return false;
+            var stale = gate + ".stale-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                Directory.Move(gate, stale);
+                if (LegacyOwnerlessGateTimestamp(stale).HasValue)
+                {
+                    Directory.Delete(stale, true);
+                    Trace.WriteLine("Reclaimed legacy ownerless runtime switch gate");
+                    return true;
+                }
+                try { if (!Directory.Exists(gate)) Directory.Move(stale, gate); } catch (Exception) { }
+                return false;
             }
             catch (Exception)
             {
@@ -1309,8 +1386,7 @@ namespace DevSpaceControlPlatform
             {
                 try
                 {
-                    if (!string.Equals(Convert.ToString(ReadRuntimeGateOwner(gate)["nonce"]), nonce,
-                        StringComparison.Ordinal)) return;
+                    if (!GateOwnerMatchesNonce(ReadRuntimeGateOwner(gate), nonce)) return;
                 }
                 catch (Exception) { return; } // An uncertain owner must remain blocking.
                 var released = gate + ".released-" + Guid.NewGuid().ToString("N");
@@ -1327,8 +1403,7 @@ namespace DevSpaceControlPlatform
                     }
                     try
                     {
-                        if (!string.Equals(Convert.ToString(ReadRuntimeGateOwner(gate)["nonce"]), nonce,
-                            StringComparison.Ordinal)) return;
+                        if (!GateOwnerMatchesNonce(ReadRuntimeGateOwner(gate), nonce)) return;
                         File.Delete(Path.Combine(gate, "owner.json"));
                         Directory.Delete(gate);
                     }

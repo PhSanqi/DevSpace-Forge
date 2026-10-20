@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 interface GateOwner {
@@ -76,6 +76,51 @@ export function recoverSwitchGate(
     recover();
     rmSync(stale, { recursive: true, force: true });
     return true;
+  } catch {
+    try { if (!existsSync(gate)) renameSync(stale, gate); } catch {}
+    return false;
+  }
+}
+
+// A legacy publisher crashed after mkdir(gate) but before or during owner.json
+// publication. The gate is reclaimable only when it is a real directory, its
+// sole entry is a regular owner.json that is absent, empty or unparseable, and
+// every timestamp is older than the debris window. A parseable owner that
+// fails validation may be a future format and must keep blocking.
+function legacyOwnerlessGateTimes(gate: string): number[] | null {
+  let info;
+  try { info = lstatSync(gate); } catch { return null; }
+  if (!info.isDirectory() || info.isSymbolicLink()) return null;
+  const times = [info.mtimeMs, info.ctimeMs];
+  let entries: string[];
+  try { entries = readdirSync(gate); } catch { return null; }
+  if (entries.length === 0) return times;
+  if (entries.length !== 1 || entries[0] !== "owner.json") return null;
+  let fileInfo;
+  try { fileInfo = lstatSync(join(gate, "owner.json")); } catch { return null; }
+  // Legacy owner records are tiny; anything larger is not crash debris.
+  if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.size > 4096) return null;
+  times.push(fileInfo.mtimeMs, fileInfo.ctimeMs);
+  let raw: string;
+  try { raw = readFileSync(join(gate, "owner.json"), "utf8"); } catch { return null; }
+  if (raw.length === 0) return times;
+  // A BOM-prefixed owner from an older .NET writer is still a parseable owner.
+  try { JSON.parse(raw.replace(/^\uFEFF/, "")); return null; } catch { return times; }
+}
+
+export function reclaimLegacyOwnerlessGate(gate: string, now = Date.now()): boolean {
+  const times = legacyOwnerlessGateTimes(gate);
+  if (!times || Math.max(...times) >= now - 10 * 60_000) return false;
+  const stale = `${gate}.stale-${randomUUID()}`;
+  try {
+    renameSync(gate, stale);
+    if (legacyOwnerlessGateTimes(stale)) {
+      rmSync(stale, { recursive: true, force: true });
+      console.warn("Reclaimed legacy ownerless runtime switch gate");
+      return true;
+    }
+    try { if (!existsSync(gate)) renameSync(stale, gate); } catch {}
+    return false;
   } catch {
     try { if (!existsSync(gate)) renameSync(stale, gate); } catch {}
     return false;

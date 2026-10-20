@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { localRuntimeProbe, stageRuntimeSlot, validateRuntimeSlot, selectionPath, readRuntimeSelection, writeRuntimeSelection, slotPackage, switchRuntime, stopUserService } from '../ops/runtime-rollback.mjs';
 import { runtimeInfo, rollbackTargets } from '../ops/runtime-console.mjs';
+import { reclaimLegacyOwnerlessGate } from '../ops/runtime-jobs-guard.mjs';
 
 const shellArg=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
 function fixture() {
@@ -155,6 +156,22 @@ test('guard-held switch re-reads durable jobs before stopping',linux,async()=>{
     assert.equal(result.status,409);assert.equal(result.reason_code,'active_jobs');
     assert.equal(f.calls.length,0);assert.deepEqual(readRuntimeSelection(f.options),f.previous);
   }finally{f.clean();}
+});
+test('guard reclaims only aged legacy ownerless switch gates',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'dsf-gate-reclaim-'));
+  try{
+    const now=Date.now()+11*60_000;
+    const empty=path.join(root,'.empty-gate');mkdirSync(empty);
+    assert.equal(reclaimLegacyOwnerlessGate(empty,now),true);
+    assert.equal(existsSync(empty),false);
+    const fresh=path.join(root,'.fresh-gate');mkdirSync(fresh);
+    assert.equal(reclaimLegacyOwnerlessGate(fresh),false,'a fresh ownerless gate stays blocking');
+    assert.equal(existsSync(fresh),true);
+    const invalid=path.join(root,'.invalid-owner-gate');mkdirSync(invalid);
+    writeFileSync(path.join(invalid,'owner.json'),'{"foo":1}');
+    assert.equal(reclaimLegacyOwnerlessGate(invalid,now),false,'a parseable invalid owner stays blocking');
+    assert.equal(existsSync(invalid),true);
+  }finally{rmSync(root,{recursive:true,force:true});}
 });
 test('validateRuntimeSlot accepts a symlinked install root but rejects a symlinked slot',linux,()=>{
   const f=fixture();try{

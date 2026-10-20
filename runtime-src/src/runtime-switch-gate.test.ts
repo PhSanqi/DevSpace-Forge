@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireSwitchGate, readSwitchGateOwner, recoverSwitchGate, releaseSwitchGate, sweepSwitchGateDebris } from "./runtime-switch-gate.js";
+import { acquireSwitchGate, readSwitchGateOwner, reclaimLegacyOwnerlessGate, recoverSwitchGate, releaseSwitchGate, sweepSwitchGateDebris } from "./runtime-switch-gate.js";
 import { DurableJobManager } from "./durable-jobs.js";
 import { processStartIdentity } from "./process-platform.js";
 // Exercise the independently shipped guard against the Runtime protocol.
@@ -36,6 +36,63 @@ test("switch gate keeps empty and invalid legacy owners blocking", (t) => {
   assert.equal(acquireSwitchGate(gate, null), null);
   writeFileSync(join(gate, "owner.json"), "invalid");
   assert.equal(acquireSwitchGate(gate, null), null);
+});
+
+test("switch gate reclaims only aged legacy ownerless gates", (t) => {
+  const { state } = fixture(t);
+  const now = Date.now() + 11 * 60_000;
+  const warnings = t.mock.method(console, "warn", () => {});
+
+  const empty = join(state, ".empty-gate");
+  mkdirSync(empty);
+  assert.equal(reclaimLegacyOwnerlessGate(empty, now), true);
+  assert.equal(existsSync(empty), false);
+  const nonce = acquireSwitchGate(empty, null);
+  assert.ok(nonce, "a reclaimed gate can be acquired");
+  releaseSwitchGate(empty, nonce);
+
+  for (const [name, contents] of [["zero", ""], ["truncated", '{"pid":']] as const) {
+    const gate = join(state, `.${name}-gate`);
+    mkdirSync(gate);
+    writeFileSync(join(gate, "owner.json"), contents);
+    assert.equal(reclaimLegacyOwnerlessGate(gate, now), true, `${name} owner is reclaimed`);
+    assert.equal(existsSync(gate), false);
+  }
+
+  const invalid = join(state, ".invalid-owner-gate");
+  mkdirSync(invalid);
+  writeFileSync(join(invalid, "owner.json"), '{"foo":1}');
+  assert.equal(reclaimLegacyOwnerlessGate(invalid, now), false, "parseable invalid owner stays blocking");
+  assert.ok(existsSync(invalid));
+
+  const bom = join(state, ".bom-owner-gate");
+  mkdirSync(bom);
+  writeFileSync(join(bom, "owner.json"), '\uFEFF{"pid":1,"processStartIdentity":null,"createdAt":1,"nonce":"n"}');
+  assert.equal(reclaimLegacyOwnerlessGate(bom, now), false, "a BOM-prefixed owner stays blocking");
+  assert.ok(existsSync(bom));
+
+  const extra = join(state, ".extra-entry-gate");
+  mkdirSync(extra);
+  writeFileSync(join(extra, "notes.txt"), "x");
+  assert.equal(reclaimLegacyOwnerlessGate(extra, now), false, "an extra entry stays blocking");
+  assert.ok(existsSync(extra));
+
+  const fresh = join(state, ".fresh-gate");
+  mkdirSync(fresh);
+  assert.equal(reclaimLegacyOwnerlessGate(fresh), false, "a fresh ownerless gate stays blocking");
+  assert.ok(existsSync(fresh));
+
+  assert.equal(warnings.mock.callCount(), 3);
+});
+
+test("switch gate leaves a symlinked gate blocking", { skip: process.platform === "win32" }, (t) => {
+  const { state, gate } = fixture(t);
+  const target = join(state, "gate-target");
+  mkdirSync(target);
+  symlinkSync(target, gate, "dir");
+  assert.equal(reclaimLegacyOwnerlessGate(gate, Date.now() + 11 * 60_000), false);
+  assert.ok(existsSync(gate));
+  assert.ok(existsSync(target));
 });
 
 test("switch gate release retries transient rename failures and removes its owner in place after five failures", (t) => {
