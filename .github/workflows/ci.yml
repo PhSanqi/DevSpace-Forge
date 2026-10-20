@@ -106,6 +106,9 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          # test.ps1's privacy audit reads the real PR head (HEAD^2).
+          fetch-depth: 2
       - uses: pnpm/action-setup@v4
         with:
           version: 11.25.0
