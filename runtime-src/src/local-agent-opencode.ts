@@ -10,6 +10,7 @@ import {
   AgentProviderUnavailableError,
   captureAgentProviderResult,
 } from "./local-agent-errors.js";
+import { bindLocalAgentAbort, localAgentCancelledError } from "./local-agent-cancellation.js";
 import type {
   LocalAgentDriver,
   LocalAgentRunCallbacks,
@@ -72,6 +73,7 @@ export class OpencodeRuntime implements LocalAgentRuntime {
             message: "OpenCode runtime is not running.",
           });
         }
+        if (input.signal?.aborted) throw localAgentCancelledError(this.provider, "run");
         try {
           await assertOpencodeHealthy(this.client);
           const sessionId = input.providerSessionId ?? await createOpencodeSession(this.client, input);
@@ -124,6 +126,12 @@ export class OpencodeRuntime implements LocalAgentRuntime {
     const controller = new AbortController();
     this.promptControllers.add(controller);
     let timedOut = false;
+    const removeAbort = bindLocalAgentAbort(input.signal, async () => {
+      // Settle the local prompt first so a slow abort request cannot keep the
+      // stopped turn pending; the provider abort remains best-effort.
+      controller.abort();
+      await this.client.session.abort({ sessionID: sessionId });
+    });
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
@@ -131,6 +139,7 @@ export class OpencodeRuntime implements LocalAgentRuntime {
     try {
       return await promptOpencodeSession(this.client, sessionId, input, controller.signal);
     } catch (error) {
+      if (input.signal?.aborted) throw localAgentCancelledError("opencode", "prompt", error);
       if (!timedOut) throw error;
       throw new AgentProviderProtocolError({
         code: "PROVIDER_PROTOCOL_ERROR",
@@ -142,6 +151,7 @@ export class OpencodeRuntime implements LocalAgentRuntime {
       });
     } finally {
       clearTimeout(timer);
+      removeAbort();
       this.promptControllers.delete(controller);
     }
   }
@@ -149,6 +159,7 @@ export class OpencodeRuntime implements LocalAgentRuntime {
 
 export class OpencodeLocalAgentDriver implements LocalAgentDriver {
   readonly provider = "opencode" as const;
+  readonly capabilities = { turns: { interrupt: true } } as const;
   readonly idleTimeoutMs = 5 * 60_000;
 
   constructor(

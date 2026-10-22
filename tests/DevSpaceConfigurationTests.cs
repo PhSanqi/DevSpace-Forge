@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -31,14 +32,18 @@ internal static class DevSpaceConfigurationTests
         Run("managed CLI applies legacy effective env", TestLegacyCliEnvironment);
         Run("setup normalizes tunnel hostname and MCP links", TestSetupHostnameNormalization);
         Run("setup extracts Tunnel token from Cloudflare install commands", TestSetupTunnelCommandParsing);
+        Run("Tunnel token is stored with a private ACL", TestTunnelSecretStoredPrivately);
         Run("setup detects existing configuration in place", TestSetupExistingConfiguration);
         Run("setup updates existing installation without reconfiguration", TestSetupUpdateExisting);
+        Run("flat legacy Runtime migrates into an immutable rollback slot", delegate { TestSetupUpdateExisting(true); });
         Run("native GUI Runtime stop and restart respect the shared gate", TestNativeGuiRuntimeGate);
+        Run("cloudflare stop keeps an unconfirmed handle for retry", TestCloudflareStopUnconfirmed);
         Run("native JobObject forced close preserves Runtime grandchildren", TestNativeJobObjectBreakaway);
         Run("setup expands offline runtime payload", TestSetupOfflinePayload);
         Run("runtime PATH exposes project Serena and uv tools", TestRuntimeToolPath);
         Run("runtime slot pointer selects isolated node and DevSpace", TestRuntimeSlotSelection);
         Run("invalid runtime slot pointer fails closed", TestInvalidRuntimeSlotPointer);
+        Run("JSON runtime selection overrides mirror and fails closed", TestJsonRuntimeSelection);
         Run("configuration history snapshots and trims", TestConfigurationHistory);
         Run("legacy QuickConfig migration preserves operational settings", TestLegacyQuickConfigMigration);
         Run("legacy minimal maps to claude for 1.1", TestLegacyToolModeMigration);
@@ -242,6 +247,26 @@ internal static class DevSpaceConfigurationTests
         AssertThrows<InvalidDataException>(delegate { SetupInstaller.NormalizeHostname("https://devspace.example.com/group?x=1"); });
     }
 
+    private static void TestTunnelSecretStoredPrivately()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-secret-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var token = new string('a', 32);
+            CloudflareTunnelSecretStore.SaveToken(root, token);
+            var path = CloudflareTunnelSecretStore.TokenPath(root);
+            AssertTrue(File.Exists(path), "token file exists");
+            var security = File.GetAccessControl(path);
+            AssertTrue(security.AreAccessRulesProtected, "token ACL is not inherited");
+            AssertEqual(token + Environment.NewLine, File.ReadAllText(path), "token persisted");
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); }
+            catch { }
+        }
+    }
+
     private static void TestSetupTunnelCommandParsing()
     {
         var token = "eyJhbGciOiJIUzI1NiJ9.synthetic_payload.signature_1234567890";
@@ -269,47 +294,124 @@ internal static class DevSpaceConfigurationTests
         });
     }
 
+    private static string FixtureSha256(string file)
+    {
+        using (var sha = SHA256.Create())
+        using (var stream = File.OpenRead(file))
+            return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+    }
+
+    private static int FixturePort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    private static void WriteRuntimeFixture(string root, string id, string version)
+    {
+        var slot = Path.Combine(root, "runtime", "slots", id);
+        var package = Path.Combine(slot, "devspace", "node_modules", "@waishnav", "devspace");
+        Directory.CreateDirectory(Path.Combine(slot, "node"));
+        Directory.CreateDirectory(Path.Combine(package, "dist"));
+        File.Copy(FindNode(), Path.Combine(slot, "node", "node.exe"), true);
+        File.WriteAllText(Path.Combine(package, "package.json"), new JavaScriptSerializer().Serialize(new { version = version }));
+        File.WriteAllText(Path.Combine(package, "dist", "server.js"), "// synthetic fixture " + version);
+        File.WriteAllText(Path.Combine(package, "dist", "cli.js"), @"
+const fs=require('fs'),path=require('path');
+const version=require('../package.json').version;
+if(process.argv.includes('--version')){console.log(version);process.exit(0);}
+const config=JSON.parse(fs.readFileSync(path.join(process.env.DEVSPACE_CONFIG_DIR,'config.jsonc'),'utf8').replace(/^\uFEFF/,''));
+fs.writeFileSync(path.join(config.storage.stateDir,'fixture-start-'+version+'.json'),JSON.stringify({gate:fs.existsSync(path.join(config.storage.stateDir,'.runtime-switch-gate'))}));
+require('http').createServer((_q,r)=>{r.setHeader('content-type','application/json');r.end(JSON.stringify({ok:true}));}).listen(config.server.port,'127.0.0.1');
+", new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(slot, "READY"), "ready\n");
+        File.WriteAllText(Path.Combine(root, "runtime", "active-slot.txt"), id + "\n");
+        File.Copy(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"), Path.Combine(root, "cloudflared.exe"), true);
+    }
+
+    private static void PackRuntimeFixture(string source, string payload)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(payload));
+        var psi = new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe"),
+            Arguments = "-cf \"" + payload + "\" runtime cloudflared.exe", WorkingDirectory = source,
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        using (var process = Process.Start(psi))
+        {
+            var error = process.StandardError.ReadToEnd();
+            process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0) throw new Exception("Runtime fixture archive failed: " + error);
+        }
+    }
+
+    private static string FixtureConsole()
+    {
+        return @"
+import fs from 'node:fs';import path from 'node:path';import http from 'node:http';import {createHash} from 'node:crypto';import {spawn} from 'node:child_process';
+const args=process.argv.slice(2),option=n=>args[args.indexOf(n)+1];
+const root=option('--platform-root'),configPath=option('--config'),config=JSON.parse(fs.readFileSync(configPath,'utf8').replace(/^\uFEFF/,''));
+const selection=JSON.parse(fs.readFileSync(path.join(config.storage.stateDir,'runtime-selection.json'),'utf8'));
+const dir=path.join(root,'runtime','slots',selection.slot),pkg=path.join(dir,'devspace','node_modules','@waishnav','devspace');
+const node=path.join(dir,'node','node.exe'),version=JSON.parse(fs.readFileSync(path.join(pkg,'package.json'),'utf8')).version;
+const child=spawn(node,[path.join(pkg,'dist','cli.js'),'serve'],{env:{...process.env,DEVSPACE_CONFIG_DIR:path.dirname(configPath)},stdio:'ignore'});
+http.createServer(async(_q,r)=>{
+ let ok=false;try{ok=(await fetch('http://127.0.0.1:'+config.server.port+'/healthz')).ok;}catch{}
+ const packageRoot=pkg;
+ r.setHeader('content-type','application/json');r.end(JSON.stringify({schema_version:2,instance:option('--instance'),runtime:{active_slot:selection.slot,actual:{pid:child.exitCode===null?child.pid:null,package_root:packageRoot,version,server_sha256:createHash('sha256').update(fs.readFileSync(path.join(pkg,'dist','server.js'))).digest('hex')}},mcp:{local_health:{ok}}}));
+}).listen(Number(option('--serve')),'127.0.0.1');
+";
+    }
+
+    private static void TestJsonRuntimeSelection()
+    {
+        var root = TestRoot("json-runtime-selection");
+        WriteRuntimeFixture(root, "legacy-slot", "1.1.0-beta.4.local.12");
+        WriteRuntimeFixture(root, "selected-slot", "1.1.0-beta.4.local.13");
+        var state = Path.Combine(root, "custom-state");
+        Directory.CreateDirectory(state);
+        var config = Path.Combine(root, "state", "devspace-config", "config.jsonc");
+        Directory.CreateDirectory(Path.GetDirectoryName(config));
+        File.WriteAllText(config, "// JSONC state fixture\n" + new JavaScriptSerializer().Serialize(new { storage = new { stateDir = state } }));
+        var selection = new Dictionary<string, object>
+        {
+            { "schema_version", 1 }, { "slot", "selected-slot" }, { "previous", null },
+            { "server_sha256", FixtureSha256(Path.Combine(root, "runtime", "slots", "selected-slot", "devspace", "node_modules", "@waishnav", "devspace", "dist", "server.js")) }
+        };
+        File.WriteAllText(RuntimeResolver.SelectionPath(root), new JavaScriptSerializer().Serialize(selection));
+        File.WriteAllText(Path.Combine(root, "runtime", "active-slot.txt"), "../invalid-mirror");
+        AssertEqual("selected-slot", RuntimeResolver.ActiveRuntimeSlot(root), "JSON ignores invalid mirror");
+        AssertEqual(Path.Combine(root, "runtime", "slots", "selected-slot", "node", "node.exe"), RuntimeResolver.ResolveNodePath(root), "node comes from JSON slot");
+        File.WriteAllText(RuntimeResolver.SelectionPath(root), "{broken");
+        AssertThrows<Exception>(delegate { RuntimeResolver.ResolveNodePath(root); });
+        selection["server_sha256"] = new string('0', 64);
+        File.WriteAllText(RuntimeResolver.SelectionPath(root), new JavaScriptSerializer().Serialize(selection));
+        AssertThrows<InvalidDataException>(delegate { RuntimeResolver.ResolveNodePath(root); });
+        File.Delete(RuntimeResolver.SelectionPath(root));
+        File.WriteAllText(Path.Combine(root, "runtime", "active-slot.txt"), "legacy-slot");
+        AssertEqual("legacy-slot", RuntimeResolver.ActiveRuntimeSlot(root), "legacy pointer only applies without JSON");
+    }
+
     private static void TestSetupOfflinePayload()
     {
         var root = Path.Combine(Path.GetTempPath(), "devspace-control-setup-payload-" + Guid.NewGuid().ToString("N"));
         var source = Path.Combine(root, "source");
         var install = Path.Combine(root, "install");
-        Directory.CreateDirectory(Path.Combine(source, "runtime", "slots", "offline-test", "node"));
-        Directory.CreateDirectory(Path.Combine(source, "runtime", "slots", "offline-test", "devspace", "node_modules", "@waishnav", "devspace"));
-        File.WriteAllText(Path.Combine(source, "runtime", "active-slot.txt"), "offline-test\n");
-        File.WriteAllText(Path.Combine(source, "runtime", "slots", "offline-test", "READY"), "ready\n");
-        File.WriteAllBytes(Path.Combine(source, "runtime", "slots", "offline-test", "node", "node.exe"), new byte[] { 1 });
-        File.WriteAllText(
-            Path.Combine(source, "runtime", "slots", "offline-test", "devspace", "node_modules", "@waishnav", "devspace", "package.json"),
-            "{\"version\":\"1.1.0-beta.4+offline.test\"}");
-        File.WriteAllBytes(Path.Combine(source, "cloudflared.exe"), new byte[] { 1 });
-        Directory.CreateDirectory(Path.Combine(install, "payload"));
-        var payload = Path.Combine(install, "payload", "runtime.tar");
-
-        var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = tar,
-            Arguments = "-cf \"" + payload + "\" runtime cloudflared.exe",
-            WorkingDirectory = source,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        using (var process = Process.Start(startInfo))
-        {
-            var stderr = process.StandardError.ReadToEnd();
-            process.StandardOutput.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0) throw new Exception("tar payload fixture failed: " + stderr);
-        }
+        WriteRuntimeFixture(source, "offline-test", "1.1.0-beta.4+offline.test");
+        PackRuntimeFixture(source, Path.Combine(install, "payload", "runtime.tar"));
 
         AssertTrue(SetupInstaller.HasOfflinePayload(install), "offline payload detected");
         SetupInstaller.EnsureOfflinePayload(install);
         AssertEqual("1.1.0-beta.4+offline.test", SetupInstaller.ValidateBundle(install), "payload expands into valid bundle");
         AssertTrue(File.Exists(Path.Combine(install, "cloudflared.exe")), "cloudflared expanded from payload");
-        AssertTrue(File.Exists(Path.Combine(install, "runtime", "active-slot.txt")), "runtime pointer expanded from payload");
+        var selected = RuntimeResolver.ReadSelection(install);
+        AssertTrue(Convert.ToString(selected["slot"]).StartsWith("slot-", StringComparison.Ordinal), "fresh payload gets a unique slot");
+        AssertEqual(Convert.ToString(selected["slot"]), File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt")).Trim(), "legacy mirror follows JSON");
     }
 
     private static void TestSetupExistingConfiguration()
@@ -443,6 +545,56 @@ internal static class DevSpaceConfigurationTests
         }
     }
 
+    private static void TestCloudflareStopUnconfirmed()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devspace-cloudflare-stop-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var supervisor = new ServiceSupervisor(root);
+        var processField = typeof(ServiceSupervisor).GetField("cloudflareProcess",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var unconfirmedField = typeof(ServiceSupervisor).GetField("cloudflareStopUnconfirmed",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        AssertTrue(processField != null && unconfirmedField != null, "cloudflare stop state fields exist");
+        Process exitedProcess = null;
+        Process unstartedProcess = null;
+        try
+        {
+            exitedProcess = Process.Start(new ProcessStartInfo
+            {
+                FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe",
+                Arguments = "/c exit 0",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            AssertTrue(exitedProcess != null && exitedProcess.WaitForExit(10000), "sacrificial exited process started");
+            processField.SetValue(supervisor, exitedProcess);
+            AssertTrue(supervisor.StopCloudflare(), "confirmed exit reports a successful stop");
+            AssertTrue(processField.GetValue(supervisor) == null, "confirmed stop clears the cloudflare handle");
+            AssertTrue(!(bool)unconfirmedField.GetValue(supervisor), "confirmed stop clears the unconfirmed marker");
+            exitedProcess = null; // disposed by StopProcess after confirming the exit
+
+            // A Process that was never started cannot report HasExited, which
+            // deterministically exercises the unconfirmed branch.
+            unstartedProcess = new Process();
+            processField.SetValue(supervisor, unstartedProcess);
+            AssertTrue(!supervisor.StopCloudflare(), "unconfirmed exit reports failure instead of throwing");
+            AssertTrue(ReferenceEquals(processField.GetValue(supervisor), unstartedProcess),
+                "unconfirmed stop retains the handle for a later retry");
+            AssertTrue((bool)unconfirmedField.GetValue(supervisor), "unconfirmed stop marks the state for retry");
+            AssertTrue(!supervisor.RestartCloudflare(), "restart refuses while the previous stop is unconfirmed");
+            AssertTrue(ReferenceEquals(processField.GetValue(supervisor), unstartedProcess),
+                "refused restart leaves the old handle in place");
+        }
+        finally
+        {
+            processField.SetValue(supervisor, null);
+            unconfirmedField.SetValue(supervisor, false);
+            if (exitedProcess != null) exitedProcess.Dispose();
+            if (unstartedProcess != null) unstartedProcess.Dispose();
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     private static void TestNativeJobObjectBreakaway()
     {
         var root = Path.Combine(Path.GetTempPath(), "devspace-job-breakaway-" + Guid.NewGuid().ToString("N"));
@@ -518,6 +670,11 @@ internal static class DevSpaceConfigurationTests
 
     private static void TestSetupUpdateExisting()
     {
+        TestSetupUpdateExisting(false);
+    }
+
+    private static void TestSetupUpdateExisting(bool flatLegacy)
+    {
         var root = Path.Combine(Path.GetTempPath(), "devspace-control-update-existing-" + Guid.NewGuid().ToString("N"));
         var install = Path.Combine(root, "install");
         var bundle = Path.Combine(root, "bundle");
@@ -550,31 +707,36 @@ internal static class DevSpaceConfigurationTests
         const string owner = "existing-owner-token-1234567890";
         File.WriteAllText(authPath, "{\"ownerToken\":\"" + owner + "\"}\n", Encoding.UTF8);
         var managedConfigPath = Path.Combine(install, "state", "devspace-config", "config.jsonc");
-        const string managedConfig = "// keep-existing-managed-config\n{\"server\":{\"port\":17677}}\n";
-        File.WriteAllText(managedConfigPath, managedConfig, Encoding.UTF8);
+        var runtimePort = FixturePort();
+        var consolePort = FixturePort();
+        while (consolePort == runtimePort) consolePort = FixturePort();
+        settings.LocalPort = runtimePort;
+        PlatformSettingsStore.Save(Path.Combine(install, "settings.json"), settings);
+        var stateDirectory = Path.Combine(install, "state", "devspace-state");
+        Directory.CreateDirectory(stateDirectory);
+        var managedConfig = new JavaScriptSerializer().Serialize(new
+        {
+            fixture = "keep-existing-managed-config",
+            server = new { host = "127.0.0.1", port = runtimePort },
+            storage = new { stateDir = stateDirectory }
+        });
+        // The managed config is consumed by Node (JSON.parse), which does not
+        // skip a UTF-8 BOM; write it the way the product writes generated
+        // configs. / 托管配置由 Node 读取，JSON.parse 不容忍 BOM，按产品方式写出。
+        File.WriteAllText(managedConfigPath, managedConfig, new UTF8Encoding(false));
 
         var oldSlot = Path.Combine(install, "runtime", "slots", "old-slot");
-        Directory.CreateDirectory(Path.Combine(oldSlot, "node"));
-        Directory.CreateDirectory(Path.Combine(oldSlot, "devspace", "node_modules", "@waishnav", "devspace"));
-        File.WriteAllText(Path.Combine(install, "runtime", "active-slot.txt"), "old-slot\n", Encoding.ASCII);
-        File.WriteAllText(Path.Combine(oldSlot, "READY"), "ready\n");
-        File.WriteAllBytes(Path.Combine(oldSlot, "node", "node.exe"), new byte[] { 1 });
-        File.WriteAllText(
-            Path.Combine(oldSlot, "devspace", "node_modules", "@waishnav", "devspace", "package.json"),
-            "{\"version\":\"1.1.0-beta.4.local.12\"}");
-        File.WriteAllBytes(Path.Combine(install, "cloudflared.exe"), new byte[] { 1 });
+        WriteRuntimeFixture(install, "old-slot", "1.1.0-beta.4.local.12");
+        if (flatLegacy)
+        {
+            Directory.Move(Path.Combine(oldSlot, "node"), Path.Combine(install, "runtime", "node-v22.22.3-win-x64"));
+            Directory.Move(Path.Combine(oldSlot, "devspace"), Path.Combine(install, "runtime", "devspace"));
+            File.Delete(Path.Combine(install, "runtime", "active-slot.txt"));
+        }
+        Directory.CreateDirectory(Path.Combine(install, "ops"));
+        File.WriteAllText(Path.Combine(install, "ops", "runtime-console.mjs"), FixtureConsole(), new UTF8Encoding(false));
         File.WriteAllText(Path.Combine(install, "README.md"), "old-readme");
-
-        var newSlot = Path.Combine(payloadSource, "runtime", "slots", "new-slot");
-        Directory.CreateDirectory(Path.Combine(newSlot, "node"));
-        Directory.CreateDirectory(Path.Combine(newSlot, "devspace", "node_modules", "@waishnav", "devspace"));
-        File.WriteAllText(Path.Combine(payloadSource, "runtime", "active-slot.txt"), "new-slot\n", Encoding.ASCII);
-        File.WriteAllText(Path.Combine(newSlot, "READY"), "ready\n");
-        File.WriteAllBytes(Path.Combine(newSlot, "node", "node.exe"), new byte[] { 2 });
-        File.WriteAllText(
-            Path.Combine(newSlot, "devspace", "node_modules", "@waishnav", "devspace", "package.json"),
-            "{\"version\":\"1.1.0-beta.4.local.13\"}");
-        File.WriteAllBytes(Path.Combine(payloadSource, "cloudflared.exe"), new byte[] { 2 });
+        WriteRuntimeFixture(payloadSource, "new-slot", "1.1.0-beta.4.local.13");
 
         Directory.CreateDirectory(Path.Combine(bundle, "payload"));
         File.WriteAllText(Path.Combine(bundle, "README.md"), "new-readme");
@@ -590,77 +752,161 @@ internal static class DevSpaceConfigurationTests
         })
             File.WriteAllText(Path.Combine(bundle, "ops", file), file == "runtime-jobs-guard.mjs" ? "candidate-jobs-guard" : "candidate-" + file);
         File.WriteAllText(Path.Combine(bundle, "ops", "control-ui", "index.html"), "modern-control-ui");
-        var payload = Path.Combine(bundle, "payload", "runtime.tar");
-        var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
-        var startInfo = new ProcessStartInfo
+        File.WriteAllText(Path.Combine(bundle, "ops", "runtime-console.mjs"), FixtureConsole(), new UTF8Encoding(false));
+        PackRuntimeFixture(payloadSource, Path.Combine(bundle, "payload", "runtime.tar"));
+        try
         {
-            FileName = tar,
-            Arguments = "-cf \"" + payload + "\" runtime cloudflared.exe",
-            WorkingDirectory = payloadSource,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        using (var process = Process.Start(startInfo))
-        {
-            var stderr = process.StandardError.ReadToEnd();
-            process.StandardOutput.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0) throw new Exception("update payload fixture failed: " + stderr);
+            var result = SetupInstaller.UpdateExisting(bundle, install, false, consolePort);
+            var updated = PlatformSettingsStore.Load(Path.Combine(install, "settings.json"), install);
+
+            AssertEqual("1.1.0-beta.4.local.13", result.DevSpaceVersion, "runtime upgraded");
+            AssertEqual("http2", updated.CloudflaredProtocol, "explicit Tunnel protocol preserved across update");
+            AssertEqual(runtimePort, updated.LocalPort, "port preserved");
+            AssertEqual("dev.example.test/group", updated.FixedHostname, "public endpoint preserved");
+            AssertEqual("existing-tunnel", updated.NamedTunnelIdOrName, "tunnel identity preserved");
+            AssertEqual(Path.GetFullPath(install), Path.GetFullPath(updated.AllowedRoots[0]), "allowed root preserved");
+            AssertEqual(tokenBefore, File.ReadAllText(tokenPath, Encoding.UTF8), "tunnel token preserved");
+            AssertEqual("keep-state", File.ReadAllText(stateSentinel, Encoding.UTF8), "state preserved");
+            AssertEqual(owner, result.OwnerPassword, "owner password preserved");
+            AssertEqual(managedConfig, File.ReadAllText(managedConfigPath, Encoding.UTF8), "managed config preserved");
+            var selectedSlot = RuntimeResolver.ActiveRuntimeSlot(install);
+            AssertTrue(selectedSlot.StartsWith("slot-", StringComparison.Ordinal) && selectedSlot != "new-slot", "update uses a fresh UUID slot");
+            var rollbackSlot = Convert.ToString(AsObject(RuntimeResolver.ReadSelection(install)["previous"])["slot"]);
+            AssertTrue(flatLegacy ? rollbackSlot.StartsWith("slot-", StringComparison.Ordinal) : rollbackSlot == "old-slot", "rollback target is retained in JSON");
+            AssertTrue(File.Exists(Path.Combine(install, "runtime", "slots", rollbackSlot, "node", "node.exe")), "complete rollback binary remains available");
+            AssertEqual(selectedSlot, File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt")).Trim(), "mirror follows authoritative JSON");
+            AssertEqual(true, ReadObject(Path.Combine(stateDirectory, "fixture-start-1.1.0-beta.4.local.13.json"))["gate"], "new process starts while gate is held");
+            AssertTrue(Directory.Exists(oldSlot), "previous runtime slot retained for recovery");
+            AssertEqual(FixtureSha256(Path.Combine(payloadSource, "cloudflared.exe")), FixtureSha256(Path.Combine(install, "cloudflared.exe")), "cloudflared upgraded");
+            AssertEqual("new-readme", File.ReadAllText(Path.Combine(install, "README.md")), "product files upgraded");
+            AssertEqual("candidate-jobs-guard", File.ReadAllText(Path.Combine(install, "ops", "runtime-jobs-guard.mjs")),
+                "runtime jobs guard survives Windows existing-install update");
+            AssertEqual("desktop-candidate", File.ReadAllText(Path.Combine(install, "desktop", "DevSpaceForgeDesktop.exe")),
+                "modern desktop survives Windows existing-install update");
+            AssertEqual("candidate-start-modern-desktop.ps1", File.ReadAllText(Path.Combine(install, "ops", "start-modern-desktop.ps1")),
+                "modern launcher survives Windows existing-install update");
+            AssertEqual("modern-control-ui", File.ReadAllText(Path.Combine(install, "ops", "control-ui", "index.html")),
+                "modern Control UI survives Windows existing-install update");
+
+            if (flatLegacy) return;
+            SetupInstaller.UpdateExisting(bundle, install, false, consolePort);
+            var reinstalled = RuntimeResolver.ActiveRuntimeSlot(install);
+            AssertTrue(reinstalled != selectedSlot, "same-version reinstall gets another slot");
+            AssertTrue(Directory.Exists(Path.Combine(install, "runtime", "slots", selectedSlot)), "reinstall keeps the prior slot");
+            selectedSlot = reinstalled;
+            var selectionBeforeValidation = File.ReadAllText(RuntimeResolver.SelectionPath(install));
+            File.WriteAllText(Path.Combine(payloadSource, "runtime", "slots", "new-slot", "devspace", "node_modules", "@waishnav", "devspace", "dist", "cli.js"), "process.exit(23);");
+            PackRuntimeFixture(payloadSource, Path.Combine(bundle, "payload", "runtime.tar"));
+            AssertThrows<InvalidDataException>(delegate { SetupInstaller.UpdateExisting(bundle, install, false, consolePort); });
+            AssertEqual(selectionBeforeValidation, File.ReadAllText(RuntimeResolver.SelectionPath(install)), "validation failure does not select or stop the live Runtime");
+            WriteRuntimeFixture(payloadSource, "new-slot", "1.1.0-beta.4.local.13");
+            PackRuntimeFixture(payloadSource, Path.Combine(bundle, "payload", "runtime.tar"));
+            foreach (var badConsole in new[] { "process.exit(19);", FixtureConsole().Replace("const packageRoot=pkg;", "const packageRoot=pkg+'-mismatch';") })
+            {
+                var before = File.ReadAllText(RuntimeResolver.SelectionPath(install));
+                File.WriteAllText(Path.Combine(bundle, "ops", "runtime-console.mjs"), badConsole, new UTF8Encoding(false));
+                AssertThrows<AggregateException>(delegate { SetupInstaller.UpdateExisting(bundle, install, false, consolePort); });
+                AssertEqual(before, File.ReadAllText(RuntimeResolver.SelectionPath(install)), "failed start/identity restores the complete previous JSON");
+                AssertEqual(selectedSlot, RuntimeResolver.ActiveRuntimeSlot(install), "failed update restarts previous slot");
+                AssertTrue(Directory.Exists(Path.Combine(install, "runtime", "slots", selectedSlot)), "failed update keeps previous files");
+                var evidence = Directory.GetDirectories(Path.Combine(install, "state", "runtime-updates"))
+                    .Where(directory => File.Exists(Path.Combine(directory, "recovery-status.txt")))
+                    .OrderByDescending(directory => File.GetLastWriteTimeUtc(Path.Combine(directory, "recovery-status.txt"))).First();
+                AssertTrue(File.ReadAllText(Path.Combine(evidence, "recovery-status.txt")).Contains("process restored and accepted"), "old process is accepted before gate release");
+                AssertTrue(File.Exists(Path.Combine(evidence, "backup", "cloudflared.exe")), "recovery keeps cloudflared backup evidence");
+            }
+            File.WriteAllText(Path.Combine(bundle, "ops", "runtime-console.mjs"), FixtureConsole(), new UTF8Encoding(false));
+
+            var readme = Path.Combine(install, "README.md");
+            File.SetAttributes(readme, FileAttributes.ReadOnly);
+            try
+            {
+                AssertThrows<AggregateException>(delegate { SetupInstaller.UpdateExisting(bundle, install, false, consolePort); });
+                AssertEqual(selectedSlot, RuntimeResolver.ActiveRuntimeSlot(install), "copy/restore failure restores selection");
+                var incomplete = Directory.GetDirectories(Path.Combine(install, "state", "runtime-updates"))
+                    .Where(directory => File.Exists(Path.Combine(directory, "recovery-status.txt")) && File.ReadAllText(Path.Combine(directory, "recovery-status.txt")).Contains("Recovery incomplete"))
+                    .First();
+                AssertTrue(File.Exists(Path.Combine(incomplete, "backup", "cloudflared.exe")), "failed restore retains cloudflared backup");
+                AssertTrue(File.ReadAllText(Path.Combine(incomplete, "recovery-status.txt")).Contains("previous Runtime restarted"),
+                    "a confirmed stop always restarts the previous Runtime despite product-file restore errors");
+                AssertTrue(Directory.GetFiles(incomplete, "console-start-*.json").Length > 0,
+                    "previous Console start is recorded even when product-file recovery was incomplete");
+            }
+            finally { File.SetAttributes(readme, FileAttributes.Normal); }
+
+            // The native installer is outside the Node Console process. It must
+            // respect the same gate before any managed Runtime process is stopped.
+            var gate = Path.Combine(install, "state", "devspace-state", ".runtime-switch-gate");
+            Directory.CreateDirectory(gate);
+            var blocked = false;
+            try { SetupInstaller.UpdateExisting(bundle, install, false, consolePort); }
+            catch (InvalidOperationException) { blocked = true; }
+            AssertTrue(blocked, "existing shared Runtime switch gate blocks native update");
+            AssertTrue(Directory.Exists(gate), "installer must not delete a gate it did not acquire");
+            AssertEqual(selectedSlot, File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
+                "blocked native update leaves active Runtime pointer unchanged");
+            Directory.Delete(gate);
+
+            // A gate whose owner is provably dead is reclaimed, while the
+            // ownerless gate above stays blocking because ownership is unknown.
+            Directory.CreateDirectory(gate);
+            File.WriteAllText(Path.Combine(gate, "owner.json"), new JavaScriptSerializer().Serialize(new Dictionary<string, object>
+            {
+                { "pid", int.MaxValue },
+                { "processStartIdentity", "windows:1" },
+                { "createdAt", 1L },
+                { "nonce", "dead-owner-nonce" }
+            }));
+            string reclaimedNonce;
+            var reclaimed = SetupInstaller.AcquireRuntimeUpdateGate(install, bundle, out reclaimedNonce);
+            AssertTrue(Directory.Exists(reclaimed), "stale gate with a dead owner is reclaimed");
+            AssertTrue(File.Exists(Path.Combine(reclaimed, "owner.json")), "reclaimed gate is published with its owner");
+            SetupInstaller.ReleaseRuntimeUpdateGate(reclaimed, reclaimedNonce);
+            AssertTrue(!Directory.Exists(gate), "reclaimed gate is released only by its new owner");
+
+            // An aged ownerless gate is crash debris from an older publisher
+            // that created the directory before its owner record; the fresh
+            // ownerless gate above still blocks because ownership is unknown.
+            Directory.CreateDirectory(gate);
+            var aged = DateTime.UtcNow - TimeSpan.FromHours(1);
+            Directory.SetLastWriteTimeUtc(gate, aged);
+            Directory.SetCreationTimeUtc(gate, aged);
+            string agedNonce;
+            var agedGate = SetupInstaller.AcquireRuntimeUpdateGate(install, bundle, out agedNonce);
+            AssertTrue(Directory.Exists(agedGate), "aged ownerless gate is reclaimed");
+            AssertTrue(File.Exists(Path.Combine(agedGate, "owner.json")), "aged gate is republished with its owner");
+            SetupInstaller.ReleaseRuntimeUpdateGate(agedGate, agedNonce);
+            AssertTrue(!Directory.Exists(gate), "aged ownerless gate is released only by its new owner");
+
+            // Older owners carried no nonce; a provably dead one is reclaimed
+            // without weakening the exact nonce match needed to release a gate.
+            Directory.CreateDirectory(gate);
+            File.WriteAllText(Path.Combine(gate, "owner.json"), new JavaScriptSerializer().Serialize(new Dictionary<string, object>
+            {
+                { "pid", int.MaxValue },
+                { "processStartIdentity", "windows:1" },
+                { "createdAt", 1L }
+            }));
+            string legacyNonce;
+            var legacyGate = SetupInstaller.AcquireRuntimeUpdateGate(install, bundle, out legacyNonce);
+            AssertTrue(Directory.Exists(legacyGate), "nonce-less gate with a dead owner is reclaimed");
+            SetupInstaller.ReleaseRuntimeUpdateGate(legacyGate, legacyNonce);
+            AssertTrue(!Directory.Exists(gate), "reclaimed nonce-less gate is released only by its new owner");
+
+            // An existing but unreadable durable-job database also fails closed
+            // rather than treating it as an empty database and killing the job.
+            var jobsDir = Path.Combine(install, "state", "devspace-state", "jobs");
+            Directory.CreateDirectory(jobsDir);
+            File.WriteAllText(Path.Combine(jobsDir, "jobs.sqlite"), "unverifiable test store");
+            blocked = false;
+            try { SetupInstaller.UpdateExisting(bundle, install, false, consolePort); }
+            catch (Exception) { blocked = true; }
+            AssertTrue(blocked, "unverifiable durable job store blocks native update");
+            AssertTrue(!Directory.Exists(gate), "failed preflight releases only its own temporary gate");
+            AssertEqual(selectedSlot, File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
+                "failed preflight never modifies the installed Runtime");
         }
-
-        var result = SetupInstaller.UpdateExisting(bundle, install, false);
-        var updated = PlatformSettingsStore.Load(Path.Combine(install, "settings.json"), install);
-
-        AssertEqual("1.1.0-beta.4.local.13", result.DevSpaceVersion, "runtime upgraded");
-        AssertEqual("http2", updated.CloudflaredProtocol, "explicit Tunnel protocol preserved across update");
-        AssertEqual(17677, updated.LocalPort, "port preserved");
-        AssertEqual("dev.example.test/group", updated.FixedHostname, "public endpoint preserved");
-        AssertEqual("existing-tunnel", updated.NamedTunnelIdOrName, "tunnel identity preserved");
-        AssertEqual(Path.GetFullPath(install), Path.GetFullPath(updated.AllowedRoots[0]), "allowed root preserved");
-        AssertEqual(tokenBefore, File.ReadAllText(tokenPath, Encoding.UTF8), "tunnel token preserved");
-        AssertEqual("keep-state", File.ReadAllText(stateSentinel, Encoding.UTF8), "state preserved");
-        AssertEqual(owner, result.OwnerPassword, "owner password preserved");
-        AssertEqual(managedConfig, File.ReadAllText(managedConfigPath, Encoding.UTF8), "managed config preserved");
-        AssertEqual("new-slot", File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(), "active slot upgraded");
-        AssertTrue(Directory.Exists(oldSlot), "previous runtime slot retained for recovery");
-        AssertEqual(2, (int)File.ReadAllBytes(Path.Combine(install, "cloudflared.exe"))[0], "cloudflared upgraded");
-        AssertEqual("new-readme", File.ReadAllText(Path.Combine(install, "README.md")), "product files upgraded");
-        AssertEqual("candidate-jobs-guard", File.ReadAllText(Path.Combine(install, "ops", "runtime-jobs-guard.mjs")),
-            "runtime jobs guard survives Windows existing-install update");
-        AssertEqual("desktop-candidate", File.ReadAllText(Path.Combine(install, "desktop", "DevSpaceForgeDesktop.exe")),
-            "modern desktop survives Windows existing-install update");
-        AssertEqual("candidate-start-modern-desktop.ps1", File.ReadAllText(Path.Combine(install, "ops", "start-modern-desktop.ps1")),
-            "modern launcher survives Windows existing-install update");
-        AssertEqual("modern-control-ui", File.ReadAllText(Path.Combine(install, "ops", "control-ui", "index.html")),
-            "modern Control UI survives Windows existing-install update");
-
-        // The native installer is outside the Node Console process. It must
-        // respect the same gate before any managed Runtime process is stopped.
-        var gate = Path.Combine(install, "state", "devspace-state", ".runtime-switch-gate");
-        Directory.CreateDirectory(gate);
-        var blocked = false;
-        try { SetupInstaller.UpdateExisting(bundle, install, false); }
-        catch (InvalidOperationException) { blocked = true; }
-        AssertTrue(blocked, "existing shared Runtime switch gate blocks native update");
-        AssertTrue(Directory.Exists(gate), "installer must not delete a gate it did not acquire");
-        AssertEqual("new-slot", File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
-            "blocked native update leaves active Runtime pointer unchanged");
-        Directory.Delete(gate);
-
-        // An existing but unreadable durable-job database also fails closed
-        // rather than treating it as an empty database and killing the job.
-        var jobsDir = Path.Combine(install, "state", "devspace-state", "jobs");
-        Directory.CreateDirectory(jobsDir);
-        File.WriteAllText(Path.Combine(jobsDir, "jobs.sqlite"), "unverifiable test store");
-        blocked = false;
-        try { SetupInstaller.UpdateExisting(bundle, install, false); }
-        catch (Exception) { blocked = true; }
-        AssertTrue(blocked, "unverifiable durable job store blocks native update");
-        AssertTrue(!Directory.Exists(gate), "failed preflight releases only its own temporary gate");
-        AssertEqual("new-slot", File.ReadAllText(Path.Combine(install, "runtime", "active-slot.txt"), Encoding.ASCII).Trim(),
-            "failed preflight never modifies the installed Runtime");
+        finally { SetupInstaller.StopManagedRuntimeProcesses(install); }
     }
 
     private static void TestModernPlan()
@@ -1248,7 +1494,9 @@ internal static class DevSpaceConfigurationTests
         catch (Exception exception)
         {
             failures++;
-            Console.Error.WriteLine("FAIL " + name + ": " + exception.Message);
+            // Print the full chain: aggregated inner failures carry the step
+            // that failed and the original exception type/message.
+            Console.Error.WriteLine("FAIL " + name + ": " + exception);
         }
     }
 

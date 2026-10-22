@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, lstat, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,44 +103,18 @@ interface FfprobeJson {
 let cachedPackagedBackend:
   | { cacheKey: string; backend: VideoBackend }
   | undefined;
-let preparedVideoTemp:
-  | { root: string; promise: Promise<string> }
-  | undefined;
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
 function videoTempRoot(): string {
   const configured = process.env.DEVSPACE_VIDEO_TEMP_DIR?.trim();
   return configured ? path.resolve(configured) : path.join(os.tmpdir(), "devspace-video-frames");
 }
 
-async function prepareVideoProcessTemp(): Promise<string> {
-  const root = videoTempRoot();
-  if (preparedVideoTemp?.root === root) return preparedVideoTemp.promise;
-  const promise = (async () => {
-    await mkdir(root, { recursive: true });
-    const ownRoot = path.join(root, `process-${process.pid}`);
-    await rm(ownRoot, { recursive: true, force: true });
-    for (const entry of await readdir(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const match = /^process-(\d+)$/.exec(entry.name);
-      if (!match) continue;
-      const pid = Number(match[1]);
-      if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid || processIsAlive(pid)) continue;
-      await rm(path.join(root, entry.name), { recursive: true, force: true });
-    }
-    await mkdir(ownRoot, { recursive: true });
-    return ownRoot;
-  })();
-  preparedVideoTemp = { root, promise };
-  return promise;
+function localVideoPath(videoPath: string): string {
+  if (!videoPath || videoPath.startsWith("-") ||
+      (/^[a-z][a-z0-9+.-]*:/i.test(videoPath) && !/^[a-z]:[\\/]/i.test(videoPath)) ||
+      videoPath.startsWith("\\\\") || videoPath.startsWith("//")) {
+    throw new Error("read_video requires a local file path");
+  }
+  return path.resolve(videoPath);
 }
 
 function runExecutable(
@@ -283,9 +257,10 @@ async function loadPackagedBackend(): Promise<VideoBackend> {
         ffprobePath,
         [
           "-v", "error",
+          "-protocol_whitelist", "file",
           "-show_entries", "format=duration,format_name:stream=codec_type,width,height,duration,r_frame_rate",
           "-of", "json",
-          videoPath,
+          localVideoPath(videoPath),
         ],
         PROBE_TIMEOUT_MS,
       );
@@ -316,7 +291,8 @@ async function loadPackagedBackend(): Promise<VideoBackend> {
           "-loglevel", "error",
           "-nostdin",
           "-ss", timestampSeconds.toFixed(3),
-          "-i", videoPath,
+          "-protocol_whitelist", "file",
+          "-i", localVideoPath(videoPath),
           "-map", "0:v:0",
           "-frames:v", "1",
           "-an",
@@ -407,6 +383,7 @@ export async function readVideoForModel(
   options: ReadVideoOptions = {},
   backend?: VideoBackend,
 ): Promise<ReadVideoModelResult> {
+  videoPath = localVideoPath(videoPath);
   const sourceSizeBytes = await inspectVideoFile(videoPath);
   const activeBackend = backend ?? await loadPackagedBackend();
   const probe = await activeBackend.probe(videoPath);
@@ -420,10 +397,18 @@ export async function readVideoForModel(
   const timestamps = videoSampleTimestamps(interval.startSeconds, interval.endSeconds).map((timestamp) => (
     lastNominalFrameTimestamp === undefined ? timestamp : Math.min(timestamp, lastNominalFrameTimestamp)
   ));
-  const processTemp = await prepareVideoProcessTemp();
-  const tempDir = await mkdtemp(path.join(processTemp, "call-"));
+  const tempRoot = videoTempRoot();
+  await mkdir(tempRoot, { recursive: true, mode: 0o700 });
+  const rootInfo = await lstat(tempRoot);
+  if (!rootInfo.isDirectory() || (process.platform !== "win32" &&
+      rootInfo.uid !== process.getuid!())) {
+    throw new Error("read_video temporary root must be an owner-controlled directory");
+  }
+  await chmod(tempRoot, 0o700);
+  const tempDir = await mkdtemp(path.join(tempRoot, "call-"));
   const framePaths = timestamps.map((_, index) => path.join(tempDir, `frame-${String(index).padStart(2, "0")}.jpg`));
   try {
+    await chmod(tempDir, 0o700);
     for (let index = 0; index < timestamps.length; index += 1) {
       await activeBackend.extractFrame(videoPath, timestamps[index]!, framePaths[index]!);
     }

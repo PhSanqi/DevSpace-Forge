@@ -196,9 +196,9 @@ try{
   const codeConfirm=await evaluate("({open:document.querySelector('#confirm-dialog').open,title:document.querySelector('#confirm-title').textContent,typedAreaHidden:document.querySelector('#rollback-confirm-area').hidden})");
   observations.push({name:'code-rollback-confirmation',...codeConfirm,pass:codeConfirm.open&&codeConfirm.typedAreaHidden});
   await evaluate("document.querySelector('#confirm-dialog').close('cancel');");
-  await evaluate("document.querySelector('[data-view=\"deployment\"]').click();document.querySelector('#rollback-target').value='runtime-local12';document.querySelector('#rollback-target').dispatchEvent(new Event('change',{bubbles:true}));");
-  const rollback=await evaluate("({view:document.querySelector('.view.active')?.id,selected:document.querySelector('#rollback-target').value,preview:document.querySelector('.rollback-preview')?.textContent.includes('1.1.0-beta.4.local.12'),enabled:!document.querySelector('[data-action=\"rollback-runtime\"]').disabled,currentDisabled:document.querySelector('#rollback-target option[value=\"runtime-local13-candidate-20260924-0118\"]')?.disabled})");
-  observations.push({name:'select-specific-rollback',...rollback,pass:rollback.view==='view-deployment'&&rollback.selected==='runtime-local12'&&rollback.preview&&rollback.enabled&&rollback.currentDisabled});
+  await evaluate("document.querySelector('[data-view=\"deployment\"]').click();document.querySelector('#rollback-target').value='runtime-slot-previous';document.querySelector('#rollback-target').dispatchEvent(new Event('change',{bubbles:true}));");
+  const rollback=await evaluate("({view:document.querySelector('.view.active')?.id,selected:document.querySelector('#rollback-target').value,preview:document.querySelector('.rollback-preview')?.textContent.includes('1.1.0-test.0'),enabled:!document.querySelector('[data-action=\"rollback-runtime\"]').disabled,currentDisabled:document.querySelector('#rollback-target option[value=\"runtime-slot-candidate\"]')?.disabled})");
+  observations.push({name:'select-specific-rollback',...rollback,pass:rollback.view==='view-deployment'&&rollback.selected==='runtime-slot-previous'&&rollback.preview&&rollback.enabled&&rollback.currentDisabled});
   const noOverlap=await evaluate(`(()=>{
     const panels=[...document.querySelectorAll('#deployment-content .panel')];
     const overlap=(a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return x.bottom>y.top&&y.bottom>x.top&&x.right>y.left&&y.right>x.left;};
@@ -208,7 +208,7 @@ try{
   const rollbackImage=await send('Page.captureScreenshot',{format:'png',fromSurface:true});
   writeFileSync(path.join(out,'rollback-selection.png'),Buffer.from(rollbackImage.data,'base64'));
   await evaluate("document.querySelector('[data-action=\"rollback-runtime\"]').click();");
-  const typed=await evaluate("({open:document.querySelector('#confirm-dialog').open,disabled:document.querySelector('#confirm-submit').disabled,target:document.querySelector('#rollback-confirm-label').textContent.includes('runtime-local12')})");
+  const typed=await evaluate("({open:document.querySelector('#confirm-dialog').open,disabled:document.querySelector('#confirm-submit').disabled,target:document.querySelector('#rollback-confirm-label').textContent.includes('runtime-slot-previous')})");
   observations.push({name:'rollback-confirmation-guard',...typed,pass:typed.open&&typed.disabled&&typed.target});
   await evaluate("document.querySelector('#rollback-confirm-input').value='wrong-target';document.querySelector('#rollback-confirm-input').dispatchEvent(new Event('input',{bubbles:true}));");
   const guarded=await evaluate("document.querySelector('#confirm-submit').disabled");

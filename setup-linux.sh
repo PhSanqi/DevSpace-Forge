@@ -2,6 +2,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_ARGS=("$@")
+
+# Quote one ExecStart argument using systemd unit-file rules. Both specifiers
+# (`%`) and variable expansion (`$`) are doubled so systemd keeps them literal.
+systemd_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  value="${value//\$/\$\$}"
+  printf '"%s"' "$value"
+}
+
 PORT="7677"
 CONSOLE_PORT=""
 OWNER_COPY=1
@@ -16,6 +29,9 @@ NON_INTERACTIVE=0
 CONFIG_OVERRIDE=0
 FORCE_RECONFIGURE=0
 UPGRADE_EXISTING=0
+TUNNEL_TOKEN_ARGV=0
+TUNNEL_TOKEN_FILE_ARG=""
+TUNNEL_TOKEN_STDIN=0
 
 usage() {
   cat <<'EOF'
@@ -34,7 +50,12 @@ Options:
   --disable-owner-copy  Disable Owner Password copy even on localhost
   --public-url URL      Public base URL; path bases are supported (example: https://dev.example.com/server)
   --origin-host HOST    Cloudflare Tunnel origin hostname accepted by DevSpace
-  --tunnel-token TOKEN  Cloudflare remotely-managed Tunnel token
+  --tunnel-token TOKEN  Deprecated: exposes the token in process listings;
+                        prefer --tunnel-token-file or --tunnel-token-stdin
+  --tunnel-token-file PATH
+                        Read the Cloudflare remotely-managed Tunnel token from PATH
+  --tunnel-token-stdin  Read the Cloudflare remotely-managed Tunnel token from
+                        standard input
   --reuse-existing-tunnel
                         Start only DevSpace; reuse an already-running Tunnel on this machine
   --reconfigure         Ignore an existing local configuration and configure again
@@ -54,7 +75,9 @@ while [[ $# -gt 0 ]]; do
     --disable-owner-copy) OWNER_COPY=0; shift ;;
     --public-url) PUBLIC_URL="${2:?missing URL}"; CONFIG_OVERRIDE=1; shift 2 ;;
     --origin-host) ORIGIN_HOST="${2:?missing hostname}"; CONFIG_OVERRIDE=1; shift 2 ;;
-    --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token) TUNNEL_TOKEN="${2:?missing token}"; TUNNEL_TOKEN_ARGV=1; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token-file) TUNNEL_TOKEN_FILE_ARG="${2:?missing token file}"; CONFIG_OVERRIDE=1; shift 2 ;;
+    --tunnel-token-stdin) TUNNEL_TOKEN_STDIN=1; CONFIG_OVERRIDE=1; shift ;;
     --reuse-existing-tunnel) REUSE_EXISTING_TUNNEL=1; CONFIG_OVERRIDE=1; shift ;;
     --reconfigure) FORCE_RECONFIGURE=1; shift ;;
     --no-start) START_SERVICES=0; shift ;;
@@ -67,6 +90,17 @@ done
 if [[ -n "$INSTANCE" ]] && ! [[ "$INSTANCE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   echo 'Instance name must contain only lowercase letters, digits, and hyphens.' >&2
   exit 1
+fi
+
+TOKEN_SOURCES="$TUNNEL_TOKEN_ARGV"
+if [[ "$TUNNEL_TOKEN_STDIN" -eq 1 ]]; then TOKEN_SOURCES=$((TOKEN_SOURCES + 1)); fi
+if [[ -n "$TUNNEL_TOKEN_FILE_ARG" ]]; then TOKEN_SOURCES=$((TOKEN_SOURCES + 1)); fi
+if (( TOKEN_SOURCES > 1 )); then
+  echo 'Specify only one of --tunnel-token, --tunnel-token-file, or --tunnel-token-stdin.' >&2
+  exit 2
+fi
+if (( TUNNEL_TOKEN_ARGV == 1 )); then
+  echo 'warning: --tunnel-token exposes the token in process listings; use --tunnel-token-file or --tunnel-token-stdin.' >&2
 fi
 
 INSTANCE_SUFFIX=""
@@ -210,6 +244,33 @@ if [[ "$UPGRADE_EXISTING" -eq 0 && ! -d "$ALLOWED_ROOT" ]]; then
 fi
 if [[ "$UPGRADE_EXISTING" -eq 0 ]]; then ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd)"; fi
 
+# The parent holds the existing cross-process gate through installation and acceptance.
+if [[ "${DSF_INSTALL_GUARD_PID:-}" != "$PPID" ]]; then
+  exec "$BUNDLED_NODE" "$ROOT/ops/runtime-rollback.mjs" --install-guard "$INSTALL_ROOT" "$EXISTING_CONFIG" "$DEVSPACE_SERVICE" "$ROOT/setup-linux.sh" "${ORIGINAL_ARGS[@]}"
+fi
+
+if [[ -n "$TUNNEL_TOKEN_FILE_ARG" ]]; then
+  if [[ ! -r "$TUNNEL_TOKEN_FILE_ARG" ]]; then
+    echo "Tunnel token file is not readable: $TUNNEL_TOKEN_FILE_ARG" >&2
+    exit 1
+  fi
+  TUNNEL_TOKEN="$(<"$TUNNEL_TOKEN_FILE_ARG")"
+fi
+if [[ "$TUNNEL_TOKEN_STDIN" -eq 1 ]]; then
+  if [[ -t 0 ]]; then
+    printf 'Cloudflare Remote Tunnel token: ' >&2
+    IFS= read -r -s TUNNEL_TOKEN || true
+    printf '\n' >&2
+  else
+    IFS= read -r TUNNEL_TOKEN || true
+  fi
+  if [[ -z "$TUNNEL_TOKEN" ]]; then
+    echo 'Tunnel token from standard input is empty.' >&2
+    exit 1
+  fi
+fi
+
+
 mkdir -p "$INSTALL_ROOT/runtime" "$CONFIG_ROOT" "$DEVSPACE_CONFIG_DIR" "$STATE_DIR" "$WORKTREE_ROOT" "$INSTALL_ROOT/bin"
 install -m 0755 "$ROOT/ops/runtime-console.sh" "$INSTALL_ROOT/bin/runtime-console"
 install -m 0755 "$ROOT/ops/runtime-console.mjs" "$INSTALL_ROOT/bin/runtime-console.mjs"
@@ -231,16 +292,14 @@ fi
 cat > "$INSTALL_ROOT/runtime-console.env" <<EOF
 DEVSPACE_SERVICE=$DEVSPACE_SERVICE
 TUNNEL_SERVICE=$CLOUDFLARED_SERVICE
+DEVSPACE_CONFIG_PATH=$(printf '%q' "$EXISTING_CONFIG")
 EOF
 chmod 0644 "$INSTALL_ROOT/runtime-console.env"
-rm -rf "$INSTALL_ROOT/runtime/node" "$INSTALL_ROOT/runtime/devspace"
-cp -a "$ROOT/runtime/node" "$INSTALL_ROOT/runtime/node"
-cp -a "$ROOT/runtime/devspace" "$INSTALL_ROOT/runtime/devspace"
+SLOT_ID="$("$BUNDLED_NODE" "$ROOT/ops/runtime-rollback.mjs" --stage "$INSTALL_ROOT" "$EXISTING_CONFIG" "$ROOT/runtime")"
+NODE="$INSTALL_ROOT/runtime/slots/$SLOT_ID/node/bin/node"
 cp -f "$BUNDLED_CLOUDFLARED" "$INSTALL_ROOT/cloudflared"
-chmod 0755 "$INSTALL_ROOT/cloudflared" "$INSTALL_ROOT/runtime/node/bin/node"
+chmod 0755 "$INSTALL_ROOT/cloudflared"
 
-NODE="$INSTALL_ROOT/runtime/node/bin/node"
-DEVSPACE_PACKAGE="$INSTALL_ROOT/runtime/devspace/node_modules/@waishnav/devspace"
 CLOUDFLARED="$INSTALL_ROOT/cloudflared"
 
 PUBLIC_URL="$($NODE - "$PUBLIC_URL" <<'NODE'
@@ -280,7 +339,7 @@ const file = process.argv[2];
 const allowedRoot = process.argv[3];
 const publicBaseUrl = process.argv[4] || null;
 const port = Number(process.argv[5]);
-const stateDir = process.argv[6];
+const stateDir = `${process.argv[6]}/devspace-state`;
 const worktreeRoot = process.argv[7];
 const agentDir = process.argv[8];
 const originHost = process.argv[9] || '';
@@ -306,8 +365,8 @@ fi
 
 if [[ ! -f "$DEVSPACE_CONFIG_DIR/auth.json" ]]; then
   OWNER_TOKEN="$("$NODE" -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))")"
+  install -m 0600 /dev/null "$DEVSPACE_CONFIG_DIR/auth.json"
   printf '{"ownerToken":"%s"}\n' "$OWNER_TOKEN" > "$DEVSPACE_CONFIG_DIR/auth.json"
-  chmod 0600 "$DEVSPACE_CONFIG_DIR/auth.json"
 else
   OWNER_TOKEN="$("$NODE" -e "const a=require(process.argv[1]); console.log(a.ownerToken||'')" "$DEVSPACE_CONFIG_DIR/auth.json")"
 fi
@@ -323,16 +382,16 @@ fi
 
 if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
   if [[ -n "$TUNNEL_TOKEN" ]]; then
+    install -m 0600 /dev/null "$CLOUDFLARE_TOKEN_FILE"
     printf '%s\n' "$TUNNEL_TOKEN" > "$CLOUDFLARE_TOKEN_FILE"
-    chmod 0600 "$CLOUDFLARE_TOKEN_FILE"
   elif [[ ! -f "$CLOUDFLARE_TOKEN_FILE" && -f "$CLOUDFLARE_ENV" ]]; then
     set +u
     source "$CLOUDFLARE_ENV"
     legacy_token="${CLOUDFLARED_TOKEN:-}"
     set -u
     if [[ -n "$legacy_token" ]]; then
+      install -m 0600 /dev/null "$CLOUDFLARE_TOKEN_FILE"
       printf '%s\n' "$legacy_token" > "$CLOUDFLARE_TOKEN_FILE"
-      chmod 0600 "$CLOUDFLARE_TOKEN_FILE"
     fi
     unset legacy_token CLOUDFLARED_TOKEN || true
   fi
@@ -342,17 +401,20 @@ if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 ]]; then
   fi
 fi
 
-cat > "$INSTALL_ROOT/bin/run-devspace" <<EOF
+cat > "$INSTALL_ROOT/bin/run-devspace.pending-$SLOT_ID" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export DEVSPACE_CONFIG_DIR="\$("$NODE" "$INSTALL_ROOT/bin/prepare-effective-config.mjs" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --auth "$DEVSPACE_CONFIG_DIR/auth.json" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --output-dir "$QUICK_CONFIG_DIR")"
-exec "$NODE" "$DEVSPACE_PACKAGE/dist/cli.js" serve
+selection="\$("$NODE" "$INSTALL_ROOT/bin/runtime-rollback.mjs" --resolve "$INSTALL_ROOT" "$DEVSPACE_CONFIG_DIR/config.jsonc")"
+mapfile -t selected <<< "\$selection"
+if [[ "\${1:-}" == "--dry-run" ]]; then printf '%s\n' "\${selected[@]}"; exit 0; fi
+export DEVSPACE_CONFIG_DIR="\$("\${selected[0]}" "$INSTALL_ROOT/bin/prepare-effective-config.mjs" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --auth "$DEVSPACE_CONFIG_DIR/auth.json" --control-settings "$CONTROL_SETTINGS" --quick-url-file "$QUICK_URL_FILE" --output-dir "$QUICK_CONFIG_DIR")"
+exec "\${selected[0]}" "\${selected[1]}" serve
 EOF
-chmod 0755 "$INSTALL_ROOT/bin/run-devspace"
+chmod 0755 "$INSTALL_ROOT/bin/run-devspace.pending-$SLOT_ID"
 cat > "$INSTALL_ROOT/bin/run-runtime-console" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --credential-file "$DEVSPACE_CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --state-dir "$STATE_DIR/devspace-state" --serve "$CONSOLE_PORT" $CONSOLE_TUNNEL_METRICS_ARGS
+exec "$NODE" "$INSTALL_ROOT/bin/runtime-console.mjs" --instance "${INSTANCE:-default}" --platform-root "$INSTALL_ROOT" --config "$DEVSPACE_CONFIG_DIR/config.jsonc" --credential-file "$DEVSPACE_CONFIG_DIR/auth.json" --allow-owner-copy "$([[ "$OWNER_COPY" == 1 ]] && echo true || echo false)" --service-unit "$DEVSPACE_SERVICE" --tunnel-unit "$CLOUDFLARED_SERVICE" --serve "$CONSOLE_PORT" $CONSOLE_TUNNEL_METRICS_ARGS
 EOF
 chmod 0755 "$INSTALL_ROOT/bin/run-runtime-console"
 
@@ -379,9 +441,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-devspace
+KillMode=process
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-devspace")
 Restart=on-failure
 RestartSec=3
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -396,7 +460,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-runtime-console
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-runtime-console")
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -417,9 +481,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_ROOT/bin/run-cloudflared
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/run-cloudflared")
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -450,7 +518,7 @@ FLAP_WINDOW_SECONDS="\${DEVSPACE_WATCHDOG_FLAP_WINDOW_SECONDS:-120}"
 FLAP_THRESHOLD="\${DEVSPACE_WATCHDOG_FLAP_THRESHOLD:-2}"
 FLAP_ORIGIN_WINDOW_SECONDS="\${DEVSPACE_WATCHDOG_FLAP_ORIGIN_WINDOW_SECONDS:-30}"
 RESTART_COOLDOWN_SECONDS="\${DEVSPACE_WATCHDOG_RESTART_COOLDOWN_SECONDS:-600}"
-HA_RESTART_MAX="\${DEVSPACE_WATCHDOG_HA_RESTART_MAX:-2}"
+HA_HEALTHY_MIN="\${DEVSPACE_WATCHDOG_HA_HEALTHY_MIN:-2}"
 HA_FAILURE_THRESHOLD="\${DEVSPACE_WATCHDOG_HA_FAILURE_THRESHOLD:-3}"
 mkdir -p "\$STATE_DIR"
 exec 9>"\$STATE_DIR/cloudflared-watchdog.lock"
@@ -533,15 +601,15 @@ else
 fi
 
 if ha="\$(read_ha)"; then
-  if [[ "\$ha" == 4 ]]; then
+  if (( ha >= HA_HEALTHY_MIN )); then
     write_count "\$HA_COUNT_FILE" 0
-  elif (( ha <= HA_RESTART_MAX )); then
+  elif (( ha == 0 )); then
     ha_count=\$(( \$(read_count "\$HA_COUNT_FILE") + 1 ))
     write_count "\$HA_COUNT_FILE" "\$ha_count"
-    echo "watchdog: dedicated tunnel HA severely degraded (\$ha/4; observation \$ha_count/\$HA_FAILURE_THRESHOLD)"
+    echo "watchdog: dedicated tunnel HA unavailable (0/\${HA_HEALTHY_MIN}; observation \$ha_count/\$HA_FAILURE_THRESHOLD)"
   else
     write_count "\$HA_COUNT_FILE" 0
-    echo "watchdog: dedicated tunnel HA degraded (\$ha/4); restart suppressed while redundant connections remain"
+    echo "watchdog: dedicated tunnel HA degraded (\${ha}/\${HA_HEALTHY_MIN}); restart suppressed while one connector remains"
   fi
 else
   write_count "\$HA_COUNT_FILE" 0
@@ -556,18 +624,21 @@ if (( flaps > 0 )); then
   echo "watchdog: recent dedicated tunnel termination events=\$flaps within \${FLAP_WINDOW_SECONDS}s"
 fi
 
-if (( origin_healthy == 0 && fast_flaps >= 1 )); then
-  reason=origin-failed-after-tunnel-flap
-elif (( origin_count >= 3 )); then
-  reason=origin-unreachable
-elif (( ha_count >= HA_FAILURE_THRESHOLD )); then
-  reason=ha-severely-degraded
-elif (( flaps >= FLAP_THRESHOLD )); then
-  if (( origin_healthy == 1 )); then
-    echo 'watchdog: quic-flapping observed; restart suppressed while public origin remains healthy'
-  else
-    echo 'watchdog: quic-flapping observed; waiting for an availability restart threshold'
+# Public-origin and flap probes are auxiliary evidence only. They must not
+# restart an otherwise connected tunnel, because the host's own public path can
+# transiently fail while cloudflared still has healthy edge connections.
+if (( origin_healthy == 0 )); then
+  if (( fast_flaps >= 1 )); then
+    echo 'watchdog: public origin failed after a tunnel flap; auxiliary signal only'
+  elif (( origin_count >= 3 )); then
+    echo 'watchdog: public origin remains unreachable; auxiliary signal only'
   fi
+fi
+if (( flaps >= FLAP_THRESHOLD )); then
+  echo "watchdog: recent tunnel flaps=\$flaps; restart suppressed unless HA reaches zero repeatedly"
+fi
+if (( ha_count >= HA_FAILURE_THRESHOLD )); then
+  reason=ha-zero
 fi
 [[ -n "\$reason" ]] || exit 0
 
@@ -585,13 +656,13 @@ systemctl --user restart "\$TUNNEL_SERVICE"
 attempts="\${DEVSPACE_WATCHDOG_RECOVERY_ATTEMPTS:-15}"
 delay="\${DEVSPACE_WATCHDOG_RECOVERY_DELAY:-2}"
 for ((i=1; i<=attempts; i++)); do
-  if probe_200 "\$LOCAL_URL" && probe_origin && ha="\$(read_ha)" && [[ "\$ha" == 4 ]]; then
-    echo 'watchdog: recovered; dedicated tunnel HA=4/4 and local/origin healthy'
+  if probe_200 "\$LOCAL_URL" && ha="\$(read_ha)" && (( ha >= HA_HEALTHY_MIN )); then
+    echo "watchdog: recovered; dedicated tunnel HA=\${ha}/\${HA_HEALTHY_MIN}+ and local origin healthy"
     exit 0
   fi
   sleep "\$delay"
 done
-echo 'watchdog: restart completed but full HA/origin recovery is unverified' >&2
+echo 'watchdog: restart completed but healthy HA/local-origin recovery is unverified' >&2
 exit 1
 EOF
   chmod 0755 "$INSTALL_ROOT/bin/check-cloudflared"
@@ -604,7 +675,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$INSTALL_ROOT/bin/check-cloudflared
+ExecStart=$(systemd_quote "$INSTALL_ROOT/bin/check-cloudflared")
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
@@ -666,7 +737,8 @@ wait_for_endpoint() {
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if [[ "$START_SERVICES" -eq 1 ]]; then
-    systemctl --user enable --now "$DEVSPACE_SERVICE"
+    systemctl --user enable "$DEVSPACE_SERVICE"
+    "$NODE" "$INSTALL_ROOT/bin/runtime-rollback.mjs" --activate "$INSTALL_ROOT" "$EXISTING_CONFIG" "$SLOT_ID" "$DEVSPACE_SERVICE" 1
     systemctl --user enable --now "$CONSOLE_SERVICE"
     if [[ "$REUSE_EXISTING_TUNNEL" -eq 0 && -f "$CLOUDFLARE_TOKEN_FILE" ]]; then
       systemctl --user enable --now "$CLOUDFLARED_SERVICE"
@@ -707,9 +779,12 @@ if command -v systemctl >/dev/null 2>&1; then
       echo 'Reusing an existing Cloudflare Tunnel; public-route verification is deferred until its Published Application is added.'
     fi
     echo 'Connectivity verification passed.'
+  else
+    "$NODE" "$INSTALL_ROOT/bin/runtime-rollback.mjs" --activate "$INSTALL_ROOT" "$EXISTING_CONFIG" "$SLOT_ID" "$DEVSPACE_SERVICE" 0
   fi
 else
-  echo 'systemctl was not found; services were installed but not started.' >&2
+  echo 'systemctl is required to confirm Runtime stop/identity; selection was not changed.' >&2
+  exit 1
 fi
 
 echo

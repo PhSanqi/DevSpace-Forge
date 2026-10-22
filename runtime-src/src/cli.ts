@@ -55,6 +55,7 @@ import { expandHomePath } from "./roots.js";
 import { readReviewRef } from "./review-checkpoints.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { logEvent } from "./logger.js";
+import { inspectOAuthState } from "./oauth-diagnostics.js";
 import { pruneStaleManagedWorktrees } from "./worktree-prune.js";
 
 type Command =
@@ -85,7 +86,7 @@ async function main(argv: string[]): Promise<void> {
       await runInit({ force: args.includes("--force") });
       return;
     case "doctor":
-      await runDoctor();
+      await runDoctor(args.includes("--auth"));
       return;
     case "config":
       runConfigCommand(args);
@@ -391,7 +392,7 @@ async function runStartupWorktreeCleanup(config: ServerConfig): Promise<void> {
   }
 }
 
-async function runDoctor(): Promise<void> {
+async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
   const files = loadDevspaceFiles();
   console.log(`Config dir: ${files.dir}`);
   console.log(`Config file: ${files.configExists ? files.configPath : "missing"}`);
@@ -409,6 +410,28 @@ async function runDoctor(): Promise<void> {
     console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+    if (includeAuthDiagnostics) {
+      const snapshot = inspectOAuthState(config.stateDir);
+      console.log(`OAuth state path: ${config.stateDir}`);
+      console.log(`OAuth database: ${snapshot.databaseExists ? "present" : "missing"}`);
+      console.log(`OAuth registered clients: ${snapshot.clients}`);
+      console.log(`OAuth unexpired access tokens: ${snapshot.activeAccessTokens}`);
+      console.log(`OAuth unexpired refresh tokens: ${snapshot.activeRefreshTokens}`);
+      console.log(`OAuth pending authorization codes: ${snapshot.pendingAuthorizationCodes}`);
+      if (snapshot.soonestRefreshExpiry !== undefined) {
+        console.log(
+          `OAuth earliest refresh expiry (UTC): ${new Date(snapshot.soonestRefreshExpiry * 1000).toISOString()}`,
+        );
+      }
+      if (snapshot.clients > 0 && snapshot.activeRefreshTokens === 0) {
+        console.warn(
+          "OAuth warning: no usable refresh tokens remain in this state database; an existing client may require re-authorization.",
+        );
+      }
+      if (config.stateDir.includes(".devspace-dev")) {
+        console.warn("OAuth QA warning: this is a development state directory, not the production database.");
+      }
+    }
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
       getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
@@ -486,7 +509,8 @@ function printHelp(): void {
       "  devspace                 Run first-time setup if needed, then start the server",
       "  devspace serve           Start the server",
       "  devspace init            Create or update ~/.devspace/config.jsonc and auth.json",
-      "  devspace doctor          Show config, runtime, and native dependency status",
+      "  devspace doctor [--auth] Show config, runtime, and native dependency status",
+      "                           (--auth adds read-only OAuth state counts)",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace worktrees prune Prune managed worktrees unused for 3 days",
@@ -497,6 +521,7 @@ function printHelp(): void {
       "  devspace agents continue <id> [--model <model>] [--effort <level>] <prompt>",
       "  devspace agents show <id> [--json]",
       "  devspace agents wait <id>... [--timeout <seconds>] [--json]",
+      "  devspace agents stop <id> [--json]",
       "  devspace agents daemon <status|stop|logs>",
       "  devspace -v, --version   Print the installed version",
       "",
@@ -543,6 +568,9 @@ async function runAgentsCommand(args: string[]): Promise<void> {
       return;
     case "wait":
       await runAgentWorkflowCommand(json, () => runAgentsWait(commandArgs, json));
+      return;
+    case "stop":
+      await runAgentWorkflowCommand(json, () => runAgentsStop(commandArgs, json));
       return;
     case "targets":
       await runAgentWorkflowCommand(json, () => runAgentsTargets(commandArgs, json));
@@ -663,6 +691,19 @@ async function runAgentsWait(args: string[], json: boolean): Promise<void> {
     return;
   }
   printAgentXml(results.map(formatAgentObservation).join("\n"));
+}
+
+async function runAgentsStop(args: string[], json: boolean): Promise<void> {
+  const [id, ...extra] = args;
+  if (!id || extra.length > 0) throw new Error("Usage: devspace agents stop <id> [--json]");
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const record = presentAgentWorkflowResult(await client.stopAgent(id, scope), json);
+  if (!record) return;
+  const observation = presentAgentObservation(record);
+  if (json) printJson(observation);
+  else printAgentXml(formatAgentObservation(observation));
 }
 
 function parseAgentsWaitArgs(args: string[]): { ids: string[]; timeoutMs?: number } {
@@ -808,6 +849,7 @@ function printAgentsHelp(): void {
       "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents show <id> [--json]",
       "  devspace agents wait <id>... [--timeout <seconds>] [--json]",
+      "  devspace agents stop <id> [--json]",
       "  devspace agents targets [--json]",
       "  devspace agents daemon <status|stop|logs> [--json]",
     ].join("\n"),

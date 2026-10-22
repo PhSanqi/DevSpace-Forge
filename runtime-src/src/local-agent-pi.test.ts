@@ -35,18 +35,28 @@ test("Pi AuthStorage dependencies remain compatible on fresh installs", async ()
   assert.equal(typeof ModelRegistry?.create, "function");
 });
 
+let markHeldPromptEntered: (() => void) | undefined;
+const heldPromptEntered = new Promise<void>((resolveEntered) => { markHeldPromptEntered = resolveEntered; });
+
 class FakePiSession implements PiSessionLike {
   readonly sessionId = "pi_session_1";
   readonly messages: any[] = [];
   readonly modelRegistry = { find: () => ({ id: "model" }) } as unknown as PiSessionLike["modelRegistry"];
   private readonly listeners = new Set<AgentSessionEventListener>();
+  private releaseHeldPrompt?: () => void;
   disposeCount = 0;
+  abortCount = 0;
   model?: unknown;
   effort?: unknown;
   activeTools: string[] = [];
   toolHistory: string[][] = [];
 
   async prompt(text: string): Promise<void> {
+    if (text === "hold") {
+      markHeldPromptEntered?.();
+      await new Promise<void>((resolvePrompt) => { this.releaseHeldPrompt = resolvePrompt; });
+      return;
+    }
     const message = {
       role: "assistant",
       content: [{ type: "text", text: `response:${text}` }],
@@ -62,6 +72,12 @@ class FakePiSession implements PiSessionLike {
 
   async setModel(model: any): Promise<void> {
     this.model = model;
+  }
+
+  async abort(): Promise<void> {
+    this.abortCount += 1;
+    this.releaseHeldPrompt?.();
+    this.releaseHeldPrompt = undefined;
   }
 
   setActiveToolsByName(toolNames: string[]): void {
@@ -159,6 +175,23 @@ await pool.run(driver, { ...context, providerSessionId: "pi_session_1" }, {
 assert.equal(contexts.length, 2, "cold continuation creates a new AgentSession");
 assert.equal(contexts[1]?.providerSessionId, "pi_session_1");
 assert.deepEqual(sessions[1]?.activeTools, ["read", "grep", "find", "ls", "edit", "write", "bash"]);
+
+const cancelAbort = new AbortController();
+const cancelledTurn = pool.run(driver, { ...context, providerSessionId: "pi_session_1" }, {
+  prompt: "hold",
+  workspaceRoot: "/tmp/project",
+  providerSessionId: "pi_session_1",
+  signal: cancelAbort.signal,
+});
+await heldPromptEntered;
+cancelAbort.abort();
+const cancelledRun = await cancelledTurn;
+assert.equal(cancelledRun.isErr(), true);
+if (cancelledRun.isErr()) {
+  assert.equal(cancelledRun.error.code, "PROVIDER_CANCELLED");
+  assert.equal(cancelledRun.error.provider, "pi");
+}
+assert.equal(sessions[1]?.abortCount, 1);
 await pool.close();
 
 const missingModelSession = new FakePiSession();

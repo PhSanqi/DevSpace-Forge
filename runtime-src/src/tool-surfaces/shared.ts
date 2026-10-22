@@ -1,5 +1,5 @@
 import * as z from "zod/v4";
-import { logEvent, commandPreview } from "../logger.js";
+import { logEvent, commandPreview, diagnosticFailure } from "../logger.js";
 import type { ServerConfig } from "../config.js";
 import {
   WORKSPACE_APP_URI,
@@ -68,7 +68,7 @@ export async function runLoggedToolOperation<T>(
       ...fields,
       success: false,
       durationMs: Math.round(performance.now() - startedAt),
-      error: error instanceof Error ? error.message : String(error),
+      error: diagnosticFailure(error, fields.command !== undefined || fields.tool === "write_stdin"),
     });
     throw error;
   }
@@ -83,23 +83,19 @@ export function contentText(content: ToolContent[]): string {
     .join("\n");
 }
 
-function toolErrorPreview(content: ToolContent[]): string | undefined {
-  const text = contentText(content).replace(/\s+/g, " ").trim();
-  if (!text) return undefined;
-  return text.length > 240 ? `${text.slice(0, 237)}...` : text;
-}
-
 export function logFailedToolResponse(
   config: ServerConfig,
   fields: Omit<ToolLogFields, "success" | "durationMs" | "error">,
-  content: ToolContent[],
   startedAt: number,
+  failure?: { errorClass: string; exitCode?: number; signal?: string },
 ): void {
   logToolCall(config, {
     ...fields,
     success: false,
     durationMs: Math.round(performance.now() - startedAt),
-    error: toolErrorPreview(content),
+    error: failure?.errorClass ?? "ToolExecutionError",
+    exitCode: failure?.exitCode,
+    signal: failure?.signal,
   });
 }
 

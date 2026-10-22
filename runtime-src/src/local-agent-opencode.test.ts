@@ -16,6 +16,10 @@ import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 let sessionNumber = 0;
 const createInputs: unknown[] = [];
 const promptInputs: unknown[] = [];
+const interruptInputs: unknown[] = [];
+let releaseHeldPrompt: (() => void) | undefined;
+let markHeldPromptEntered: (() => void) | undefined;
+const heldPromptEntered = new Promise<void>((resolveEntered) => { markHeldPromptEntered = resolveEntered; });
 let healthAvailable = true;
 const client = {
   global: {
@@ -33,12 +37,22 @@ const client = {
     async prompt(input: unknown) {
       promptInputs.push(input);
       const sessionId = (input as { sessionID: string }).sessionID;
+      if ((input as { parts: Array<{ text: string }> }).parts[0]?.text === "hold") {
+        markHeldPromptEntered?.();
+        await new Promise<void>((resolvePrompt) => { releaseHeldPrompt = resolvePrompt; });
+        throw new DOMException("Aborted", "AbortError");
+      }
       return {
         data: {
           info: { role: "assistant" },
           parts: [{ type: "text", text: `response:${sessionId}` }],
         },
       };
+    },
+    async abort(input: unknown) {
+      interruptInputs.push(input);
+      releaseHeldPrompt?.();
+      releaseHeldPrompt = undefined;
     },
   },
 } as unknown as OpencodeClientLike;
@@ -190,6 +204,27 @@ await pool.run(driver, {
   onSessionId: (id) => { callbackSessionId = id; },
 });
 assert.equal(callbackSessionId, firstRecord.providerSessionId);
+
+const cancelAbort = new AbortController();
+const cancelledTurn = pool.run(driver, {
+  agentId: "agt_cancel",
+  provider: "opencode",
+  workspaceRoot: "/tmp/project",
+}, {
+  prompt: "hold",
+  workspaceRoot: "/tmp/project",
+  signal: cancelAbort.signal,
+});
+await heldPromptEntered;
+cancelAbort.abort();
+const cancelledRun = await cancelledTurn;
+assert.equal(cancelledRun.isErr(), true);
+if (cancelledRun.isErr()) {
+  assert.equal(cancelledRun.error.code, "PROVIDER_CANCELLED");
+  assert.equal(cancelledRun.error.provider, "opencode");
+}
+assert.deepEqual(interruptInputs, [{ sessionID: "session_3" }]);
+
 assert.deepEqual(promptInputs[2], {
   sessionID: "session_1",
   directory: "/tmp/project",

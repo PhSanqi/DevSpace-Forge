@@ -55,6 +55,7 @@ export interface ToolLogFields {
   sessionId?: number;
   running?: boolean;
   exitCode?: number;
+  signal?: string;
   sizeBytes?: number;
   mimeType?: string;
   semantic?: boolean;

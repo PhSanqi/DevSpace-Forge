@@ -57,6 +57,18 @@ test('Windows setup, autostart and script entrypoints use the modern desktop lau
   assert.match(installer, /start-modern-desktop\.ps1/);
   assert.match(installer, /DevSpaceForgeDesktop\.exe/);
   assert.match(installer, /WindowsAutoStartCommand[\s\S]*powershell\.exe/);
+  assert.match(installer, /ApplyWindowsLaunchShortcuts/);
+  assert.match(installer, /SpecialFolder\.Programs/);
+  assert.match(installer, /SpecialFolder\.DesktopDirectory/);
+  assert.match(installer, /DevSpace-Forge\.lnk/);
+  assert.match(installer, /WScript\.Shell/);
+  assert.match(installer, /CreateShortcut/);
+  assert.match(installer, /DevSpaceForge\.ico/);
+  assert.match(installer, /hadProgramsShortcut = File\.Exists\(programsShortcut\)/);
+  assert.match(installer, /hadDesktopShortcut = File\.Exists\(desktopShortcut\)/);
+  assert.match(installer, /if \(!hadProgramsShortcut && !hadDesktopShortcut\)/);
+  assert.match(installer, /ApplyWindowsAutoStart\(root, autoStart\);[\s\S]*ApplyWindowsLaunchShortcuts\(root\);/);
+  assert.match(installer, /if \(applySystemIntegration\) ApplyWindowsLaunchShortcuts\(root\);/);
   assert.match(installer, /LegacyWindowsAutoStartValueName[\s\S]*DevSpaceControlPlatform-/);
   assert.match(installer, /key\.DeleteValue\(legacyValueName, false\)/);
   assert.match(supervisor, /SetupInstaller\.ApplyWindowsAutoStart\(platformRoot, enabled\)/);
@@ -68,6 +80,8 @@ test('Windows setup, autostart and script entrypoints use the modern desktop lau
   assert.match(setup, /SetupInstaller\.StartWindowsDesktop\(platformRoot\)/);
   assert.doesNotMatch(setup, /Path\.Combine\(platformRoot, "DevSpaceControlPlatform\.exe"\)/);
   assert.match(install, /start-modern-desktop\.ps1/);
+  assert.match(install, /Join-Path \$root 'Setup\.exe'/);
+  assert.doesNotMatch(install, /setup-runtime\.ps1/);
   assert.match(install, /DevSpaceForgeDesktop\.exe/);
   assert.doesNotMatch(install, /Start-Process -FilePath \$exe/);
 });
@@ -107,7 +121,10 @@ test('shell defaults to the mature loopback console and keeps same-origin naviga
   const module = { exports: {} };
   vm.runInNewContext(script, {
     module, process: { env: {} }, URL,
-    require: () => ({ app: { whenReady: () => new Promise(() => {}), on: () => {} } })
+    __dirname: path.join(root, 'desktop-shell'),
+    require: (id) => id === 'node:path'
+      ? path
+      : ({ app: { whenReady: () => new Promise(() => {}), on: () => {} } })
   });
   const { controlUrl } = module.exports;
   assert.equal(controlUrl().pathname, '/');
@@ -127,7 +144,10 @@ test('shell defaults to the mature loopback console and keeps same-origin naviga
   assert.match(script, /will-redirect/);
   assert.match(script, /setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/);
   assert.match(script, /Control is unavailable/);
-  assert.match(script, /new Tray\(path\.join\(__dirname, 'DevSpaceForge\.ico'\)\)/);
+  assert.match(script, /const appIcon = path\.join\(__dirname, 'DevSpaceForge\.ico'\)/);
+  assert.match(script, /icon: appIcon/);
+  assert.match(script, /setAppUserModelId\('DevSpaceForge\.Desktop'\)/);
+  assert.match(script, /new Tray\(appIcon\)/);
   assert.match(script, /window\.on\('close'/);
   assert.match(script, /event\.preventDefault\(\)/);
   assert.match(script, /window\.hide\(\)/);
@@ -145,4 +165,20 @@ test('PowerShell sources parse when pwsh is available', { skip: !hasPwsh }, () =
       { encoding: 'utf8', env: { ...process.env, PS_SOURCE_FILE: path.join(root, file) } });
     assert.equal(result.status, 0, `${file}: ${result.stderr}`);
   }
+});
+
+test('shell accepts the /next Control URL without a trailing slash', () => {
+  const script = source('desktop-shell/main.cjs');
+  const module = { exports: {} };
+  vm.runInNewContext(script, {
+    module, process: { env: {} }, URL,
+    __dirname: path.join(root, 'desktop-shell'),
+    require: (id) => id === 'node:path'
+      ? path
+      : ({ app: { whenReady: () => new Promise(() => {}), on: () => {} } })
+  });
+  const { controlUrl } = module.exports;
+  assert.equal(controlUrl('http://127.0.0.1:17678/next').pathname, '/next');
+  assert.equal(controlUrl('http://127.0.0.1:17678/next/connection').pathname, '/next/connection');
+  assert.throws(() => controlUrl('http://127.0.0.1:17678/nextish'));
 });

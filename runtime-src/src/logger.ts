@@ -41,6 +41,7 @@ export function logEvent(
     level,
     event,
     ...fields,
+    ...(typeof fields.error === "string" ? { error: sanitizeDiagnosticError(fields.error) } : {}),
   };
 
   const line = config.format === "pretty" ? formatPretty(entry) : JSON.stringify(entry);
@@ -95,4 +96,21 @@ function formatPretty(entry: LogFields): string {
 function formatPrettyValue(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value);
   return JSON.stringify(value);
+}
+
+export function sanitizeDiagnosticError(message: string): string {
+  return message
+    .replace(/(https?:\/\/)[^:\s]+:[^@\s]+@/g, "$1[REDACTED]@")
+    .replace(/\bBearer\s+[^\s"'<>]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:sk-[\w-]+|ghp_[\w]+|github_pat_[\w]+|xox[a-z]-[\w-]+|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, "[REDACTED]")
+    .replace(/\b(password|passwd|token|secret|api_?key)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi, "$1=[REDACTED]")
+    .slice(0, 240);
+}
+
+export function diagnosticFailure(error: unknown, outputBearing = false): string {
+  const name = error instanceof Error ? error.name.replace(/[^\w]/g, "").slice(0, 64) || "Error" : "Error";
+  // Command adapters can embed arbitrary stdout/stderr anywhere in the message.
+  if (outputBearing) return name;
+  const message = error instanceof Error ? error.message : "Operation failed";
+  return `${name}: ${sanitizeDiagnosticError(message.split(/\r?\n/, 1)[0] ?? "").slice(0, 160)}`;
 }

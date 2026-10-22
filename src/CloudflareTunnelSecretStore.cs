@@ -33,11 +33,21 @@ namespace DevSpaceControlPlatform
 
             var path = TokenPath(platformRoot);
             Directory.CreateDirectory(Path.GetDirectoryName(path));
-            File.WriteAllText(path, value + Environment.NewLine, new UTF8Encoding(false));
-            RestrictPrivateFile(path);
+            // Apply the private ACL at creation so the token is never briefly
+            // readable through an inherited directory DACL.
+            using (var stream = File.Create(path, 4096, FileOptions.None, PrivateFileSecurity()))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+            {
+                writer.Write(value + Environment.NewLine);
+            }
         }
 
         internal static void RestrictPrivateFile(string path)
+        {
+            File.SetAccessControl(path, PrivateFileSecurity());
+        }
+
+        private static FileSecurity PrivateFileSecurity()
         {
             var currentUser = WindowsIdentity.GetCurrent().User;
             if (currentUser == null) throw new InvalidOperationException("无法识别当前 Windows 用户。");
@@ -57,7 +67,7 @@ namespace DevSpaceControlPlatform
                 new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
                 FileSystemRights.FullControl,
                 AccessControlType.Allow));
-            File.SetAccessControl(path, security);
+            return security;
         }
     }
 }

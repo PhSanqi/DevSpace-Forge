@@ -2,12 +2,13 @@ const { app, BrowserWindow, Menu, Tray } = require('electron');
 const path = require('node:path');
 
 const DEFAULT_URL = 'http://127.0.0.1:17678/';
+const appIcon = path.join(__dirname, 'DevSpaceForge.ico');
 
 /** @param {string | undefined} value */
 function controlUrl(value) {
   const url = new URL(value || DEFAULT_URL);
   if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(url.hostname) ||
-      !((url.pathname === '/') || url.pathname.startsWith('/next/')) || url.username || url.password) {
+      !((url.pathname === '/') || url.pathname === '/next' || url.pathname.startsWith('/next/')) || url.username || url.password) {
     throw new Error('DEVSPACE_CONTROL_URL must be an HTTP loopback Control URL.');
   }
   return url;
@@ -32,9 +33,11 @@ function showMainWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') app.setAppUserModelId('DevSpaceForge.Desktop');
   const window = new BrowserWindow({
     width: 1180, height: 820, minWidth: 760, minHeight: 580,
     backgroundColor: '#f7f7f5',
+    icon: appIcon,
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false }
   });
   mainWindow = window;
@@ -62,7 +65,7 @@ app.whenReady().then(() => {
   });
   window.loadURL(target.href).catch(() => window.loadURL(errorPage));
 
-  tray = new Tray(path.join(__dirname, 'DevSpaceForge.ico'));
+  tray = new Tray(appIcon);
   tray.setToolTip('DevSpace-Forge');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open DevSpace-Forge', click: showMainWindow },

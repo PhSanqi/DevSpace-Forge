@@ -13,6 +13,12 @@ export interface LocalAgentRunInput {
   effort?: string;
   modelOverrideRequested?: boolean;
   effortOverrideRequested?: boolean;
+  /**
+   * Aborted when the owning turn is stopped. Drivers translate this into a
+   * provider-level interrupt and must resolve with a cancelled error instead
+   * of leaving the turn pending.
+   */
+  signal?: AbortSignal;
 }
 
 export interface LocalAgentRunResult {
@@ -58,8 +64,18 @@ export interface LocalAgentRuntime {
   isAlive(): boolean;
 }
 
+/**
+ * Minimal per-driver capability declaration. Only turn interruption is
+ * modelled today; provider instance management deliberately stays out of the
+ * driver contract.
+ */
+export interface LocalAgentCapabilities {
+  turns: { interrupt: boolean };
+}
+
 export interface LocalAgentDriver {
   readonly provider: LocalAgentProvider;
+  readonly capabilities: LocalAgentCapabilities;
   runtimeKey(context: LocalAgentRuntimeContext): string;
   createRuntime(context: LocalAgentRuntimeContext): Promise<Result<LocalAgentRuntime, AgentProviderError>>;
   readonly idleTimeoutMs?: number;

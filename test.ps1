@@ -6,12 +6,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$consoleNode = Get-Command node.exe -ErrorAction SilentlyContinue
-if ($consoleNode) {
-    & $consoleNode.Source --test (Join-Path $PSScriptRoot 'tests\runtime-console.test.mjs') (Join-Path $PSScriptRoot 'tests\public-site.test.mjs') (Join-Path $PSScriptRoot 'tests\public-repository-audit.test.mjs') (Join-Path $PSScriptRoot 'tests\video-sidecar-source.test.mjs')
+Push-Location $PSScriptRoot
+try {
+    & npm.cmd test
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-} else {
-    throw 'Node.js is required for Runtime Console security and rendering tests.'
+}
+finally {
+    Pop-Location
 }
 
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

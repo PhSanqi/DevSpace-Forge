@@ -31,14 +31,14 @@ namespace DevSpaceControlPlatform
 
             var cloudflareMenu = new ToolStripMenuItem("Cloudflare Tunnel");
             cloudflareMenu.DropDownItems.Add("启动", null, delegate { RunAction(supervisor.StartCloudflare); });
-            cloudflareMenu.DropDownItems.Add("停止", null, delegate { RunAction(supervisor.StopCloudflare); });
-            cloudflareMenu.DropDownItems.Add("重新启动", null, delegate { RunAction(supervisor.RestartCloudflare); });
+            cloudflareMenu.DropDownItems.Add("停止", null, delegate { RunConfirmedAction(supervisor.StopCloudflare); });
+            cloudflareMenu.DropDownItems.Add("重新启动", null, delegate { RunConfirmedAction(supervisor.RestartCloudflare); });
             menu.Items.Add(cloudflareMenu);
 
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("启动全部", null, delegate { RunAction(supervisor.StartAll); });
-            menu.Items.Add("停止全部", null, delegate { RunAction(supervisor.StopAll); });
-            menu.Items.Add("重新启动全部", null, delegate { RunAction(supervisor.RestartAll); });
+            menu.Items.Add("停止全部", null, delegate { RunConfirmedAction(supervisor.StopAll); });
+            menu.Items.Add("重新启动全部", null, delegate { RunConfirmedAction(supervisor.RestartAll); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出并停止服务", null, delegate { ExitApplication(); });
 
@@ -79,6 +79,21 @@ namespace DevSpaceControlPlatform
         private void RunAction(Action action)
         {
             RunAction(action, true);
+        }
+
+        private void RunConfirmedAction(Func<bool> action)
+        {
+            try
+            {
+                if (!action())
+                    MessageBox.Show("Cloudflare Tunnel 停止未确认，进程可能仍在运行；本次操作未完成，请稍后重试。",
+                        "服务操作警告", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                mainForm.RefreshServiceStatus();
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(exception.Message, "服务操作失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void RunAction(Action action, bool showError)

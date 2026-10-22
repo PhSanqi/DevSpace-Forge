@@ -60,6 +60,14 @@ devspace agents continue <id> "<follow-up brief>"
 devspace agents wait <id>
 ```
 
+## Stop an active turn
+
+Stop a turn when its work is no longer needed. Stopping is scoped to the current project, preserves the durable agent record as `stopped`, and does not delete the agent:
+
+```bash
+devspace agents stop <id>
+```
+
 ## Good uses
 
 - Review a change for correctness, security, or missing tests.

@@ -3,6 +3,8 @@
   "name": "devspace-forge",
   "version": "0.6.14",
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "npm --prefix runtime-src run typecheck && npm --prefix control-ui run typecheck && npm --prefix desktop-shell run typecheck",
     "build:control-ui": "npm --prefix control-ui run build",
     "typecheck:control-ui": "npm --prefix control-ui run typecheck",
     "check:desktop-shell": "npm --prefix desktop-shell run typecheck"

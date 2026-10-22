@@ -2,6 +2,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withRuntimeRestartGuard } from './runtime-jobs-guard.mjs';
+import { readRuntimeSelection } from './runtime-rollback.mjs';
+import { createHash } from 'node:crypto';
 
 const clip=(value,n=250)=>String(value||'').slice(0,n);
 const run=(command,args,timeout=15000)=>{
@@ -100,12 +103,16 @@ export function createServiceController(options,{platform=process.platform,spawn
   }
   function runtime(){
     const root=path.join(options.platformRoot,'runtime');
-    let slot='';try{slot=readFileSync(path.join(root,'active-slot.txt'),'utf8').trim();}catch{}
+    const selection=readRuntimeSelection(options);
+    let slot=selection?.slot||'';
+    const pointer=path.join(root,'active-slot.txt');
+    if(!selection&&existsSync(pointer))slot=readFileSync(pointer,'utf8').trim();
     if(slot&&(!/^[A-Za-z0-9._-]+$/.test(slot)||slot==='.'||slot==='..'))throw new Error('Invalid active Runtime slot.');
     const dir=slot?path.join(root,'slots',slot):root;
-    const node=[path.join(dir,'node','node.exe'),path.join(dir,'node','bin','node.exe')].find(existsSync);
-    const pkg=[path.join(dir,'devspace','node_modules','@waishnav','devspace'),path.join(dir,'node_modules','@waishnav','devspace')].find(p=>existsSync(path.join(p,'dist','cli.js')));
+    const node=(selection?[path.join(dir,'node','node.exe')]:[path.join(dir,'node','node.exe'),path.join(dir,'node','bin','node.exe')]).find(existsSync);
+    const pkg=(selection?[path.join(dir,'devspace','node_modules','@waishnav','devspace')]:[path.join(dir,'devspace','node_modules','@waishnav','devspace'),path.join(dir,'node_modules','@waishnav','devspace')]).find(p=>existsSync(path.join(p,'dist','cli.js')));
     if(!node||!pkg)throw new Error('Bundled Runtime Node or DevSpace CLI is missing.');
+    if(selection&&(!existsSync(path.join(dir,'READY'))||!existsSync(path.join(pkg,'package.json'))||createHash('sha256').update(readFileSync(path.join(pkg,'dist','server.js'))).digest('hex')!==selection.server_sha256))throw new Error('Selected Runtime is incomplete or its hash changed; legacy mirror was not used.');
     return {node,cli:path.join(pkg,'dist','cli.js'),pkg,dir};
   }
   function available(name){
@@ -169,7 +176,8 @@ export function createServiceController(options,{platform=process.platform,spawn
     catch(error){
       unassigned.add(child);
       child.once('exit',()=>unassigned.delete(child));
-      const killed=runCommand('taskkill',['/PID',String(child.pid),'/T','/F'],15000);
+      // Only the Tunnel wrapper subtree is free of durable Runtime runners.
+      const killed=runCommand('taskkill',['/PID',String(child.pid),...(name==='tunnel'?['/T']:[]),'/F'],15000);
       if(!killed.ok)try{child.kill?.();}catch{}
       if(active(child)){
         let timer;
@@ -198,7 +206,8 @@ export function createServiceController(options,{platform=process.platform,spawn
     if(!Number.isSafeInteger(pid)||pid<1)return {ok:false,status:-1,stderr:'Owned process PID is unavailable.'};
     let onExit;
     const exited=new Promise(resolve=>{onExit=()=>resolve(true);child.once('exit',onExit);});
-    const killed=runCommand('taskkill',['/PID',String(pid),'/T','/F'],15000);
+    // Runtime descendants can include durable runners; only Tunnel uses /T.
+    const killed=runCommand('taskkill',['/PID',String(pid),...(name==='tunnel'?['/T']:[]),'/F'],15000);
     if(!killed.ok&&active(child)){
       child.off('exit',onExit);
       return {ok:false,status:-1,stderr:'Unable to stop owned process tree.'};
@@ -226,26 +235,34 @@ export function createServiceController(options,{platform=process.platform,spawn
       return redact(contents.split('\n').slice(-Math.min(500,Math.max(10,lines))-1).join('\n').slice(-60000));
     },
     shutdown:async()=>{
-      if(disposed)return;
+      if(disposed)return {ok:true};
       shuttingDown=true;
       try{
         await Promise.all(Object.values(starting).filter(Boolean));
-        for(const name of ['tunnel','devspace'])if(active(children[name])){
-          const result=await stop(name);
+        if(active(children.tunnel)){
+          const result=await stop('tunnel');
           if(!result.ok)throw new Error(result.stderr);
         }
+        const result=await withRuntimeRestartGuard(options,async()=>{
+          if(active(children.devspace)){
+            const stopped=await stop('devspace');
+            if(!stopped.ok)throw new Error(stopped.stderr);
+          }
+          return {ok:true};
+        });
         if([...unassigned].some(active))throw new Error('Unassigned process exit was not confirmed.');
-        processJob?.close();
+        // A blocked shutdown must also preserve Runtime when our Job handle closes.
+        processJob?.close({preserveProcesses:!result.ok});
+        if(!result.ok){
+          children.devspace?.unref?.();
+          children.devspace?.stdout?.unref?.();
+          children.devspace?.stderr?.unref?.();
+        }
         disposed=true;
+        return result;
       }finally{
         if(!disposed)shuttingDown=false;
       }
-    },
-    forceStopOwned:()=>{
-      let attempted=false;
-      for(const name of ['tunnel','devspace'])if(active(children[name]))
-        {attempted=true;runCommand('taskkill',['/PID',String(children[name].pid),'/T','/F'],5000);}
-      return {ok:!attempted,confirmed:!attempted};
     }
   };
 }

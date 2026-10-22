@@ -5,6 +5,7 @@ import {
   captureAgentProviderResult,
   isProgrammerDefect,
 } from "./local-agent-errors.js";
+import { bindLocalAgentAbort, localAgentCancelledError } from "./local-agent-cancellation.js";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import type {
   LocalAgentDriver,
@@ -28,6 +29,7 @@ const CLAUDE_WORKSPACE_ALLOWED_TOOLS = [
 
 export interface ClaudeQueryLike extends AsyncIterable<unknown> {
   close(): void;
+  interrupt(): Promise<void>;
   setPermissionMode(mode: ClaudePermissionMode): Promise<void>;
   applyFlagSettings(settings: Record<string, unknown>): Promise<void>;
   setModel?(model?: string): Promise<void>;
@@ -106,6 +108,9 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
             message: "Claude runtime is not running.",
           });
         }
+        if (input.signal?.aborted) throw localAgentCancelledError("claude", "run");
+        const removeAbort = bindLocalAgentAbort(input.signal, () => this.query.interrupt());
+        try {
         if (this.providerSessionId) await callbacks?.onSessionId?.(this.providerSessionId);
         const flagSettings = claudeAuthoritySettings(input.workspaceRoot, input.writeMode);
         if (input.effort) {
@@ -129,6 +134,7 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
           try {
             next = await this.iterator.next();
           } catch (error) {
+            if (input.signal?.aborted) throw localAgentCancelledError("claude", "run", error);
             this.alive = false;
             if (isProgrammerDefect(error)) throw error;
             throw new AgentProviderUnavailableError({
@@ -141,6 +147,7 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
             });
           }
           if (next.done) {
+            if (input.signal?.aborted) throw localAgentCancelledError("claude", "run");
             this.alive = false;
             throw new AgentProviderProtocolError({
               code: "PROVIDER_PROTOCOL_ERROR",
@@ -161,6 +168,7 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
             }
           }
           if (record?.type !== "result") continue;
+          if (input.signal?.aborted) throw localAgentCancelledError("claude", "run");
 
           const resultError = claudeResultError(record);
           if (resultError) {
@@ -190,6 +198,9 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
             items,
           };
         }
+        } finally {
+          removeAbort();
+        }
       },
     });
   }
@@ -213,6 +224,7 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
 
 export class ClaudeLocalAgentDriver implements LocalAgentDriver {
   readonly provider = "claude" as const;
+  readonly capabilities = { turns: { interrupt: true } } as const;
   readonly idleTimeoutMs = 3 * 60_000;
 
   constructor(

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import {
   CodexLocalAgentDriver,
   codexCommandEnvironment,
   parseCodexVersion,
+  raceTurnAbort,
   resolveCodexCommand,
   sandboxFor,
 } from "./local-agent-codex.js";
@@ -22,6 +24,25 @@ assert.equal(
   codexCommandEnvironment({ CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "test", PATH: "/tmp/bin" }).CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
   undefined,
 );
+
+{
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    let rejectLater!: (error: Error) => void;
+    const completion = new Promise<string>((_, reject) => { rejectLater = reject; });
+    await assert.rejects(raceTurnAbort(completion, controller.signal));
+    rejectLater(new Error("completion failed after the race was abandoned"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  assert.deepEqual(unhandled, [], "an early-aborted race must not leave an unhandled rejection");
+}
 
 if (process.platform !== "win32") {
   const root = await mkdtemp(join(tmpdir(), "devspace-codex-app-server-test-"));
@@ -42,8 +63,13 @@ if (process.platform !== "win32") {
   );
 
   const command = join(root, "fake-codex");
+  const startedMarker = join(root, "turn-started.marker");
+  const interruptedMarker = join(root, "turn-interrupted.marker");
   await writeFile(command, `#!/usr/bin/env node
 import readline from "node:readline";
+import { writeFileSync } from "node:fs";
+const startedMarker = ${JSON.stringify(startedMarker)};
+const interruptedMarker = ${JSON.stringify(interruptedMarker)};
 let turn = 0;
 const output = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -60,10 +86,19 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     output({ id: message.id, result: {} });
     return;
   }
+  if (message.method === "turn/interrupt") {
+    writeFileSync(interruptedMarker, String(message.params.turnId));
+    output({ id: message.id, result: {} });
+    return;
+  }
   if (message.method === "turn/start") {
     turn += 1;
     const turnId = "turn_" + turn;
     output({ id: message.id, result: { turn: { id: turnId } } });
+    if (message.params.input[0].text === "hold") {
+      writeFileSync(startedMarker, turnId);
+      return;
+    }
     setImmediate(() => {
       if (message.params.input[0].text === "fail") {
         output({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: turnId, status: "failed", error: { message: "fake failure" } } } });
@@ -158,6 +193,24 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(policy.isOk(), true);
     if (policy.isErr()) throw policy.error;
     assert.deepEqual(JSON.parse(policy.value.finalResponse), { type: "workspaceWrite", networkAccess: true });
+
+    const abortController = new AbortController();
+    const held = runtime.run({
+      prompt: "hold",
+      workspaceRoot: "/tmp/project",
+      providerSessionId: first.providerSessionId ?? undefined,
+      signal: abortController.signal,
+    });
+    await waitForPath(startedMarker);
+    abortController.abort();
+    const heldResult = await held;
+    assert.equal(heldResult.isErr(), true);
+    if (heldResult.isErr()) {
+      assert.equal(heldResult.error.code, "PROVIDER_CANCELLED");
+      assert.equal(heldResult.error.provider, "codex");
+      assert.equal(heldResult.error.retryable, false);
+    }
+    await waitForPath(interruptedMarker);
     await runtime.releaseSession("thread_new");
   } finally {
     await runtime.close();
@@ -171,4 +224,12 @@ assert.equal(unavailable.isErr(), true);
 if (unavailable.isErr()) {
   assert.equal(unavailable.error.code, "PROVIDER_UNAVAILABLE");
   assert.equal(unavailable.error.retryable, false);
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!existsSync(path) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(existsSync(path), true, `expected ${path} to exist`);
 }

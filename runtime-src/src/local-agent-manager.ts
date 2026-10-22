@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { Result, type Result as BetterResult } from "better-result";
 import {
   AgentConflictError,
+  AgentProviderCancelledError,
   AgentScopeError,
   AgentStoreError,
   AgentTargetError,
@@ -30,7 +31,10 @@ import {
   type LocalAgentRuntimeContext,
   type LocalAgentWriteMode,
 } from "./local-agent-runtime.js";
-import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
+import {
+  LocalAgentRuntimePool,
+  type LocalAgentRuntimeTermination,
+} from "./local-agent-runtime-pool.js";
 import { assertAllowedPath } from "./roots.js";
 import {
   isSubagentProviderEnabled,
@@ -66,6 +70,10 @@ export interface LocalAgentManagerOptions {
   allowedRoots?: readonly string[];
   logger?: LocalAgentManagerLogger;
   subagents: SubagentsConfig;
+  /** Graceful interrupt wait before the stop timeout fallback runs. */
+  stopTimeoutMs?: number;
+  /** Post-fallback wait for the hung turn to settle before ownership is released. */
+  stopFallbackTimeoutMs?: number;
 }
 
 export type AgentStartError = AgentTargetError | AgentScopeError | AgentConflictError | AgentStoreError;
@@ -73,6 +81,7 @@ export type AgentContinueError = AgentStartError;
 export type AgentLookupError = AgentTargetError | AgentScopeError | AgentStoreError;
 export type AgentListError = AgentScopeError | AgentStoreError;
 export type AgentWaitError = AgentLookupError;
+export type AgentStopError = AgentLookupError | AgentConflictError;
 
 export type LocalAgentWaitResult =
   | { id: string; status: "running"; wait?: "timeout" }
@@ -80,9 +89,23 @@ export type LocalAgentWaitResult =
   | { id: string; status: "failed"; error: { code: string; message: string; retryable: boolean } }
   | { id: string; status: "stopped"; error?: { code: string; message: string; retryable: boolean } };
 
+/** Upper bound for a graceful provider interrupt before the turn is recorded stopped. */
+const LOCAL_AGENT_STOP_TIMEOUT_MS = 15_000;
+/** Upper bound for the hung turn to settle after its runtime was terminated. */
+const LOCAL_AGENT_STOP_FALLBACK_TIMEOUT_MS = 5_000;
+
 interface ActiveLocalAgentTurn {
   turnId: number;
   completion: Promise<void>;
+  abortController: AbortController;
+  startedAt: number;
+  /** Set when the bounded stop wait expired; the late completion must not overwrite the record. */
+  stopRecorded: boolean;
+  /**
+   * Set once the turn reached the runtime pool; closes the provider runtime so
+   * a provider that ignored its interrupt rejects the hung run.
+   */
+  terminateRuntime?: () => Promise<LocalAgentRuntimeTermination>;
 }
 
 /**
@@ -99,6 +122,8 @@ export class LocalAgentManager {
   private readonly allowedRoots?: readonly string[];
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
+  private readonly stopTimeoutMs: number;
+  private readonly stopFallbackTimeoutMs: number;
   private readonly activeTurns = new Map<string, ActiveLocalAgentTurn>();
   private accepting = true;
   private closePromise?: Promise<void>;
@@ -112,6 +137,8 @@ export class LocalAgentManager {
     this.allowedRoots = options.allowedRoots;
     this.logger = options.logger;
     this.subagents = options.subagents;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? LOCAL_AGENT_STOP_TIMEOUT_MS;
+    this.stopFallbackTimeoutMs = options.stopFallbackTimeoutMs ?? LOCAL_AGENT_STOP_FALLBACK_TIMEOUT_MS;
   }
 
   reconcileActiveRuns(message?: string): BetterResult<number, AgentStoreError> {
@@ -259,6 +286,80 @@ export class LocalAgentManager {
     return Result.ok(results);
   }
 
+  /**
+   * Stop the agent's active turn. The manager owns one AbortController per
+   * turn; drivers translate it into their provider-native interrupt. The
+   * durable record and turn end as `stopped` (never `error`).
+   */
+  async stop(
+    agentId: string,
+    scope: LocalAgentWorkspaceScope,
+  ): Promise<BetterResult<LocalAgentRecord, AgentStopError>> {
+    const record = this.get(agentId, scope);
+    if (record.isErr()) return record;
+    if (record.value.status === "stopped") return Result.ok(record.value);
+    const active = this.activeTurns.get(agentId);
+    if (!active) {
+      return Result.err(new AgentConflictError({
+        code: "AGENT_CONFLICT",
+        agentId,
+        operation: "stop",
+        retryable: false,
+        message: `Agent ${agentId} does not have a running turn.`,
+      }));
+    }
+    const provider = record.value.provider;
+    const driver = isLocalAgentProvider(provider) ? this.drivers.get(provider) : undefined;
+    if (!driver?.capabilities.turns.interrupt) {
+      return Result.err(new AgentConflictError({
+        code: "AGENT_CONFLICT",
+        agentId,
+        operation: "stop",
+        retryable: false,
+        message: `Agent ${agentId} provider does not support stopping an active turn.`,
+      }));
+    }
+    active.abortController.abort();
+    const settled = await waitForTurnSettlement(active.completion, this.stopTimeoutMs);
+    if (settled) return this.get(agentId, scope);
+
+    // The provider ignored its interrupt. Record the stop now so callers do
+    // not wait forever; the late turn result is discarded in runTurn.
+    active.stopRecorded = true;
+    const persisted = this.store.finishTurnResult(agentId, active.turnId, {
+      status: "stopped",
+      error: "Subagent turn did not settle after it was stopped.",
+      errorCode: "PROVIDER_CANCELLED",
+      errorRetryable: false,
+    });
+    this.logStoppedTurn(record.value, active.startedAt, persisted.isErr());
+
+    // Closing the provider runtime is what makes a run that ignored the
+    // interrupt reject. A runtime shared with another turn is left running.
+    const fallback = active.terminateRuntime
+      ? await active.terminateRuntime()
+      : "unavailable";
+    const settledAfterFallback = await waitForTurnSettlement(
+      active.completion,
+      this.stopFallbackTimeoutMs,
+    );
+    if (!settledAfterFallback && this.activeTurns.get(agentId) === active) {
+      // The turn stays hung, but this agent must remain continuable. Ownership
+      // is released; the late completion will not touch a newer turn.
+      this.activeTurns.delete(agentId);
+    }
+    this.log("warn", "agent_run_stop_timeout", {
+      provider: record.value.provider,
+      agentId,
+      timeoutMs: this.stopTimeoutMs,
+      fallback,
+      settledAfterFallback,
+      persistenceFailed: persisted.isErr(),
+    });
+    if (persisted.isErr()) return persisted;
+    return this.get(agentId, scope);
+  }
+
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.accepting = false;
@@ -314,11 +415,26 @@ export class LocalAgentManager {
     if (begun.isErr()) return begun;
     // Defer invocation until after the tracking entry is visible. This keeps
     // cleanup correct even if runTurn later gains a synchronous completion path.
-    const turn = Promise.resolve().then(() => (
-      this.runTurn(begun.value.agent, begun.value.turn.id, prompt, overrides, workspaceId)
+    const abortController = new AbortController();
+    const active: ActiveLocalAgentTurn = {
+      turnId: begun.value.turn.id,
+      completion: Promise.resolve(),
+      abortController,
+      startedAt: Date.now(),
+      stopRecorded: false,
+    };
+    active.completion = Promise.resolve().then(() => (
+      this.runTurn(
+        begun.value.agent,
+        begun.value.turn.id,
+        prompt,
+        overrides,
+        workspaceId,
+        active,
+      )
     ));
-    this.activeTurns.set(record.id, { turnId: begun.value.turn.id, completion: turn });
-    void turn.catch(() => undefined);
+    this.activeTurns.set(record.id, active);
+    void active.completion.catch(() => undefined);
     return Result.ok(begun.value.agent);
   }
 
@@ -327,9 +443,11 @@ export class LocalAgentManager {
     turnId: number,
     prompt: string,
     overrides: RunOverrides,
-    workspaceId?: string,
+    workspaceId: string | undefined,
+    active: ActiveLocalAgentTurn,
   ): Promise<void> {
     const startedAt = Date.now();
+    const signal = active.abortController.signal;
     this.log("info", "agent_run_started", {
       provider: record.provider,
       agentId: record.id,
@@ -375,6 +493,7 @@ export class LocalAgentManager {
         effort: input.value.effort,
         agentDir: this.agentDir,
       };
+      active.terminateRuntime = () => this.pool.terminate(driver.value, context, "turn_stop_timeout");
       const callbacks: LocalAgentRunCallbacks = {
         onSessionId: (providerSessionId) => {
           const current = this.store.getByIdResult(record.id);
@@ -384,9 +503,20 @@ export class LocalAgentManager {
           if (updated.isErr()) throw updated.error;
         },
       };
-      const result = await this.pool.run(driver.value, context, input.value, callbacks);
+      const result = await this.pool.run(
+        driver.value,
+        context,
+        { ...input.value, signal },
+        callbacks,
+      );
+      if (active.stopRecorded) return;
       if (result.isErr()) {
         this.persistRunError(record, turnId, result.error, startedAt);
+        return;
+      }
+      if (signal.aborted) {
+        // The driver completed anyway after the stop request. Stopping wins.
+        this.persistRunStopped(record, turnId, startedAt);
         return;
       }
       const runResult = result.value;
@@ -406,6 +536,9 @@ export class LocalAgentManager {
         durationMs: Math.max(0, Date.now() - startedAt),
       });
     } catch (error) {
+      // The stop timeout already recorded this turn as stopped; a late
+      // provider failure must not overwrite that record.
+      if (active.stopRecorded) return;
       if (isLocalAgentError(error)) {
         this.persistRunError(record, turnId, error, startedAt);
         return;
@@ -427,7 +560,9 @@ export class LocalAgentManager {
       });
       throw error;
     } finally {
-      this.activeTurns.delete(record.id);
+      // A stop that timed out may have released ownership so the agent can be
+      // continued; never delete the newer turn's entry in that case.
+      if (this.activeTurns.get(record.id) === active) this.activeTurns.delete(record.id);
     }
   }
 
@@ -437,13 +572,14 @@ export class LocalAgentManager {
     error: LocalAgentError,
     startedAt: number,
   ): void {
+    const cancelled = AgentProviderCancelledError.is(error);
     const persisted = this.store.finishTurnResult(record.id, turnId, {
-      status: "failed",
+      status: cancelled ? "stopped" : "failed",
       error: error.message,
       errorCode: error.code,
       errorRetryable: error.retryable,
     });
-    this.log("error", "agent_run_failed", {
+    this.log(cancelled ? "info" : "error", cancelled ? "agent_run_stopped" : "agent_run_failed", {
       provider: record.provider,
       agentId: record.id,
       providerSessionIdPrefix: record.providerSessionId?.slice(0, 8),
@@ -452,6 +588,35 @@ export class LocalAgentManager {
       error: error.message,
       causeType: safeCauseType("cause" in error ? error.cause : undefined),
       persistenceFailed: persisted.isErr(),
+    });
+  }
+
+  private persistRunStopped(
+    record: LocalAgentRecord,
+    turnId: number,
+    startedAt: number,
+  ): void {
+    const persisted = this.store.finishTurnResult(record.id, turnId, {
+      status: "stopped",
+      error: "Subagent turn was stopped.",
+      errorCode: "PROVIDER_CANCELLED",
+      errorRetryable: false,
+    });
+    this.logStoppedTurn(record, startedAt, persisted.isErr());
+  }
+
+  private logStoppedTurn(
+    record: LocalAgentRecord,
+    startedAt: number,
+    persistenceFailed: boolean,
+  ): void {
+    this.log("info", "agent_run_stopped", {
+      provider: record.provider,
+      agentId: record.id,
+      providerSessionIdPrefix: record.providerSessionId?.slice(0, 8),
+      durationMs: Math.max(0, Date.now() - startedAt),
+      errorCode: "PROVIDER_CANCELLED",
+      persistenceFailed,
     });
   }
 
@@ -667,6 +832,22 @@ function agentNotFound(agentId: string): AgentTargetError {
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+async function waitForTurnSettlement(turn: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = await Promise.race([
+      turn.then(() => "settled" as const, () => "settled" as const),
+      new Promise<"timeout">((resolveTimeout) => {
+        // Not unref'd: the stop path actively awaits this bound.
+        timer = setTimeout(() => resolveTimeout("timeout"), timeoutMs);
+      }),
+    ]);
+    return result === "settled";
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function waitForTurns(

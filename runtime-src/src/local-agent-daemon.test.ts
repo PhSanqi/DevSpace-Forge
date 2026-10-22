@@ -80,6 +80,10 @@ class FakeManager implements LocalAgentDaemonManager {
     return Result.ok([record]);
   }
 
+  async stop(_agentId: string, _scope: { workspaceId: string; workspaceRoot: string }) {
+    return Result.ok({ ...record, status: "stopped" } as LocalAgentRecord);
+  }
+
   async wait(agentIds: readonly string[], _scope: unknown, _timeoutMs?: number, signal?: AbortSignal) {
     this.waitStarted = true;
     if (this.blockWaitUntilAbort) {
@@ -173,6 +177,7 @@ try {
   assert.deepEqual(unwrap(await client.wait([record.id], recordScope, 0)), [
     { id: record.id, status: "running" },
   ]);
+  assert.equal(unwrap(await client.stopAgent(record.id, recordScope)).status, "stopped");
   assert.equal(unwrap(await client.status()).state, "ready");
 
   unwrap(await client.stop());

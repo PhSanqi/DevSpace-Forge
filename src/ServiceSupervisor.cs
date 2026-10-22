@@ -79,6 +79,7 @@ namespace DevSpaceControlPlatform
         private int cloudflarePrecheckFailureCount;
         private bool devSpaceDesired;
         private bool cloudflareDesired;
+        private bool cloudflareStopUnconfirmed;
         private bool devSpaceOriginHealthy;
         private DateTime devSpaceStartedUtc = DateTime.MinValue;
         private DateTime cloudflareStartedUtc = DateTime.MinValue;
@@ -354,29 +355,36 @@ namespace DevSpaceControlPlatform
             StartCloudflare();
         }
 
-        public void StopAll()
+        public bool StopAll()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try
             {
                 // Block before stopping Tunnel: a refusal must leave both
                 // services unchanged, including the current public endpoint.
                 StopDevSpaceCore();
-                StopCloudflare();
+                return StopCloudflare();
             }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
-        public void RestartAll()
+        public bool RestartAll()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try
             {
                 StopDevSpaceCore();
-                StopCloudflare();
+                if (!StopCloudflare())
+                {
+                    AddServiceLog("ControlPlatform", "Cloudflare 停止未确认，已取消全部重启。");
+                    return false;
+                }
                 StartAll();
+                return true;
             }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         public void StartDevSpace()
@@ -442,9 +450,10 @@ namespace DevSpaceControlPlatform
 
         public void StopDevSpace()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try { StopDevSpaceCore(); }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         private void StopDevSpaceCore()
@@ -486,18 +495,26 @@ namespace DevSpaceControlPlatform
 
         public void RestartDevSpace()
         {
-            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot);
+            string gateNonce;
+            var gate = SetupInstaller.AcquireRuntimeUpdateGate(platformRoot, platformRoot, out gateNonce);
             try
             {
                 StopDevSpaceCore();
                 StartDevSpace();
             }
-            finally { Directory.Delete(gate); }
+            finally { SetupInstaller.ReleaseRuntimeUpdateGate(gate, gateNonce); }
         }
 
         public void StartCloudflare()
         {
-            lock (sync) if (IsAlive(cloudflareProcess)) return;
+            lock (sync)
+            {
+                if (IsAlive(cloudflareProcess)) return;
+                // A previous stop that was not confirmed may still own the
+                // Tunnel port; never start a second cloudflared beside it.
+                if (cloudflareStopUnconfirmed)
+                    throw new InvalidOperationException("上一个 cloudflared 进程的停止尚未确认，不能启动新的 Tunnel。");
+            }
 
             var settings = LoadSettings();
             var protocolArgument = CloudflareTunnelProtocol.CommandArgument(settings.CloudflaredProtocol, "auto");
@@ -563,25 +580,46 @@ namespace DevSpaceControlPlatform
             process.BeginErrorReadLine();
         }
 
-        public void StopCloudflare()
+        public bool StopCloudflare()
         {
             Process process;
+            lock (sync) process = cloudflareProcess;
+            if (!StopProcess(process))
+            {
+                // Keep the handle and mark the state so a later stop or the
+                // connectivity monitor can retry instead of leaking the
+                // process or reporting a stop that did not happen.
+                lock (sync)
+                {
+                    cloudflareStopUnconfirmed = true;
+                    cloudflareMessage = "停止未确认 - 进程可能仍在运行";
+                    cloudflareDesired = false;
+                }
+                AddServiceLog("ControlPlatform", "Cloudflare 停止未确认，稍后将重试。");
+                AppendLog("cloudflared.log", "[ControlPlatform] Stop could not be confirmed; will retry.");
+                return false;
+            }
             lock (sync)
             {
-                process = cloudflareProcess;
-                cloudflareProcess = null;
+                cloudflareStopUnconfirmed = false;
+                if (ReferenceEquals(cloudflareProcess, process)) cloudflareProcess = null;
                 cloudflareMessage = "已停止";
                 cloudflareDesired = false;
                 cloudflareConnections.Clear();
                 dynamicPublicBaseUrl = null;
             }
-            StopProcess(process);
+            return true;
         }
 
-        public void RestartCloudflare()
+        public bool RestartCloudflare()
         {
-            StopCloudflare();
+            if (!StopCloudflare())
+            {
+                AddServiceLog("ControlPlatform", "Cloudflare 停止未确认，已取消重新启动。");
+                return false;
+            }
             StartCloudflare();
+            return true;
         }
 
         public void ApplyWindowsAutoStart(bool enabled)
@@ -680,6 +718,7 @@ namespace DevSpaceControlPlatform
             var publicBaseUrl = PublicBaseUrl(settings);
             bool recoverDevSpace;
             bool recoverCloudflare;
+            bool retryCloudflareStop;
             bool devAlive;
             bool probeDevSpace;
             bool probeEndpointReadiness;
@@ -758,6 +797,7 @@ namespace DevSpaceControlPlatform
                 var cloudflareAlive = IsAlive(cloudflareProcess);
                 recoverCloudflare = cloudflareDesired &&
                     (!cloudflareAlive || (cloudflareConnections.Count == 0 && (now - cloudflareStartedUtc).TotalSeconds >= 30));
+                retryCloudflareStop = cloudflareStopUnconfirmed;
                 var readiness = ReadinessFormatter.Format(
                     IsAlive(devSpaceProcess),
                     localEndpointReady,
@@ -773,8 +813,9 @@ namespace DevSpaceControlPlatform
                     lastReadinessStatus = readiness;
                     readinessChange = readiness;
                 }
-                if ((recoverDevSpace || recoverCloudflare) && (now - lastRecoveryAttemptUtc).TotalSeconds < 8) return;
-                if (recoverDevSpace || recoverCloudflare) lastRecoveryAttemptUtc = now;
+                if ((recoverDevSpace || recoverCloudflare || retryCloudflareStop) &&
+                    (now - lastRecoveryAttemptUtc).TotalSeconds < 8) return;
+                if (recoverDevSpace || recoverCloudflare || retryCloudflareStop) lastRecoveryAttemptUtc = now;
             }
 
             if (!string.IsNullOrWhiteSpace(readinessChange))
@@ -783,8 +824,9 @@ namespace DevSpaceControlPlatform
                 AddServiceLog("Readiness", readinessChange);
             }
 
+            if (retryCloudflareStop) StopCloudflare();
             if (recoverDevSpace) RecoverService("DevSpace", RestartDevSpace);
-            if (recoverCloudflare) RecoverService("Cloudflare", RestartCloudflare);
+            if (recoverCloudflare) RecoverService("Cloudflare", delegate { RestartCloudflare(); });
         }
 
         private void RecoverService(string name, Action recovery)
@@ -917,43 +959,6 @@ namespace DevSpaceControlPlatform
                 !string.IsNullOrWhiteSpace(settings.FixedHostname))
                 return PublicEndpoint.BaseUrl(settings.FixedHostname);
             return null;
-        }
-
-        private string ResolveDevSpacePackageRoot()
-        {
-            var candidates = new List<string>
-            {
-                Path.Combine(platformRoot, "runtime", "devspace", "node_modules", "@waishnav", "devspace")
-            };
-            var parent = Directory.GetParent(platformRoot);
-            if (parent != null) candidates.Add(Path.Combine(parent.FullName, "runtime", "devspace", "node_modules", "@waishnav", "devspace"));
-            foreach (var candidate in candidates)
-                if (File.Exists(Path.Combine(candidate, "package.json"))) return candidate;
-            throw new DirectoryNotFoundException("找不到独立 DevSpace runtime package。");
-        }
-
-        private static string ResolveNodePath()
-        {
-            var candidate = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe");
-            if (File.Exists(candidate)) return candidate;
-            foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator))
-            {
-                if (string.IsNullOrWhiteSpace(directory)) continue;
-                candidate = Path.Combine(directory.Trim(), "node.exe");
-                if (File.Exists(candidate)) return candidate;
-            }
-            throw new FileNotFoundException("找不到 node.exe。", "node.exe");
-        }
-
-        private string ResolveCloudflaredPath()
-        {
-            var candidates = new[]
-            {
-                Path.Combine(platformRoot, "cloudflared.exe"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "cloudflared", "cloudflared.exe")
-            };
-            foreach (var candidate in candidates) if (File.Exists(candidate)) return candidate;
-            throw new FileNotFoundException("找不到 cloudflared.exe。", candidates[candidates.Length - 1]);
         }
 
         private void EnsureOwnerAuth()
@@ -1199,7 +1204,12 @@ namespace DevSpaceControlPlatform
                 {
                     output = process.StandardOutput.ReadToEnd();
                     process.StandardError.ReadToEnd();
-                    process.WaitForExit(3000);
+                    if (!process.WaitForExit(3000))
+                    {
+                        try { process.Kill(); } catch { }
+                        process.WaitForExit(1000);
+                        return;
+                    }
                     if (!process.HasExited || process.ExitCode != 0 || string.IsNullOrWhiteSpace(output)) return;
                 }
 
@@ -1292,24 +1302,25 @@ namespace DevSpaceControlPlatform
             return end <= line.Length ? line.Substring(start, end - start) : string.Empty;
         }
 
-        private static void StopProcess(Process process)
+        private static bool StopProcess(Process process)
         {
-            if (process == null) return;
+            if (process == null) return true;
             try
             {
                 if (!process.HasExited)
                 {
                     process.Kill();
-                    process.WaitForExit(3000);
+                    if (!process.WaitForExit(3000)) return false;
                 }
+                if (!process.HasExited) return false;
             }
             catch
             {
+                // The caller keeps the handle so a later stop can retry.
+                return false;
             }
-            finally
-            {
-                process.Dispose();
-            }
+            process.Dispose();
+            return true;
         }
 
         private static bool IsAlive(Process process)

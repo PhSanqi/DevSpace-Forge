@@ -1,4 +1,7 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createConsoleServer, parseOptions, resolveRunningPackage, restoreWindowsManagedServices, runtimeInfo, rollbackTargets, snapshot } from '../ops/runtime-console.mjs';
-import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, switchRuntime } from '../ops/runtime-rollback.mjs';
+import { RUNTIME_SERVICE_RESTART_TIMEOUT_MS, restartUserService, stageRuntimeSlot, switchRuntime } from '../ops/runtime-rollback.mjs';
 import { runtimeRestartPreflight, withRuntimeRestartGuard } from '../ops/runtime-jobs-guard.mjs';
 import { buildCloudflaredArgs, quickTunnelOriginFromText } from '../ops/managed-cloudflared.mjs';
 import { gatewayRoute, resolveInstance, withGatewaySecurityHeaders } from '../ops/cloudflare-gateway-worker.mjs';
@@ -27,8 +30,23 @@ const fixture=(prefix='devspace-console-')=>{
     writeFileSync(path.join(dir,'dist','server.js'),'actual server build');
     writeFileSync(path.join(dir,'dist','cli.js'),'cli');
   }
-  return {root,declared,actual,clean:()=>rmSync(root,{recursive:true,force:true})};
+  const slot=stageFixtureSlot(root);
+  return {root,declared,actual,slot,clean:()=>rmSync(root,{recursive:true,force:true})};
 };
+// A real runtime/slots/<id> layout is the only valid rollback target. The
+// launcher dry-run is stubbed so the fixture needs no executables.
+function stageFixtureSlot(root,{version='1.1.0-beta.4.slot.1'}={}){
+  const source=path.join(root,'runtime-staging-source');
+  mkdirSync(path.join(source,'node','bin'),{recursive:true});
+  writeFileSync(path.join(source,'node','bin','node'),'node placeholder',{mode:0o755});
+  writeFileSync(path.join(source,'node','node.exe'),'node placeholder',{mode:0o755});
+  const pkg=path.join(source,'devspace','node_modules','@waishnav','devspace');
+  mkdirSync(path.join(pkg,'dist'),{recursive:true});
+  writeFileSync(path.join(pkg,'package.json'),JSON.stringify({version}));
+  writeFileSync(path.join(pkg,'dist','cli.js'),'slot cli');
+  writeFileSync(path.join(pkg,'dist','server.js'),'slot server build');
+  return stageRuntimeSlot({platformRoot:root},source,{dryRun:()=>{}});
+}
 const testLifecycleController=()=>({
   available:()=>true,autostartAvailable:true,
   state:()=>({status:'active',enabled:'enabled',pid:123}),
@@ -210,6 +228,59 @@ test('Windows uses the shared job gate without invoking Linux systemd',{skip:pro
     assert.equal(existsSync(path.join(state,'.runtime-switch-gate')),false);
   }finally{f.clean();}
 });
+test('runtime guard release retries rename contention and falls back after five failures',async(t)=>{
+  const f=fixture();
+  const originalRename=fs.renameSync;
+  const warnings=t.mock.method(console,'warn',()=>{});
+  let failures=2;
+  let attempts=0;
+  const rename=t.mock.method(fs,'renameSync',(source,destination)=>{
+    if(String(destination).includes('.runtime-switch-gate.released-')&&++attempts<=failures){
+      throw Object.assign(new Error('synthetic handle contention'),{code:'EBUSY'});
+    }
+    return originalRename(source,destination);
+  });
+  syncBuiltinESMExports();
+  try{
+    const state=path.join(f.root,'guard-release');
+    const gate=path.join(state,'.runtime-switch-gate');
+    for(failures of [2,5]){
+      attempts=0;
+      const result=await withRuntimeRestartGuard({stateDir:state},()=>({ok:true,status:200}));
+      assert.equal(result.ok,true);
+      assert.equal(attempts,failures===5?5:3);
+      assert.equal(existsSync(gate),false);
+    }
+    assert.equal(warnings.mock.callCount(),1);
+    failures=0;
+    assert.equal((await withRuntimeRestartGuard({stateDir:state},()=>({ok:true}))).ok,true);
+  }finally{rename.mock.restore();syncBuiltinESMExports();f.clean();}
+});
+test('macOS guard records the Runtime ps identity and fails closed on unavailable identity',async(t)=>{
+  const f=fixture();
+  const platform=Object.getOwnPropertyDescriptor(process,'platform');
+  Object.defineProperty(process,'platform',{...platform,value:'darwin'});
+  let result={status:0,stdout:'  synthetic process start  \n'};
+  const ps=t.mock.method(childProcess,'spawnSync',(command,args,options)=>{
+    assert.equal(command,'ps');
+    assert.deepEqual(args,['-p',String(process.pid),'-o','lstart=']);
+    assert.equal(options.timeout,2000);
+    return result;
+  });
+  syncBuiltinESMExports();
+  try{
+    const state=path.join(f.root,'guard-darwin');
+    for(const identity of ['ps:synthetic process start',null]){
+      if(identity===null)result={status:null,stdout:'',error:new Error('synthetic timeout')};
+      assert.equal((await withRuntimeRestartGuard({stateDir:state},()=>{
+        const owner=JSON.parse(readFileSync(path.join(state,'.runtime-switch-gate','owner.json'),'utf8'));
+        assert.equal(owner.processStartIdentity,identity);
+        return {ok:true};
+      })).ok,true);
+    }
+    assert.equal(ps.mock.callCount(),2);
+  }finally{ps.mock.restore();syncBuiltinESMExports();Object.defineProperty(process,'platform',platform);f.clean();}
+});
 test('Console refuses Runtime-affecting actions while durable jobs run, not Tunnel restart',async()=>{
   const f=fixture();
   const state=path.join(f.root,'devspace-state');
@@ -234,7 +305,7 @@ test('Console refuses Runtime-affecting actions while durable jobs run, not Tunn
     response=await post('/api/management/service',{target:'devspace',action:'restart'});
     assert.equal(response.status,409);
     assert.equal((await response.json()).reason_code,'active_jobs');
-    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>!x.current);
+    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>x.selectable&&!x.current);
     response=await post('/api/actions/rollback-runtime',{target_id:target.id,expected_sha256:target.server_sha256,observed_pid:123});
     assert.equal(response.status,409);
     const rollbackBlocked=await response.json();
@@ -327,7 +398,6 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   const prepare=read('prepare-offline-windows-runtime.ps1');
   const packer=read('package-release-windows-payload.ps1');
   assert.equal(/^VERSION="\$\{1:-([^}]+)\}"/m.exec(read('package-release-linux.sh'))?.[1],pkg.version);
-  assert.equal(/\$Version = '([^']+)'/.exec(read('package-release.ps1'))?.[1],pkg.version);
   assert.equal(/\$Version = '([^']+)'/.exec(packer)?.[1],pkg.version);
   assert.equal(/CANONICAL_RUNTIME_REF:/.test(workflow),false,'Release must not depend on a second Runtime ref');
   assert.equal(/CANONICAL_RUNTIME_VERSION: (\S+)/.exec(workflow)?.[1],runtimeVersion);
@@ -351,9 +421,6 @@ test('release scripts and workflow agree on Control, Runtime and Windows slot ve
   assert.ok(prepare.includes('$env:PATH = $previousPath'),'Windows package install must restore the caller PATH');
   assert.ok(prepare.includes("import Database from 'better-sqlite3'"),'Windows packaging must execute better-sqlite3 with the bundled Node');
   assert.ok(prepare.includes("new Database(':memory:')"),'Windows packaging must actually load and exercise the better-sqlite3 native binding');
-  const slotSmoke=read('test-runtime-slot.ps1');
-  assert.ok(slotSmoke.includes("import Database from 'better-sqlite3'"),'Windows slot validation must fail closed on native SQLite ABI mismatches');
-  assert.ok(slotSmoke.includes("new Database(':memory:')"),'Windows slot validation must exercise the SQLite native binding');
   const ci=read('.github/workflows/ci.yml');
   assert.ok(ci.includes('Validate Windows offline Runtime assembly'),'CI must exercise the real Windows offline assembly path');
   assert.ok(packer.includes(`runtime/slots/${slot}/READY`));
@@ -653,17 +720,27 @@ test('operator password requires explicit enablement, same origin and per-proces
     assert.equal(accepted.headers.get('cache-control'),'no-store');
   }finally{await new Promise(resolve=>server.close(resolve));}
 });
-test('runtime rollback target inventory includes actual candidate and excludes damaged packages',()=>{
+test('runtime rollback target inventory lists legacy directories as non-selectable inventory',async()=>{
   const f=fixture();
   try{
-    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
+    const opts={platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}};
+    const rt=runtimeInfo(opts);
     const candidates=rollbackTargets({platformRoot:f.root},rt);
-    assert.deepEqual(candidates.map(x=>x.id),['runtime-local13','runtime-local13-candidate']);
-    assert.equal(candidates[0].verified,true);
-    assert.equal(candidates[0].current,false);
-    assert.equal(candidates[1].current,true);
+    assert.deepEqual(candidates.map(x=>x.id),['runtime-local13','runtime-local13-candidate',f.slot.id]);
+    for(const legacy of candidates.filter(x=>x.id.startsWith('runtime-local'))){
+      assert.deepEqual({legacy:legacy.legacy,selectable:legacy.selectable,verified:legacy.verified},{legacy:true,selectable:false,verified:false});
+    }
+    assert.equal(candidates.find(x=>x.id==='runtime-local13').current,false);
+    assert.equal(candidates.find(x=>x.id==='runtime-local13-candidate').current,true);
+    const slot=candidates.find(x=>x.id===f.slot.id);
+    assert.equal(slot.legacy,false);
+    assert.equal(slot.selectable,true);
+    assert.equal(slot.verified,true);
+    assert.equal(slot.current,false);
+    const state=await snapshot({...opts,instance:'server',configPath:path.join(f.root,'missing-config.jsonc'),tunnelUnit:'',tunnelMetrics:'',stateDir:'',runtimeManifest:'',controlManifest:''},testLifecycleController());
+    assert.deepEqual(state.deployment.rollback_candidates,[f.slot.id]);
     mkdirSync(path.join(f.root,'runtime-local9'),{recursive:true});
-    assert.equal(rollbackTargets({platformRoot:f.root},rt).length,2);
+    assert.deepEqual(rollbackTargets({platformRoot:f.root},rt).map(x=>x.id),['runtime-local13','runtime-local13-candidate',f.slot.id]);
   }finally{f.clean();}
 });
 test('rollback API requires current process, exact inventory ID, hash, token and origin',async()=>{
@@ -675,7 +752,7 @@ test('rollback API requires current process, exact inventory ID, hash, token and
   const url='http://127.0.0.1:'+server.address().port;
   try{
     const token=(await (await fetch(url+'/api/action-token')).json()).token;
-    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>!x.current);
+    const target=rollbackTargets(opts,runtimeInfo(opts)).find(x=>x.selectable&&!x.current);
     const body=JSON.stringify({target_id:target.id,expected_sha256:target.server_sha256,observed_pid:123});
     const post=(payload,headers={})=>fetch(url+'/api/actions/rollback-runtime',{method:'POST',headers:{origin:url,'x-devspace-console-token':token,'content-type':'application/json',...headers},body:payload});
     assert.equal((await post(body,{'x-devspace-console-token':'incorrect'})).status,403);
@@ -683,6 +760,13 @@ test('rollback API requires current process, exact inventory ID, hash, token and
     assert.equal((await post(JSON.stringify({...JSON.parse(body),target_id:'../../anything'}))).status,409);
     assert.equal((await post(JSON.stringify({...JSON.parse(body),expected_sha256:'0'.repeat(64)}))).status,409);
     assert.equal((await post(JSON.stringify({...JSON.parse(body),observed_pid:124}))).status,409);
+    const legacy=rollbackTargets(opts,runtimeInfo(opts)).find(x=>x.legacy&&!x.current);
+    assert.ok(legacy,'the fixture keeps a non-current legacy directory as inventory');
+    const legacyResponse=await post(JSON.stringify({target_id:legacy.id,expected_sha256:legacy.server_sha256,observed_pid:123}));
+    const legacyResult=await legacyResponse.json();
+    assert.equal(legacyResponse.status,409);
+    if(process.platform!=='win32')
+      assert.deepEqual(legacyResult,{ok:false,error:'Legacy runtime directories cannot be selected for rollback; only verified runtime slots can.'});
     assert.equal(calls.length,0);
     const good=await post(body);
     if(process.platform==='win32'){
@@ -697,95 +781,21 @@ test('rollback API requires current process, exact inventory ID, hash, token and
     }
   }finally{await new Promise(resolve=>server.close(resolve));f.clean();}
 });
-test('selected runtime switch validates identity and restores launcher on failed health',async()=>{
-  const f=fixture();
-  try{
-    const bin=path.join(f.root,'bin');mkdirSync(bin,{recursive:true});
-    const wrapper=path.join(bin,'run-devspace');
-    const consoleWrapper=path.join(bin,'run-runtime-console');
-    const original='#!/bin/sh\nexec node '+path.join(f.actual,'dist','cli.js')+' serve\n';
-    const consoleOriginal='#!/bin/sh\nexec node runtime-console.mjs --runtime-package "'+f.actual+'" --serve 17678\n';
-    writeFileSync(wrapper,original,{mode:0o700});
-    writeFileSync(consoleWrapper,consoleOriginal,{mode:0o700});
-    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.declared,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
-    const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
-    const options={platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual};
-    const params={options,live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux'};
-    const {DatabaseSync}=await import('node:sqlite');
-    options.stateDir=path.join(f.root,'active-jobs-state');
-    mkdirSync(path.join(options.stateDir,'jobs'),{recursive:true});
-    let jobsDb=new DatabaseSync(path.join(options.stateDir,'jobs','jobs.sqlite'));
-    jobsDb.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
-    jobsDb.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job_running','running');
-    jobsDb.close();
-    const inUse=await switchRuntime({...params,restart:()=>assert.fail('Runtime restart must not run while job is active'),probe:async()=>true});
-    assert.equal(inUse.status,409);
-    assert.equal(inUse.reason_code,'active_jobs');
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    jobsDb=new DatabaseSync(path.join(options.stateDir,'jobs','jobs.sqlite'));
-    jobsDb.prepare("UPDATE durable_jobs SET status='succeeded' WHERE id='job_running'").run();
-    jobsDb.close();
-    assert.equal((await switchRuntime({...params,expectedHash:'0'.repeat(64)})).status,409);
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    let restarts=0;
-    const failed=await switchRuntime({
-      ...params,restart:()=>{restarts++;},
-      probe:async(candidate)=>candidate.package_root===f.actual,
-      probeAttempts:2,probeIntervalMs:1
-    });
-    assert.equal(failed.status,500);
-    assert.equal(failed.restored,true);
-    assert.equal(failed.reason_code,'target_not_healthy');
-    assert.equal(restarts,2);
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    assert.equal(options.explicitRuntimePackage,f.actual);
-    let timeoutRestarts=0;
-    const timedOut=await switchRuntime({
-      ...params,
-      restart:()=>{if(++timeoutRestarts===1)throw new Error('The service restart confirmation timed out.');},
-      probe:async()=>true,probeAttempts:1,probeIntervalMs:1
-    });
-    assert.equal(timedOut.status,500);
-    assert.equal(timedOut.reason_code,'restart_timeout');
-    assert.equal(timedOut.restored,true);
-    assert.equal(timeoutRestarts,2);
-    assert.equal(readFileSync(wrapper,'utf8'),original);
-    assert.equal(readFileSync(consoleWrapper,'utf8'),consoleOriginal);
-    assert.equal(options.explicitRuntimePackage,f.actual);
-    const ok=await switchRuntime({...params,restart:()=>{},probe:async()=>true,probeAttempts:2,probeIntervalMs:1});
-    assert.equal(ok.status,200);
-    assert.match(readFileSync(wrapper,'utf8'),/runtime-local13[\\/]/);
-    assert.match(readFileSync(consoleWrapper,'utf8'),/runtime-local13[\\/]/);
-    assert.doesNotMatch(readFileSync(consoleWrapper,'utf8'),/runtime-local13-candidate[\\/]/);
-    assert.equal(options.explicitRuntimePackage,target.package_root);
-    assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-devspace.bak'),'utf8'),original);
-    assert.equal(readFileSync(path.join(f.root,'state','runtime-rollback',ok.backup_id+'.run-runtime-console.bak'),'utf8'),consoleOriginal);
-  }finally{f.clean();}
-});
-test('runtime switch supports quoted launchers under space paths and rejects ambiguous launchers',async()=>{
+test('legacy launcher switching fails closed until the installer migrates persisted selection',async()=>{
   const f=fixture('devspace console with spaces-');
   try{
     const bin=path.join(f.root,'bin');mkdirSync(bin,{recursive:true});
     const wrapper=path.join(bin,'run-devspace');
-    const currentCli=path.join(f.actual,'dist','cli.js');
-    const original='#!/bin/sh\nexec "node" "'+currentCli+'" serve\n';
+    const original='#!/bin/sh\nexec "node" "'+path.join(f.actual,'dist','cli.js')+'" serve\n';
     writeFileSync(wrapper,original,{mode:0o700});
-    const rt=runtimeInfo({platformRoot:f.root,explicitRuntimePackage:f.actual,serviceUnit:'',processOverride:{pid:123,packageRoot:f.actual,evidence:'fixture'}});
-    const target=rollbackTargets({platformRoot:f.root},rt).find(x=>!x.current);
-    const params={options:{platformRoot:f.root,serviceUnit:'test-runtime.service',explicitRuntimePackage:f.actual},live:rt.actual,target,expectedHash:target.server_sha256,observedPid:123,platform:'linux',restart:()=>{},probe:async()=>true,probeAttempts:1,probeIntervalMs:1};
-    const ok=await switchRuntime(params);
-    assert.equal(ok.status,200);
-    assert.match(readFileSync(wrapper,'utf8'),/runtime-local13[\\/]/);
-
-    const ambiguous=original+'# duplicate '+currentCli+'\n';
-    writeFileSync(wrapper,ambiguous,{mode:0o700});
-    const rejected=await switchRuntime(params);
-    assert.equal(rejected.status,409);
-    assert.match(rejected.error,/launcher does not match/i);
-    assert.equal(readFileSync(wrapper,'utf8'),ambiguous);
+    let restarted=false;
+    const result=await switchRuntime({options:{platformRoot:f.root,serviceUnit:'test-runtime.service'},
+      target:{id:'legacy'},expectedHash:'0'.repeat(64),observedPid:123,
+      restart:()=>{restarted=true;},readLive:()=>({pid:123,package_root:f.actual}),probe:async()=>true,platform:'linux'});
+    assert.equal(result.status,409);
+    assert.match(result.error,/selection is missing.*installer/i);
+    assert.equal(restarted,false);
+    assert.equal(readFileSync(wrapper,'utf8'),original);
   }finally{f.clean();}
 });
 test('managed config save preserves unrelated config and creates a restorable history snapshot',()=>{
@@ -991,4 +1001,22 @@ test('UI includes semantic navigation, theme/language controls, responsive and a
   assert.match(js,/data-import-legacy/);
   assert.match(js,/sourceConversation/);
   assert.match(js,/latestTool/);
+});
+test('Windows autostart management request returns a non-error skipped result',async()=>{
+  let called=false;
+  const controller={...testLifecycleController(),autostartAvailable:false,autostart:()=>{called=true;throw new Error('must not be called');}};
+  const server=createConsoleServer({serve:0},{lifecycleController:controller,snapshot:async()=>({schema_version:2})});
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+server.address().port;
+  try{
+    const token=(await (await fetch(base+'/api/action-token')).json()).token;
+    const response=await fetch(base+'/api/management/autostart',{
+      method:'POST',
+      headers:{'content-type':'application/json','x-devspace-console-token':token,origin:base},
+      body:JSON.stringify({enabled:true})
+    });
+    assert.equal(response.status,200);
+    assert.deepEqual(await response.json(),{ok:true,skipped:'windows-native-autostart'});
+    assert.equal(called,false);
+  }finally{await new Promise((resolve)=>server.close(resolve));}
 });

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT=""
+CONFIG=""
 DEVSPACE_SERVICE=""
 TUNNEL_SERVICE=""
 
 usage() {
   cat <<'EOF'
-Usage: runtime-console.sh [--root INSTANCE_ROOT] [--service UNIT] [--tunnel-service UNIT]
+Usage: runtime-console.sh [--root INSTANCE_ROOT] [--config CONFIG] [--service UNIT] [--tunnel-service UNIT]
 
 Read-only DevSpace Runtime Console. It reports runtime/version/hash, service and
 Tunnel state, durable Jobs, workspace sessions, and recent MCP request
@@ -18,6 +20,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root) ROOT="${2:?missing instance root}"; shift 2 ;;
+    --config) CONFIG="${2:?missing config path}"; shift 2 ;;
     --service) DEVSPACE_SERVICE="${2:?missing DevSpace service unit}"; shift 2 ;;
     --tunnel-service) TUNNEL_SERVICE="${2:?missing Tunnel service unit}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -38,47 +41,26 @@ TUNNEL_SERVICE="${TUNNEL_SERVICE:-devspace-control-cloudflared.service}"
 
 RUNTIME="$ROOT/runtime"
 STATE="$ROOT/state/devspace-state"
-ACTIVE_SLOT=""
-if [[ -f "$RUNTIME/active-slot.txt" ]]; then
-  read -r ACTIVE_SLOT < "$RUNTIME/active-slot.txt" || ACTIVE_SLOT=""
-fi
-
+CONFIG="${CONFIG:-${DEVSPACE_CONFIG_PATH:-$ROOT/state/devspace-config/config.jsonc}}"
 PACKAGE_ROOT=""
 NODE=""
 MAIN_PID="$(systemctl --user show "$DEVSPACE_SERVICE" -p MainPID --value 2>/dev/null || true)"
 if [[ "$MAIN_PID" =~ ^[1-9][0-9]*$ && -r "/proc/$MAIN_PID/cmdline" ]]; then
   while IFS= read -r -d '' arg; do
-    if [[ "$arg" == */node_modules/@waishnav/devspace/dist/cli.js ]]; then
-      PACKAGE_ROOT="${arg%/dist/cli.js}"
-      break
-    fi
+    if [[ "$arg" == */node_modules/@waishnav/devspace/dist/cli.js ]]; then PACKAGE_ROOT="${arg%/dist/cli.js}"; break; fi
   done < "/proc/$MAIN_PID/cmdline"
-  if [[ -x "/proc/$MAIN_PID/exe" ]]; then
-    NODE="$(readlink -f "/proc/$MAIN_PID/exe" 2>/dev/null || true)"
-  fi
-fi
-if [[ -n "$ACTIVE_SLOT" ]]; then
-  SLOT="$RUNTIME/slots/$ACTIVE_SLOT"
-  [[ -f "$SLOT/READY" ]] || SLOT=""
-  if [[ -n "$SLOT" ]]; then
-    [[ -x "$SLOT/node/bin/node" ]] && NODE="$SLOT/node/bin/node"
-    [[ -x "$SLOT/node/node" ]] && NODE="$SLOT/node/node"
-    [[ -d "$SLOT/devspace/node_modules/@waishnav/devspace" ]] &&
-      PACKAGE_ROOT="$SLOT/devspace/node_modules/@waishnav/devspace"
-  fi
+  NODE="$(readlink -f "/proc/$MAIN_PID/exe" 2>/dev/null || true)"
 fi
 [[ -n "$NODE" ]] || NODE="$(command -v node || true)"
-if [[ -z "$PACKAGE_ROOT" && -d "$RUNTIME/devspace/node_modules/@waishnav/devspace" ]]; then
-  PACKAGE_ROOT="$RUNTIME/devspace/node_modules/@waishnav/devspace"
+if [[ -z "$NODE" && -x "$RUNTIME/node/bin/node" ]]; then NODE="$RUNTIME/node/bin/node"; fi
+if [[ -z "$NODE" && -d "$RUNTIME/slots" ]]; then
+  NODE="$(find "$RUNTIME/slots" -type f -path '*/node/bin/node' -print -quit)"
 fi
-if [[ -z "$PACKAGE_ROOT" && -d "$RUNTIME/node_modules/@waishnav/devspace" ]]; then
-  PACKAGE_ROOT="$RUNTIME/node_modules/@waishnav/devspace"
-fi
-if [[ -z "$ACTIVE_SLOT" && -n "$PACKAGE_ROOT" ]]; then
-  LIVE_RUNTIME_ROOT="$(dirname "$(dirname "$(dirname "$PACKAGE_ROOT")")")"
-  if [[ "$LIVE_RUNTIME_ROOT" == "$ROOT"/runtime-* ]]; then
-    ACTIVE_SLOT="$(basename "$LIVE_RUNTIME_ROOT")"
-  fi
+ACTIVE_SLOT=""
+if [[ -n "$NODE" ]]; then
+  description="$("$NODE" "$SCRIPT_DIR/runtime-rollback.mjs" --describe "$ROOT" "$CONFIG" "$PACKAGE_ROOT")"
+  mapfile -t selected <<< "$description"
+  NODE="${selected[0]}"; PACKAGE_ROOT="${selected[1]}"; ACTIVE_SLOT="${selected[2]}"; STATE="${selected[3]}"
 fi
 
 version="unknown"

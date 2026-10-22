@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import { open, readFile, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
+import { constants } from "node:fs";
 import { extname } from "node:path";
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -50,7 +51,7 @@ export interface ReadImageModelResult {
 }
 
 interface InspectedImageFile {
-  path: string;
+  bytes: Buffer;
   mimeType: ReadImageResult["mimeType"];
   sizeBytes: number;
 }
@@ -84,7 +85,7 @@ interface SharpPipeline {
 }
 
 type SharpFactory = (
-  input: string,
+  input: Buffer,
   options?: { limitInputPixels?: number },
 ) => SharpPipeline;
 
@@ -123,47 +124,38 @@ async function inspectImageFile(
     throw new Error(`${toolName} only supports .jpg, .jpeg, and .png files`);
   }
 
-  const metadata = await stat(path);
-  if (!metadata.isFile()) throw new Error(`${toolName} target is not a regular file`);
-  if (metadata.size > maxSizeBytes) {
-    throw new Error(`${toolName} file exceeds ${maxSizeBytes} bytes`);
-  }
-
-  const handle = await open(path, "r");
+  const handle = await open(path, process.platform === "win32" ? "r" : constants.O_RDONLY | constants.O_NONBLOCK);
   try {
-    const header = Buffer.alloc(8);
-    const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
-    if (!hasExpectedSignature(header.subarray(0, bytesRead), mimeType)) {
-      throw new Error(`${toolName} file contents do not match ${mimeType}`);
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new Error(`${toolName} target is not a regular file`);
+    if (metadata.size > maxSizeBytes) throw new Error(`${toolName} file exceeds ${maxSizeBytes} bytes`);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (true) {
+      // Read at most one byte beyond the limit, even if the opened file grows.
+      const chunk = Buffer.alloc(Math.min(64 * 1024, maxSizeBytes - total + 1));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, total);
+      if (!bytesRead) break;
+      total += bytesRead;
+      if (total > maxSizeBytes) throw new Error(`${toolName} file exceeds ${maxSizeBytes} bytes`);
+      chunks.push(chunk.subarray(0, bytesRead));
     }
-  } finally {
-    await handle.close();
-  }
-
-  return { path, mimeType, sizeBytes: metadata.size };
+    const bytes = Buffer.concat(chunks, total);
+    if (!hasExpectedSignature(bytes, mimeType)) throw new Error(`${toolName} file contents do not match ${mimeType}`);
+    return { bytes, mimeType, sizeBytes: total };
+  } finally { await handle.close(); }
 }
 
-async function readInspectedImage(
-  inspected: InspectedImageFile,
-): Promise<ReadImageResult> {
-  const buffer = await readFile(inspected.path);
-  if (!hasExpectedSignature(buffer, inspected.mimeType)) {
-    throw new Error(`image file contents do not match ${inspected.mimeType}`);
-  }
-
-  return {
-    data: buffer.toString("base64"),
-    mimeType: inspected.mimeType,
-    sizeBytes: buffer.byteLength,
-    role: "source",
-  };
+async function readInspectedImage(inspected: InspectedImageFile): Promise<ReadImageResult> {
+  return { data: inspected.bytes.toString("base64"), mimeType: inspected.mimeType,
+    sizeBytes: inspected.bytes.length, role: "source" };
 }
 
 async function imageDimensions(
   sharp: SharpFactory,
   inspected: InspectedImageFile,
 ): Promise<{ width: number; height: number }> {
-  const metadata = await sharp(inspected.path, {
+  const metadata = await sharp(inspected.bytes, {
     limitInputPixels: MAX_IMAGE_SOURCE_PIXELS,
   }).metadata();
   const expectedFormat = inspected.mimeType === "image/png" ? "png" : "jpeg";
@@ -229,7 +221,7 @@ async function renderDerivedJpeg(
   role: "overview" | "tile",
   region?: ReadImageRegion,
 ): Promise<ReadImageResult> {
-  let pipeline = sharp(inspected.path, {
+  let pipeline = sharp(inspected.bytes, {
     limitInputPixels: MAX_IMAGE_SOURCE_PIXELS,
   }).autoOrient();
   if (region) pipeline = pipeline.extract(region);

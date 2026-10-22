@@ -1,11 +1,70 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 
 namespace DevSpaceControlPlatform
 {
     internal static class RuntimeResolver
     {
+        internal static string StateDirectory(string platformRoot)
+        {
+            var fallback = Path.GetFullPath(Path.Combine(platformRoot, "state", "devspace-state"));
+            var config = Path.Combine(platformRoot, "state", "devspace-config", "config.jsonc");
+            if (!File.Exists(config)) return fallback;
+            var raw = File.ReadAllText(config, Encoding.UTF8);
+            // A generated config has a JSON string value; preserve JSONC
+            // comments without attempting to reinterpret arbitrary JavaScript.
+            var matches = Regex.Matches(raw, @"""stateDir""\s*:\s*(""(?:\\.|[^""\\])*"")");
+            if (matches.Count == 0)
+            {
+                if (raw.Contains("\"stateDir\""))
+                    throw new InvalidDataException("Unable to verify the managed Runtime state directory.");
+                return fallback;
+            }
+            if (matches.Count != 1)
+                throw new InvalidDataException("Ambiguous managed Runtime state directory.");
+            var candidate = new JavaScriptSerializer().Deserialize<string>(matches[0].Groups[1].Value);
+            if (string.IsNullOrWhiteSpace(candidate) || !Path.IsPathRooted(candidate))
+                throw new InvalidDataException("The managed Runtime state directory must be absolute.");
+            return Path.GetFullPath(candidate);
+        }
+
+        internal static string SelectionPath(string platformRoot)
+        {
+            return Path.Combine(StateDirectory(platformRoot), "runtime-selection.json");
+        }
+
+        internal static Dictionary<string, object> ReadSelection(string platformRoot)
+        {
+            var file = SelectionPath(platformRoot);
+            if (!File.Exists(file)) return null;
+            var selection = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+            object schema, slot, hash, previous;
+            if (selection == null || !selection.TryGetValue("schema_version", out schema) || !(schema is int) || (int)schema != 1 ||
+                !selection.TryGetValue("slot", out slot) || !ValidSlot(Convert.ToString(slot)) ||
+                !selection.TryGetValue("server_sha256", out hash) || !Regex.IsMatch(Convert.ToString(hash), "^[a-f0-9]{64}$") ||
+                !selection.TryGetValue("previous", out previous))
+                throw new InvalidDataException("Invalid Runtime JSON selection; legacy mirror was not used.");
+            if (previous != null)
+            {
+                var record = previous as Dictionary<string, object>;
+                object priorSlot, priorHash;
+                if (record == null || !record.TryGetValue("slot", out priorSlot) || !ValidSlot(Convert.ToString(priorSlot)) ||
+                    !record.TryGetValue("server_sha256", out priorHash) || !Regex.IsMatch(Convert.ToString(priorHash), "^[a-f0-9]{64}$"))
+                    throw new InvalidDataException("Invalid previous Runtime selection.");
+            }
+            return selection;
+        }
+
+        private static bool ValidSlot(string slot)
+        {
+            return !string.IsNullOrEmpty(slot) && Regex.IsMatch(slot, "^[A-Za-z0-9][A-Za-z0-9._-]*$");
+        }
+
         private sealed class RuntimeLocation
         {
             public string Root { get; set; }
@@ -22,7 +81,8 @@ namespace DevSpaceControlPlatform
                     ? Path.Combine(location.Root, "node", "node.exe")
                     : Path.Combine(location.Root, "node-v22.22.3-win-x64", "node.exe"));
             }
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
+            if (!File.Exists(SelectionPath(platformRoot)))
+                candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
             foreach (var candidate in candidates) if (File.Exists(candidate)) return candidate;
             throw new FileNotFoundException("找不到 Node.js runtime。", "node.exe");
         }
@@ -63,6 +123,8 @@ namespace DevSpaceControlPlatform
                 var candidate = Path.Combine(location.Root, "serena", "bin");
                 if (Directory.Exists(candidate)) return candidate;
             }
+            if (File.Exists(SelectionPath(platformRoot)))
+                return Path.Combine(Path.GetFullPath(platformRoot), "runtime", "slots", ActiveRuntimeSlot(platformRoot), "serena", "bin");
             foreach (var runtimeRoot in RuntimeBaseRoots(platformRoot))
             {
                 var candidate = Path.Combine(runtimeRoot, "serena", "bin");
@@ -78,6 +140,8 @@ namespace DevSpaceControlPlatform
                 var candidate = Path.Combine(location.Root, "uv");
                 if (Directory.Exists(candidate)) return candidate;
             }
+            if (File.Exists(SelectionPath(platformRoot)))
+                return Path.Combine(Path.GetFullPath(platformRoot), "runtime", "slots", ActiveRuntimeSlot(platformRoot), "uv");
             foreach (var runtimeRoot in RuntimeBaseRoots(platformRoot))
             {
                 var candidate = Path.Combine(runtimeRoot, "uv");
@@ -115,6 +179,23 @@ namespace DevSpaceControlPlatform
 
         private static IEnumerable<RuntimeLocation> RuntimeLocations(string platformRoot)
         {
+            var selection = ReadSelection(platformRoot);
+            if (selection != null)
+            {
+                var id = Convert.ToString(selection["slot"]);
+                var slot = Path.Combine(Path.GetFullPath(platformRoot), "runtime", "slots", id);
+                var package = Path.Combine(slot, "devspace", "node_modules", "@waishnav", "devspace");
+                var server = Path.Combine(package, "dist", "server.js");
+                if (!File.Exists(Path.Combine(slot, "READY")) || !File.Exists(Path.Combine(slot, "node", "node.exe")) ||
+                    !File.Exists(Path.Combine(package, "package.json")) || !File.Exists(Path.Combine(package, "dist", "cli.js")) || !File.Exists(server))
+                    throw new InvalidDataException("Selected Runtime slot is incomplete; legacy mirror was not used.");
+                using (var sha = SHA256.Create())
+                using (var stream = File.OpenRead(server))
+                    if (BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant() != Convert.ToString(selection["server_sha256"]))
+                        throw new InvalidDataException("Selected Runtime hash mismatch; legacy mirror was not used.");
+                yield return new RuntimeLocation { Root = slot, IsSlot = true, SlotName = id };
+                yield break;
+            }
             foreach (var runtimeRoot in RuntimeBaseRoots(platformRoot))
             {
                 var pointer = Path.Combine(runtimeRoot, "active-slot.txt");
@@ -125,7 +206,7 @@ namespace DevSpaceControlPlatform
                 }
 
                 var slotName = File.ReadAllText(pointer).Trim();
-                if (string.IsNullOrWhiteSpace(slotName) ||
+                if (!ValidSlot(slotName) ||
                     !string.Equals(slotName, Path.GetFileName(slotName), StringComparison.Ordinal) ||
                     slotName.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) >= 0)
                 {

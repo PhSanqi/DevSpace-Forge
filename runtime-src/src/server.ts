@@ -90,7 +90,7 @@ import {
   type LocalAgentProviderStatus,
 } from "./local-agent-catalog.js";
 import { getToolSurface } from "./tool-surfaces/index.js";
-import { closeDurableJobManager } from "./tool-surfaces/jobs.js";
+import { closeDurableJobManager, getJobManager } from "./tool-surfaces/jobs.js";
 import { closeWorkflowSessionManager } from "./tool-surfaces/workflows.js";
 import {
   contentText,
@@ -985,7 +985,7 @@ function registerMcpSurface(
           tool: toolNames.read,
           workspaceId,
           path: input.path,
-        }, response.content, startedAt);
+        }, startedAt, response.failure);
         return response;
       }
 
@@ -1485,6 +1485,7 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  getJobManager(config.stateDir);
   const incomingArtifactAdapters = options.incomingArtifactAdapters
     ?? [createOpenAIIncomingArtifactAdapter()];
   const allowedHosts = config.allowedHosts.includes("*")
@@ -1500,7 +1501,12 @@ export function createServer(
   const healthRoute = `${publicBasePath}/healthz` || "/healthz";
   const mcpUrl = publicEndpointUrl(config.publicBaseUrl, "/mcp");
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthProvider = new SingleUserOAuthProvider(
+    config.oauth,
+    mcpUrl,
+    config.stateDir,
+    (phase, reason) => logEvent(config.logging, "warn", "oauth_rejected", { phase, reason }),
+  );
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],

@@ -123,8 +123,15 @@ export function createWindowsProcessJob(runtimePackage) {
         bindings.closeHandle(processHandle);
       }
     },
-    close() {
+    close({ preserveProcesses = false } = {}) {
       if (!handle) return;
+      if (preserveProcesses) {
+        const retained = emptyExtendedInfo();
+        retained.BasicLimitInformation.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!bindings.setJobInfo(handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, retained, bindings.layout.extended)) {
+          throw new Error(`Unable to preserve Runtime Job with Win32 error ${bindings.getLastError()}.`);
+        }
+      }
       const closing = handle;
       handle = null;
       if (!bindings.closeHandle(closing)) throw new Error(`CloseHandle(job) failed with Win32 error ${bindings.getLastError()}.`);

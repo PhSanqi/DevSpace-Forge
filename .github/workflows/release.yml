@@ -148,7 +148,6 @@ jobs:
       - name: Build Linux product package
         working-directory: control
         run: |
-          node --test tests/runtime-console.test.mjs tests/public-site.test.mjs tests/public-repository-audit.test.mjs tests/video-sidecar-source.test.mjs
           version="${GITHUB_REF_NAME#v}"
           runtime_package="dist/linux-runtime/waishnav-devspace-${CANONICAL_RUNTIME_VERSION}.tgz"
           test -f "$runtime_package"

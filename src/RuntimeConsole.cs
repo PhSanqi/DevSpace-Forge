@@ -218,7 +218,12 @@ namespace DevSpaceControlPlatform
                 {
                     var output = process.StandardOutput.ReadToEnd();
                     process.StandardError.ReadToEnd();
-                    process.WaitForExit(3000);
+                    if (!process.WaitForExit(3000))
+                    {
+                        try { process.Kill(); } catch { }
+                        process.WaitForExit(1000);
+                        return;
+                    }
                     if (!process.HasExited || process.ExitCode != 0 || string.IsNullOrWhiteSpace(output)) return;
                     var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(output);
                     snapshot.Workspaces = ConvertWorkspaces(data);

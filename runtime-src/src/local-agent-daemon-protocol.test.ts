@@ -195,6 +195,34 @@ if (waitRequest.method !== "agent.wait") throw new Error("expected agent.wait re
 assert.deepEqual(waitRequest.params.ids, ["agt_one", "agt_two"]);
 assert.equal(waitRequest.params.timeoutMs, 5_000);
 
+const stopAgentRequest = decodeLocalAgentDaemonRequest({
+  requestId: "req_agent_stop",
+  protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
+  authToken: "test-secret",
+  method: "agent.stop",
+  params: {
+    id: "agt_one",
+    scope: { workspaceId: "ws_test", workspaceRoot: "/tmp/project" },
+  },
+});
+assert.equal(stopAgentRequest.method, "agent.stop");
+if (stopAgentRequest.method !== "agent.stop") throw new Error("expected agent.stop request");
+assert.equal(stopAgentRequest.params.id, "agt_one");
+assert.deepEqual(stopAgentRequest.params.scope, {
+  workspaceId: "ws_test",
+  workspaceRoot: "/tmp/project",
+});
+assert.throws(
+  () => decodeLocalAgentDaemonRequest({
+    requestId: "req_agent_stop_invalid",
+    protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
+    authToken: "test-secret",
+    method: "agent.stop",
+    params: { scope: { workspaceId: "ws_test", workspaceRoot: "/tmp/project" } },
+  }),
+  (error: unknown) => error instanceof LocalAgentDaemonProtocolError && error.code === "INVALID_PARAMS",
+);
+
 assert.deepEqual(decodeAgentWaitResults([
   { id: "agt_one", status: "completed", response: "Done." },
   { id: "agt_empty", status: "completed", response: "" },

@@ -14,7 +14,7 @@ function fixture(){
   const configPath=path.join(configDir,'config.jsonc');
   const tokenFile=path.join(root,'state','secrets','cloudflare-tunnel-token.txt');
   for(const file of [path.join(runtime,'node','node.exe'),path.join(runtime,'devspace','node_modules','@waishnav','devspace','dist','cli.js'),path.join(root,'cloudflared.exe'),tokenFile,configPath]){
-    mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,file===tokenFile?'synthetic-token-value':file===configPath?JSON.stringify({configVersion:1,server:{port:17677}}):'');
+    mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,file===tokenFile?'synthetic-token-value':file===configPath?JSON.stringify({configVersion:1,server:{port:17677},storage:{stateDir:path.join(root,'state','devspace-state')}}):'');
   }
   writeFileSync(path.join(root,'runtime','active-slot.txt'),'slot-a\n');
   return {root,configPath,tokenFile,clean:()=>rmSync(root,{recursive:true,force:true})};
@@ -99,6 +99,7 @@ test('Windows controller assigns direct DevSpace and cloudflared children and cl
     writeFileSync(path.join(f.root,'state','control-settings.json'),JSON.stringify({schema_version:1,tunnel_mode:'Quick'}));
     writeFileSync(path.join(f.root,'state','quick-tunnel-url.txt'),'https://sample.trycloudflare.com\n');
     assert.equal((await controller.action('devspace','restart','Quick')).ok,true);
+    assert.ok(commands.some(x=>x.join(' ')==='taskkill /PID 7001 /F'));
     assert.ok(commands.some(x=>x[1]?.endsWith('prepare-effective-config.mjs')));
     assert.equal(spawned.at(-1).options.env.DEVSPACE_CONFIG_DIR,path.join(f.root,'state','effective-config'));
     assert.deepEqual(jobEvents,[['add',7001],['add',7002],['add',7003]]);
@@ -150,7 +151,7 @@ test('Windows Job assignment failure refuses ownership and confirms candidate te
     assert.equal(result.ok,false);
     assert.match(result.stderr,/ownership refused/);
     assert.equal(controller.state('devspace').pid,null);
-    assert.deepEqual(calls[0],['taskkill','/PID','8100','/T','/F']);
+    assert.deepEqual(calls[0],['taskkill','/PID','8100','/F']);
     await controller.shutdown();
     assert.equal(calls.at(-1),'close');
   }finally{f.clean();}
@@ -195,7 +196,7 @@ test('management core uses injected controller without platform spoofing',async(
   }finally{f.clean();}
 });
 
-test('Quick Tunnel restart cannot bypass the Runtime job guard',async()=>{
+test('Quick Tunnel start, restart and all actions guard the complete Runtime sequence',async()=>{
   const f=fixture();
   const stateDir=path.join(f.root,'state','devspace-state');
   const jobs=path.join(stateDir,'jobs');mkdirSync(jobs,{recursive:true});
@@ -203,15 +204,94 @@ test('Quick Tunnel restart cannot bypass the Runtime job guard',async()=>{
   const db=new DatabaseSync(path.join(jobs,'jobs.sqlite'));
   db.exec('CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
   db.prepare('INSERT INTO durable_jobs VALUES (?,?)').run('job-running','running');
-  db.close();
   writeFileSync(path.join(f.root,'state','control-settings.json'),JSON.stringify({schema_version:1,tunnel_mode:'Quick'}));
+  const quickFile=path.join(f.root,'state','quick-tunnel-url.txt');
+  const options={platformRoot:f.root,configPath:f.configPath,stateDir};
+  let tunnelActive=false;
   const calls=[];
-  const controller={available:()=>true,state:()=>({status:'active'}),action:async(...args)=>{calls.push(args);return {ok:true};}};
+  const controller={available:()=>true,state:name=>({status:name==='devspace'||tunnelActive?'active':'inactive'}),action:async(...args)=>{
+    calls.push(args);
+    assert.equal(existsSync(path.join(stateDir,'.runtime-switch-gate')),true,'the whole sequence must hold the shared gate');
+    if(args[0]==='tunnel'&&args[1]!=='stop')writeFileSync(quickFile,'https://sample.trycloudflare.com');
+    return {ok:true};
+  }};
   try{
-    const result=await serviceAction({platformRoot:f.root,configPath:f.configPath,stateDir},'tunnel','restart',controller);
-    assert.equal(result.reason_code,'active_jobs');
+    for(const [target,action] of [['tunnel','start'],['tunnel','restart'],['all','start'],['all','restart'],['all','stop']]){
+      const result=await serviceAction(options,target,action,controller);
+      assert.equal(result.reason_code,'active_jobs',`${target} ${action}`);
+      assert.deepEqual(calls,[]);
+    }
+    tunnelActive=true;
+    for(const target of ['tunnel','all']){
+      assert.equal((await serviceAction(options,target,'start',controller)).ok,true);
+      assert.deepEqual(calls,[],'start of active services must be idempotent even without a URL');
+    }
+    tunnelActive=false;
+    db.exec("UPDATE durable_jobs SET status='succeeded'");
+    for(const [target,action,expected] of [
+      ['tunnel','start',[['tunnel','start'],['devspace','restart']]],
+      ['tunnel','restart',[['tunnel','restart'],['devspace','restart']]],
+      ['all','start',[['tunnel','start'],['devspace','restart']]],
+      ['all','restart',[['devspace','stop'],['tunnel','restart'],['devspace','start']]],
+      ['all','stop',[['devspace','stop'],['tunnel','stop']]]
+    ]){
+      calls.length=0;
+      assert.equal((await serviceAction(options,target,action,controller)).ok,true);
+      assert.deepEqual(calls.map(x=>x.slice(0,2)),expected);
+    }
+    calls.length=0;
+    db.close();writeFileSync(path.join(jobs,'jobs.sqlite'),'corrupt');
+    assert.equal((await serviceAction(options,'tunnel','start',controller)).reason_code,'job_state_unavailable');
     assert.deepEqual(calls,[]);
-  }finally{f.clean();}
+  }finally{if(db.isOpen)db.close();f.clean();}
+});
+
+test('Windows signal shutdown stops Tunnel and preserves Runtime for active, unknown or locked jobs',async()=>{
+  for(const condition of ['active','unknown','locked','clear']){
+    const f=fixture();
+    const stateDir=path.join(f.root,'state','devspace-state');
+    const jobs=path.join(stateDir,'jobs');
+    const children=[],commands=[],closed=[];
+    const controller=createServiceController({platformRoot:f.root,configPath:f.configPath,stateDir},{
+      platform:'win32',
+      spawnProcess:()=>{
+        const child=new EventEmitter();
+        Object.assign(child,{pid:8300+children.length,exitCode:null,signalCode:null,stdout:new EventEmitter(),stderr:new EventEmitter(),unref:()=>closed.push('unref')});
+        children.push(child);return child;
+      },
+      createProcessJob:()=>({addPid:()=>{},close:options=>closed.push(options)}),
+      runCommand:(command,args)=>{
+        commands.push([command,...args]);
+        const child=children.find(x=>x.pid===Number(args[1]));
+        queueMicrotask(()=>{child.exitCode=0;child.emit('exit',0,null);});
+        return {ok:true};
+      }
+    });
+    try{
+      await controller.action('devspace','start','Remote');
+      await controller.action('tunnel','start','Remote');
+      // State appears after launch: shutdown must reread jobs.sqlite under the gate.
+      if(condition==='active'){
+        mkdirSync(jobs,{recursive:true});
+        const {DatabaseSync}=await import('node:sqlite');
+        const db=new DatabaseSync(path.join(jobs,'jobs.sqlite'));
+        db.exec("CREATE TABLE durable_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL); INSERT INTO durable_jobs VALUES ('job-running','running')");db.close();
+      }else if(condition==='unknown')mkdirSync(jobs,{recursive:true});
+      else if(condition==='locked')mkdirSync(path.join(stateDir,'.runtime-switch-gate'),{recursive:true});
+      const result=await controller.shutdown();
+      assert.equal(result.ok,condition==='clear');
+      assert.deepEqual(commands[0],['taskkill','/PID','8301','/T','/F']);
+      assert.deepEqual(closed[0],{preserveProcesses:condition!=='clear'});
+      if(condition==='clear')assert.deepEqual(commands[1],['taskkill','/PID','8300','/F']);
+      else{
+        assert.equal(commands.length,1);
+        assert.equal(controller.state('devspace').status,'active');
+        assert.equal(closed[1],'unref');
+        assert.equal(result.reason_code,{active:'active_jobs',unknown:'job_state_unavailable',locked:'runtime_switch_in_progress'}[condition]);
+      }
+      assert.equal(controller.state('tunnel').status,'inactive');
+    }finally{f.clean();}
+  }
 });
 
 test('release and install scripts include controller and Windows helpers/token path',()=>{
@@ -226,4 +306,43 @@ test('release and install scripts include controller and Windows helpers/token p
   assert.match(windows,/prepare-effective-config\.mjs/);
   assert.match(read('ops/start-runtime-console.ps1'),/state\\secrets\\cloudflare-tunnel-token\.txt/);
   assert.equal(existsSync(path.join(root,'ops','control-service-controller.mjs')),true);
+});
+
+test('Linux installers point Runtime and Console at the same durable job state',()=>{
+  const root=path.resolve(import.meta.dirname,'..');
+  const setup=readFileSync(path.join(root,'setup-linux.sh'),'utf8');
+  const sidecar=readFileSync(path.join(root,'ops/install-linux-sidecar-instance.sh'),'utf8');
+  assert.match(setup,/const stateDir = `\$\{process\.argv\[6\]\}\/devspace-state`/);
+  assert.match(setup,/storage: \{ stateDir \}/);
+  assert.match(sidecar,/storage:\{stateDir:`\$\{stateDir\}\/devspace-state`\}/);
+  // The main installer derives the effective state directory from its config;
+  // an upgraded instance may have a custom path rather than the default.
+  assert.doesNotMatch(setup,/--state-dir "\$STATE_DIR\/devspace-state"/);
+  assert.match(sidecar,/--state-dir "\$STATE_DIR\/devspace-state"/);
+});
+
+test('Windows controller uses JSON selection over a stale mirror and refuses malformed JSON',async()=>{
+  const f=fixture();
+  try{
+    const runtime=path.join(f.root,'runtime','slots','slot-json');
+    const pkg=path.join(runtime,'devspace','node_modules','@waishnav','devspace');
+    for(const file of [path.join(runtime,'node','node.exe'),path.join(runtime,'READY'),path.join(pkg,'dist','cli.js'),path.join(pkg,'dist','server.js')]){
+      mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,'synthetic');
+    }
+    const {createHash}=await import('node:crypto');
+    writeFileSync(path.join(pkg,'package.json'),JSON.stringify({version:'1.1.0-beta.4.local.13'}));
+    const selection=path.join(f.root,'state','devspace-state','runtime-selection.json');mkdirSync(path.dirname(selection),{recursive:true});
+    writeFileSync(selection,JSON.stringify({schema_version:1,slot:'slot-json',server_sha256:createHash('sha256').update('synthetic').digest('hex'),previous:null}));
+    writeFileSync(path.join(f.root,'runtime','active-slot.txt'),'../../stale');
+    const spawned=[];
+    const controller=createServiceController({platformRoot:f.root,configPath:f.configPath},{platform:'win32',
+      createProcessJob:()=>({addPid:()=>{},close:()=>{}}),spawnProcess:(command,args)=>{
+        spawned.push({command,args});const child=new EventEmitter();child.pid=8701;child.exitCode=null;child.signalCode=null;return child;
+      }});
+    assert.equal((await controller.action('devspace','start')).ok,true);
+    assert.equal(spawned[0].command,path.join(runtime,'node','node.exe'));assert.equal(spawned[0].args[0],path.join(pkg,'dist','cli.js'));
+    writeFileSync(selection,'{broken');
+    const blocked=createServiceController({platformRoot:f.root,configPath:f.configPath},{platform:'win32',spawnProcess:()=>{throw new Error('must not launch');}});
+    assert.equal(blocked.available('devspace'),false);await assert.rejects(blocked.action('devspace','start'));
+  }finally{f.clean();}
 });

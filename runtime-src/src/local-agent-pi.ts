@@ -6,6 +6,7 @@ import {
   AgentProviderUnavailableError,
   captureAgentProviderResult,
 } from "./local-agent-errors.js";
+import { bindLocalAgentAbort, localAgentCancelledError } from "./local-agent-cancellation.js";
 import type {
   LocalAgentDriver,
   LocalAgentRunCallbacks,
@@ -38,6 +39,7 @@ export type PiSessionLike = Pick<
   | "setModel"
   | "setThinkingLevel"
   | "dispose"
+  | "abort"
 >;
 
 export type PiSessionFactory = (
@@ -78,6 +80,9 @@ export class PiSessionRuntime implements LocalAgentRuntime {
             message: "Pi runtime is not running.",
           });
         }
+        if (input.signal?.aborted) throw localAgentCancelledError("pi", "run");
+        const removeAbort = bindLocalAgentAbort(input.signal, () => this.session.abort());
+        try {
         await callbacks?.onSessionId?.(this.session.sessionId);
         await this.applyOverrides(input);
         this.events = [];
@@ -85,9 +90,13 @@ export class PiSessionRuntime implements LocalAgentRuntime {
         this.collectingEvents = true;
         try {
           await this.session.prompt(input.prompt);
+        } catch (cause) {
+          if (input.signal?.aborted) throw localAgentCancelledError("pi", "run", cause);
+          throw cause;
         } finally {
           this.collectingEvents = false;
         }
+        if (input.signal?.aborted) throw localAgentCancelledError("pi", "run");
         const currentMessages = this.session.messages.slice(messageStart);
         const finalResponse = extractPiFinalResponse({ messages: currentMessages });
         if (!finalResponse) {
@@ -116,6 +125,9 @@ export class PiSessionRuntime implements LocalAgentRuntime {
           finalResponse,
           items: [...this.events, ...currentMessages],
         };
+        } finally {
+          removeAbort();
+        }
       },
     });
   }
@@ -164,6 +176,7 @@ export class PiSessionRuntime implements LocalAgentRuntime {
 
 export class PiLocalAgentDriver implements LocalAgentDriver {
   readonly provider = "pi" as const;
+  readonly capabilities = { turns: { interrupt: true } } as const;
   readonly idleTimeoutMs = 3 * 60_000;
 
   constructor(

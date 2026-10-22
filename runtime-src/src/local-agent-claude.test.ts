@@ -12,6 +12,7 @@ import type { LocalAgentRuntimeContext } from "./local-agent-runtime.js";
 class FakeClaudeQuery implements ClaudeQueryLike, AsyncIterator<unknown> {
   private readonly iterator: AsyncIterator<ClaudeUserMessage>;
   closeCount = 0;
+  interruptCount = 0;
   model?: string;
   permissionModes: string[] = [];
   flagSettings: Array<Record<string, unknown>> = [];
@@ -39,6 +40,10 @@ class FakeClaudeQuery implements ClaudeQueryLike, AsyncIterator<unknown> {
 
   close(): void {
     this.closeCount += 1;
+  }
+
+  async interrupt(): Promise<void> {
+    this.interruptCount += 1;
   }
 
   async setPermissionMode(mode: string): Promise<void> {
@@ -212,6 +217,7 @@ const brokenStreamQuery: ClaudeQueryLike = {
     };
   },
   close() {},
+  async interrupt() {},
   async setPermissionMode() {},
   async applyFlagSettings() {},
 };
@@ -224,6 +230,70 @@ if (brokenStream.isErr()) {
   assert.equal(brokenStream.error.code, "PROVIDER_UNAVAILABLE");
   assert.equal(brokenStream.error.retryable, true);
 }
+
+class InterruptibleClaudeQuery implements ClaudeQueryLike, AsyncIterator<unknown> {
+  private readonly iterator: AsyncIterator<ClaudeUserMessage>;
+  readonly started: Promise<void>;
+  private markStarted!: () => void;
+  private release?: () => void;
+  interrupted = 0;
+
+  constructor(prompt: AsyncIterable<ClaudeUserMessage>) {
+    this.iterator = prompt[Symbol.asyncIterator]();
+    this.started = new Promise<void>((resolve) => { this.markStarted = resolve; });
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<unknown> {
+    return this;
+  }
+
+  async next(): Promise<IteratorResult<unknown>> {
+    const next = await this.iterator.next();
+    if (next.done) return { done: true, value: undefined };
+    this.markStarted();
+    await new Promise<void>((resolve) => { this.release = resolve; });
+    return {
+      done: false,
+      value: { type: "result", session_id: "claude_session_interrupt", result: "late response" },
+    };
+  }
+
+  async interrupt(): Promise<void> {
+    this.interrupted += 1;
+    this.release?.();
+  }
+
+  close(): void {}
+
+  async setPermissionMode(): Promise<void> {}
+
+  async applyFlagSettings(): Promise<void> {}
+}
+
+let interruptQuery: InterruptibleClaudeQuery | undefined;
+const interruptRuntimeResult = await new ClaudeLocalAgentDriver(({ prompt }) => {
+  interruptQuery = new InterruptibleClaudeQuery(prompt);
+  return interruptQuery;
+}, { PATH: "/usr/bin" }).createRuntime(context);
+assert.equal(interruptRuntimeResult.isOk(), true);
+if (interruptRuntimeResult.isErr()) throw interruptRuntimeResult.error;
+const interruptRuntime = interruptRuntimeResult.value;
+const abortController = new AbortController();
+const pendingTurn = interruptRuntime.run({
+  prompt: "hold",
+  workspaceRoot: "/tmp/project",
+  signal: abortController.signal,
+});
+await interruptQuery!.started;
+abortController.abort();
+const interrupted = await pendingTurn;
+assert.equal(interrupted.isErr(), true);
+if (interrupted.isErr()) {
+  assert.equal(interrupted.error.code, "PROVIDER_CANCELLED");
+  assert.equal(interrupted.error.provider, "claude");
+}
+assert.equal(interruptQuery!.interrupted, 1);
+await interruptRuntime.close();
 
 await assert.rejects(
   new ClaudeLocalAgentDriver(async () => {

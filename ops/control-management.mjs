@@ -298,62 +298,61 @@ export async function serviceAction(options,target,action,controller=createServi
   if(!['devspace','tunnel','all'].includes(target))return {ok:false,status:404,error:'Unknown service target.'};
   if(!controller.available('devspace')||(target!=='devspace'&&!controller.available('tunnel')))return {ok:false,status:404,error:'Managed service is unavailable.'};
   const mode=options.configPath?loadControlSettings(options).tunnel_mode:'Remote';
-  const perform=async()=>{
+  let sequence;
   if(mode==='Quick'){
     if(!controller.available('tunnel'))return {ok:false,status:409,error:'Quick Tunnel requires a managed cloudflared service.'};
     if(target==='devspace'){
       if(action!=='stop'&&(controller.state('tunnel').status!=='active'||!readQuickUrl(options)))
         return {ok:false,status:409,error:'Quick Tunnel must be active and have a generated public URL before DevSpace starts.'};
-      const error=await applyService(controller,'devspace',action,mode);
-      return error?{ok:false,status:500,error}:{ok:true,status:200,target,action,tunnel_mode:mode};
-    }
-    if(target==='all'&&action==='stop'){
-      const first=await applyService(controller,'devspace','stop',mode);
-      const error=first||await applyService(controller,'tunnel','stop',mode);
-      try{rmSync(quickUrlFile(options),{force:true});}catch{}
-      return error?{ok:false,status:500,error}:{ok:true,status:200,target,action,tunnel_mode:mode};
-    }
-    if(target==='tunnel'&&action==='stop'){
-      const error=await applyService(controller,'tunnel','stop',mode);
-      try{rmSync(quickUrlFile(options),{force:true});}catch{}
-      return error?{ok:false,status:500,error}:{ok:true,status:200,target,action,tunnel_mode:mode};
-    }
-    const tunnelAlreadyActive=controller.state('tunnel').status==='active';
-    const existingQuick=readQuickUrl(options);
-    if(target==='all'&&action==='restart'){
-      const stopError=await applyService(controller,'devspace','stop',mode);
-      if(stopError)return {ok:false,status:500,error:stopError};
-    }
-    let quickOrigin='';
-    if(action==='start'&&tunnelAlreadyActive&&existingQuick){
-      quickOrigin=existingQuick;
+      sequence=[['devspace',action]];
+    }else if(action==='stop'){
+      sequence=target==='all'?[['devspace','stop'],['tunnel','stop']]:[['tunnel','stop']];
     }else{
-      try{rmSync(quickUrlFile(options),{force:true});}catch{}
-      const tunnelAction=action==='restart'||tunnelAlreadyActive?'restart':'start';
-      const tunnelError=await applyService(controller,'tunnel',tunnelAction,mode);
-      if(tunnelError)return {ok:false,status:500,error:tunnelError};
-      quickOrigin=await waitForQuickUrl(options);
+      const tunnelActive=controller.state('tunnel').status==='active';
+      const runtimeActive=controller.state('devspace').status==='active';
+      if(action==='start'&&tunnelActive){
+        // Starting an active Tunnel must not rotate its URL or restart Runtime.
+        sequence=target==='all'&&!runtimeActive?[['devspace','start']]:[];
+      }else{
+        const stopRuntime=target==='all'&&action==='restart'&&runtimeActive;
+        sequence=[
+          ...(stopRuntime?[['devspace','stop']]:[]),
+          ['tunnel',action==='restart'?'restart':'start'],
+          ['devspace',runtimeActive&&!stopRuntime?'restart':'start']
+        ];
+      }
     }
-    if(!quickOrigin)return {ok:false,status:504,error:'Quick Tunnel started but no trycloudflare.com URL was observed within 20 seconds.'};
-    const devspaceAction=controller.state('devspace').status==='active'?'restart':'start';
-    const devspaceError=await applyService(controller,'devspace',devspaceAction,mode);
-    if(devspaceError)return {ok:false,status:500,error:devspaceError};
-    return {ok:true,status:200,target,action,tunnel_mode:mode,quick_public_origin:quickOrigin};
+  }else{
+    sequence=target==='devspace'
+      ? [['devspace',action]]
+      : target==='tunnel'
+        ? [['tunnel',action]]
+        : action==='stop'
+          ? [['tunnel','stop'],['devspace','stop']]
+          : [['devspace',action],['tunnel',action]];
   }
-  const sequence=target==='devspace'
-    ? [['devspace',action]]
-    : target==='tunnel'
-      ? [['tunnel',action]]
-      : action==='stop'
-        ? [['tunnel','stop'],['devspace','stop']]
-        : [['devspace',action],['tunnel',action]];
-  for(const [name,unitAction] of sequence){
-    const error=await applyService(controller,name,unitAction,mode);
-    if(error)return {ok:false,status:500,error};
-  }
-  return {ok:true,status:200,target,action};
+  const perform=async()=>{
+    let quickOrigin=mode==='Quick'?readQuickUrl(options):'';
+    for(const [name,unitAction] of sequence){
+      if(mode==='Quick'&&name==='tunnel'&&unitAction!=='stop'){
+        try{rmSync(quickUrlFile(options),{force:true});}catch{}
+      }
+      if(mode==='Quick'&&name==='devspace'&&unitAction!=='stop'&&!quickOrigin)
+        return {ok:false,status:409,error:'Quick Tunnel must have a generated public URL before DevSpace starts.'};
+      const error=await applyService(controller,name,unitAction,mode);
+      if(error)return {ok:false,status:500,error};
+      if(mode==='Quick'&&name==='tunnel'){
+        if(unitAction==='stop'){
+          try{rmSync(quickUrlFile(options),{force:true});}catch{}
+        }else{
+          quickOrigin=await waitForQuickUrl(options);
+          if(!quickOrigin)return {ok:false,status:504,error:'Quick Tunnel started but no trycloudflare.com URL was observed within 20 seconds.'};
+        }
+      }
+    }
+    return {ok:true,status:200,target,action,...(mode==='Quick'?{tunnel_mode:mode,quick_public_origin:quickOrigin}: {})};
   };
-  return (target!=='tunnel'&&(action!=='start'||target==='all')||target==='tunnel'&&mode==='Quick'&&action==='restart')
+  return sequence.some(([name,unitAction])=>name==='devspace'&&unitAction!=='start')
     ? withRuntimeRestartGuard(options,perform)
     : perform();
 }
