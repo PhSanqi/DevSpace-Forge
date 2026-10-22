@@ -518,7 +518,7 @@ FLAP_WINDOW_SECONDS="\${DEVSPACE_WATCHDOG_FLAP_WINDOW_SECONDS:-120}"
 FLAP_THRESHOLD="\${DEVSPACE_WATCHDOG_FLAP_THRESHOLD:-2}"
 FLAP_ORIGIN_WINDOW_SECONDS="\${DEVSPACE_WATCHDOG_FLAP_ORIGIN_WINDOW_SECONDS:-30}"
 RESTART_COOLDOWN_SECONDS="\${DEVSPACE_WATCHDOG_RESTART_COOLDOWN_SECONDS:-600}"
-HA_RESTART_MAX="\${DEVSPACE_WATCHDOG_HA_RESTART_MAX:-2}"
+HA_HEALTHY_MIN="\${DEVSPACE_WATCHDOG_HA_HEALTHY_MIN:-2}"
 HA_FAILURE_THRESHOLD="\${DEVSPACE_WATCHDOG_HA_FAILURE_THRESHOLD:-3}"
 mkdir -p "\$STATE_DIR"
 exec 9>"\$STATE_DIR/cloudflared-watchdog.lock"
@@ -601,15 +601,15 @@ else
 fi
 
 if ha="\$(read_ha)"; then
-  if [[ "\$ha" == 4 ]]; then
+  if (( ha >= HA_HEALTHY_MIN )); then
     write_count "\$HA_COUNT_FILE" 0
-  elif (( ha <= HA_RESTART_MAX )); then
+  elif (( ha == 0 )); then
     ha_count=\$(( \$(read_count "\$HA_COUNT_FILE") + 1 ))
     write_count "\$HA_COUNT_FILE" "\$ha_count"
-    echo "watchdog: dedicated tunnel HA severely degraded (\$ha/4; observation \$ha_count/\$HA_FAILURE_THRESHOLD)"
+    echo "watchdog: dedicated tunnel HA unavailable (0/\${HA_HEALTHY_MIN}; observation \$ha_count/\$HA_FAILURE_THRESHOLD)"
   else
     write_count "\$HA_COUNT_FILE" 0
-    echo "watchdog: dedicated tunnel HA degraded (\$ha/4); restart suppressed while redundant connections remain"
+    echo "watchdog: dedicated tunnel HA degraded (\${ha}/\${HA_HEALTHY_MIN}); restart suppressed while one connector remains"
   fi
 else
   write_count "\$HA_COUNT_FILE" 0
@@ -624,18 +624,21 @@ if (( flaps > 0 )); then
   echo "watchdog: recent dedicated tunnel termination events=\$flaps within \${FLAP_WINDOW_SECONDS}s"
 fi
 
-if (( origin_healthy == 0 && fast_flaps >= 1 )); then
-  reason=origin-failed-after-tunnel-flap
-elif (( origin_count >= 3 )); then
-  reason=origin-unreachable
-elif (( ha_count >= HA_FAILURE_THRESHOLD )); then
-  reason=ha-severely-degraded
-elif (( flaps >= FLAP_THRESHOLD )); then
-  if (( origin_healthy == 1 )); then
-    echo 'watchdog: quic-flapping observed; restart suppressed while public origin remains healthy'
-  else
-    echo 'watchdog: quic-flapping observed; waiting for an availability restart threshold'
+# Public-origin and flap probes are auxiliary evidence only. They must not
+# restart an otherwise connected tunnel, because the host's own public path can
+# transiently fail while cloudflared still has healthy edge connections.
+if (( origin_healthy == 0 )); then
+  if (( fast_flaps >= 1 )); then
+    echo 'watchdog: public origin failed after a tunnel flap; auxiliary signal only'
+  elif (( origin_count >= 3 )); then
+    echo 'watchdog: public origin remains unreachable; auxiliary signal only'
   fi
+fi
+if (( flaps >= FLAP_THRESHOLD )); then
+  echo "watchdog: recent tunnel flaps=\$flaps; restart suppressed unless HA reaches zero repeatedly"
+fi
+if (( ha_count >= HA_FAILURE_THRESHOLD )); then
+  reason=ha-zero
 fi
 [[ -n "\$reason" ]] || exit 0
 
@@ -653,13 +656,13 @@ systemctl --user restart "\$TUNNEL_SERVICE"
 attempts="\${DEVSPACE_WATCHDOG_RECOVERY_ATTEMPTS:-15}"
 delay="\${DEVSPACE_WATCHDOG_RECOVERY_DELAY:-2}"
 for ((i=1; i<=attempts; i++)); do
-  if probe_200 "\$LOCAL_URL" && probe_origin && ha="\$(read_ha)" && [[ "\$ha" == 4 ]]; then
-    echo 'watchdog: recovered; dedicated tunnel HA=4/4 and local/origin healthy'
+  if probe_200 "\$LOCAL_URL" && ha="\$(read_ha)" && (( ha >= HA_HEALTHY_MIN )); then
+    echo "watchdog: recovered; dedicated tunnel HA=\${ha}/\${HA_HEALTHY_MIN}+ and local origin healthy"
     exit 0
   fi
   sleep "\$delay"
 done
-echo 'watchdog: restart completed but full HA/origin recovery is unverified' >&2
+echo 'watchdog: restart completed but healthy HA/local-origin recovery is unverified' >&2
 exit 1
 EOF
   chmod 0755 "$INSTALL_ROOT/bin/check-cloudflared"
